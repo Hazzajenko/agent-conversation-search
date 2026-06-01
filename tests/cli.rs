@@ -238,6 +238,43 @@ fn files_flag_prints_only_the_matching_path() {
 }
 
 #[test]
+fn no_color_or_piped_output_has_no_ansi_codes() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"please highlight this"}}"#,
+    );
+
+    cmd.env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("highlight")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("highlight"))
+        .stdout(predicates::str::contains("\u{1b}[").not());
+}
+
+#[test]
+fn color_is_emitted_when_forced() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"please highlight this"}}"#,
+    );
+
+    cmd.env_remove("NO_COLOR")
+        .env("CLICOLOR_FORCE", "1")
+        .arg("highlight")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{1b}["));
+}
+
+#[test]
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

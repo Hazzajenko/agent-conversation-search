@@ -414,38 +414,61 @@ fn role_label(role: Role) -> &'static str {
 /// end that was cut. If the Match cannot be located in the collapsed text
 /// (e.g. it spanned whitespace that collapsed), the window falls back to the
 /// head of the text.
-fn centered_snippet(text: &str, matcher: &Matcher) -> String {
+fn centered_snippet(text: &str, matcher: &Matcher, color: bool) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = collapsed.chars().collect();
-    if chars.len() <= SNIPPET_MAX_CHARS {
-        return collapsed;
-    }
 
     // Locate the Match in char indices (regex gives byte offsets).
-    let (match_start, match_end) = match matcher.find(&collapsed) {
-        Some((b0, b1)) => (
-            collapsed[..b0].chars().count(),
-            collapsed[..b1].chars().count(),
-        ),
-        None => (0, 0),
-    };
+    let span = matcher.find(&collapsed).map(|(b0, b1)| {
+        (collapsed[..b0].chars().count(), collapsed[..b1].chars().count())
+    });
 
-    // Center the window on the Match, clamped to the text bounds.
-    let match_len = match_end - match_start;
-    let pad = SNIPPET_MAX_CHARS.saturating_sub(match_len) / 2;
-    let mut start = match_start.saturating_sub(pad);
-    let end = (start + SNIPPET_MAX_CHARS).min(chars.len());
-    start = end.saturating_sub(SNIPPET_MAX_CHARS).min(start);
+    // Window: the whole text if it fits, otherwise SNIPPET_MAX_CHARS centered
+    // on the Match (or the head if the Match could not be located).
+    let (start, end) = if chars.len() <= SNIPPET_MAX_CHARS {
+        (0, chars.len())
+    } else {
+        let (ms, me) = span.unwrap_or((0, 0));
+        let pad = SNIPPET_MAX_CHARS.saturating_sub(me - ms) / 2;
+        let mut s = ms.saturating_sub(pad);
+        let e = (s + SNIPPET_MAX_CHARS).min(chars.len());
+        s = e.saturating_sub(SNIPPET_MAX_CHARS).min(s);
+        (s, e)
+    };
 
     let mut out = String::new();
     if start > 0 {
         out.push('…');
     }
-    out.extend(&chars[start..end]);
+    push_window(&mut out, &chars, start, end, span, color);
     if end < chars.len() {
         out.push('…');
     }
     out
+}
+
+/// Append `chars[start..end]` to `out`, highlighting the portion that overlaps
+/// the Match `span` (in char indices) when `color` is set.
+fn push_window(
+    out: &mut String,
+    chars: &[char],
+    start: usize,
+    end: usize,
+    span: Option<(usize, usize)>,
+    color: bool,
+) {
+    use owo_colors::OwoColorize;
+
+    let highlight = span.filter(|_| color).map(|(ms, me)| (ms.max(start), me.min(end)));
+    match highlight {
+        Some((hs, he)) if hs < he => {
+            out.extend(&chars[start..hs]);
+            let matched: String = chars[hs..he].iter().collect();
+            out.push_str(&matched.black().on_bright_yellow().to_string());
+            out.extend(&chars[he..end]);
+        }
+        _ => out.extend(&chars[start..end]),
+    }
 }
 
 /// The `YYYY-MM-DD` date prefix of an ISO 8601 timestamp, or `None` if the
@@ -471,7 +494,12 @@ pub fn format_paths(results: &[SessionMatches]) -> String {
 /// line per Match. At most `max_per_session` Matches are shown per Session
 /// (`0` = unlimited), with a `… +N more matches` line when some are hidden.
 /// An empty result set renders a clear "no matches" line.
-pub fn format_results(results: &[SessionMatches], matcher: &Matcher, max_per_session: usize) -> String {
+pub fn format_results(
+    results: &[SessionMatches],
+    matcher: &Matcher,
+    max_per_session: usize,
+    color: bool,
+) -> String {
     if results.is_empty() {
         return "No matches.\n".to_string();
     }
@@ -495,7 +523,11 @@ pub fn format_results(results: &[SessionMatches], matcher: &Matcher, max_per_ses
             s.matches.len().min(max_per_session)
         };
         for m in &s.matches[..shown] {
-            out.push_str(&format!("  {}: {}\n", role_label(m.role), centered_snippet(&m.text, matcher)));
+            out.push_str(&format!(
+                "  {}: {}\n",
+                role_label(m.role),
+                centered_snippet(&m.text, matcher, color)
+            ));
         }
         let hidden = s.matches.len() - shown;
         if hidden > 0 {
@@ -706,7 +738,7 @@ mod tests {
             ],
         )];
 
-        let out = format_results(&results, &lit("borrow"), 0);
+        let out = format_results(&results, &lit("borrow"), 0, false);
 
         assert!(out.contains("E--projects-demo"), "header shows project: {out}");
         assert!(out.contains("Borrow checker chat"), "header shows title: {out}");
@@ -724,7 +756,7 @@ mod tests {
         ]);
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
 
-        let out = format_results(&[s], &lit("borrow"), 0);
+        let out = format_results(&[s], &lit("borrow"), 0, false);
 
         assert!(out.contains("2026-06-01"), "header shows YYYY-MM-DD date: {out}");
         assert!(!out.contains("10:00:00"), "but not the time component: {out}");
@@ -738,7 +770,7 @@ mod tests {
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
         s.branch = Some("feature/search".into());
 
-        let out = format_results(&[s], &lit("borrow"), 0);
+        let out = format_results(&[s], &lit("borrow"), 0, false);
 
         assert!(out.contains("feature/search"), "header shows branch: {out}");
     }
@@ -748,7 +780,7 @@ mod tests {
         let text = format!("{}NEEDLE {}", "alpha ".repeat(60), "omega ".repeat(60));
         let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
 
-        let out = format_results(&[s], &lit("NEEDLE"), 0);
+        let out = format_results(&[s], &lit("NEEDLE"), 0, false);
         // The match line is the indented one carrying NEEDLE.
         let line = out.lines().find(|l| l.contains("NEEDLE")).expect("a line with the match");
 
@@ -767,7 +799,7 @@ mod tests {
         let text = format!("NEEDLE {}", "omega ".repeat(100));
         let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
 
-        let out = format_results(&[s], &lit("NEEDLE"), 0);
+        let out = format_results(&[s], &lit("NEEDLE"), 0, false);
         let snippet = out.lines().find(|l| l.contains("NEEDLE")).unwrap().trim_start();
 
         assert!(snippet.starts_with("user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
@@ -782,7 +814,7 @@ mod tests {
             vec![Segment { role: Role::User, text: "line one\n\n   line two".into() }],
         )];
 
-        let out = format_results(&results, &lit("line"), 0);
+        let out = format_results(&results, &lit("line"), 0, false);
 
         assert!(out.contains("line one line two"), "collapsed: {out}");
         assert!(!out.contains("line one\n"), "no embedded newline in snippet: {out}");
@@ -798,7 +830,7 @@ mod tests {
             Segment { role: Role::User, text: "match-five".into() },
         ]);
 
-        let out = format_results(&[s], &lit("match"), 3);
+        let out = format_results(&[s], &lit("match"), 3, false);
 
         assert!(out.contains("match-one") && out.contains("match-three"), "first 3 shown: {out}");
         assert!(!out.contains("match-four") && !out.contains("match-five"), "rest hidden: {out}");
@@ -814,7 +846,7 @@ mod tests {
             Segment { role: Role::User, text: "match-four".into() },
         ]);
 
-        let out = format_results(&[s], &lit("match"), 0);
+        let out = format_results(&[s], &lit("match"), 0, false);
 
         assert!(out.contains("match-four"), "no cap applied: {out}");
         assert!(!out.contains("more"), "no '+N more' line: {out}");
@@ -833,8 +865,31 @@ mod tests {
     }
 
     #[test]
+    fn color_on_highlights_the_match_with_ansi_codes() {
+        let s = session("p", Some("t"), vec![
+            Segment { role: Role::User, text: "the BORROW checker".into() },
+        ]);
+
+        let out = format_results(&[s], &lit("borrow"), 0, true);
+
+        assert!(out.contains('\u{1b}'), "ANSI escape present when colour is on: {out:?}");
+        assert!(out.contains("checker"), "surrounding text still present: {out:?}");
+    }
+
+    #[test]
+    fn color_off_emits_no_ansi_codes() {
+        let s = session("p", Some("t"), vec![
+            Segment { role: Role::User, text: "the BORROW checker".into() },
+        ]);
+
+        let out = format_results(&[s], &lit("borrow"), 0, false);
+
+        assert!(!out.contains('\u{1b}'), "no ANSI when colour is off: {out:?}");
+    }
+
+    #[test]
     fn renders_a_clear_message_when_there_are_no_matches() {
-        let out = format_results(&[], &lit("anything"), 0);
+        let out = format_results(&[], &lit("anything"), 0, false);
         assert!(out.to_lowercase().contains("no match"), "{out}");
     }
 
