@@ -1,6 +1,7 @@
 //! End-to-end tests driving the `ccsearch` binary as a user would.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use std::fs;
 
 /// Build a fixture Store under `store_root` containing one Session for the given
@@ -32,6 +33,64 @@ fn finds_a_match_in_the_current_projects_conversations() {
         .assert()
         .success()
         .stdout(predicates::str::contains("how to use tokio select"));
+}
+
+/// Plant a Session directly under a named Project directory in the Store.
+fn plant_project(store_root: &std::path::Path, project_name: &str, session_lines: &str) {
+    let dir = store_root.join("projects").join(project_name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("session.jsonl"), session_lines).unwrap();
+}
+
+#[test]
+fn all_flag_searches_projects_other_than_the_current_one() {
+    let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
+    let store = tempfile::tempdir().unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-other",
+        r#"{"type":"user","message":{"role":"user","content":"run the diesel migration"}}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--all")
+        .arg("diesel")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("run the diesel migration"));
+}
+
+#[test]
+fn project_flag_targets_a_named_project_by_substring() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-games-creature-game",
+        r#"{"type":"user","message":{"role":"user","content":"bean asset pipeline"}}"#,
+    );
+    plant_project(
+        store.path(),
+        "C--hacking-jplag",
+        r#"{"type":"user","message":{"role":"user","content":"bean counter unrelated"}}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--project")
+        .arg("creature")
+        .arg("bean")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bean asset pipeline"))
+        .stdout(predicates::str::contains("bean counter unrelated").not());
 }
 
 #[test]
