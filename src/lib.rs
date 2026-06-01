@@ -1294,6 +1294,76 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
     }
 }
 
+// --- --since: filtering Sessions by recency ------------------------------
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`). Hand-rolled to keep `ccsearch` free of a date-library
+/// dependency — the Store stores ISO 8601, which we otherwise only slice.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parse an ISO 8601 timestamp (or bare `YYYY-MM-DD`) to Unix seconds. Time and
+/// fractional/zone parts beyond `YYYY-MM-DDThh:mm:ss` are ignored. Returns
+/// `None` for anything that is not a well-formed date.
+fn parse_iso_to_unix(s: &str) -> Option<i64> {
+    if s.len() < 10 {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let (hour, min, sec) = if s.len() >= 19 && (bytes[10] == b'T' || bytes[10] == b' ') {
+        (s.get(11..13)?.parse().ok()?, s.get(14..16)?.parse().ok()?, s.get(17..19)?.parse().ok()?)
+    } else {
+        (0, 0, 0)
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + min * 60 + sec)
+}
+
+/// Parse a relative duration (`30s`, `1h`, `3d`, `2w`) to seconds, or `None` if
+/// it is not a `<number><unit>` with a known unit.
+fn parse_duration_secs(value: &str) -> Option<i64> {
+    let unit = value.chars().last()?;
+    let mult = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3_600,
+        'd' => 86_400,
+        'w' => 604_800,
+        _ => return None,
+    };
+    let n: i64 = value[..value.len() - unit.len_utf8()].parse().ok()?;
+    Some(n * mult)
+}
+
+/// Resolve a `--since` value to a cutoff in Unix seconds, given `now_unix`. A
+/// relative duration (`3d`) is `now - duration`; an absolute ISO date is the
+/// date itself. `None` if the value parses as neither.
+pub fn since_cutoff(value: &str, now_unix: i64) -> Option<i64> {
+    if let Some(secs) = parse_duration_secs(value) {
+        return Some(now_unix - secs);
+    }
+    parse_iso_to_unix(value)
+}
+
+/// Whether a Session's recency `timestamp` is at or after `cutoff_unix`. A
+/// missing or unparseable timestamp is treated as "too old" (excluded), so
+/// `--since` never silently keeps undateable Sessions.
+pub fn timestamp_is_since(timestamp: Option<&str>, cutoff_unix: i64) -> bool {
+    timestamp.and_then(parse_iso_to_unix).is_some_and(|t| t >= cutoff_unix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2242,6 +2312,44 @@ mod tests {
     #[test]
     fn format_failures_reports_cleanly_when_there_are_none() {
         assert!(format_failures(&[], 3, false).to_lowercase().contains("no failures"));
+    }
+
+    // --- --since recency filter ------------------------------------------
+
+    #[test]
+    fn parse_iso_to_unix_anchors_on_the_epoch() {
+        assert_eq!(parse_iso_to_unix("1970-01-01"), Some(0));
+        assert_eq!(parse_iso_to_unix("1970-01-02"), Some(86_400));
+        assert_eq!(parse_iso_to_unix("1970-01-01T01:00:00.000Z"), Some(3_600));
+    }
+
+    #[test]
+    fn since_parses_relative_durations_against_now() {
+        let now = 1_000_000;
+        assert_eq!(since_cutoff("1h", now), Some(now - 3_600));
+        assert_eq!(since_cutoff("3d", now), Some(now - 3 * 86_400));
+        assert_eq!(since_cutoff("2w", now), Some(now - 14 * 86_400));
+    }
+
+    #[test]
+    fn since_parses_an_absolute_iso_date() {
+        // The absolute form ignores `now`; the cutoff is the date itself.
+        assert_eq!(since_cutoff("2026-05-01", 999), parse_iso_to_unix("2026-05-01"));
+    }
+
+    #[test]
+    fn since_rejects_unparseable_values() {
+        assert_eq!(since_cutoff("yesterday", 0), None);
+        assert_eq!(since_cutoff("3x", 0), None);
+    }
+
+    #[test]
+    fn timestamp_is_since_excludes_older_missing_and_unparseable() {
+        let cutoff = parse_iso_to_unix("2026-05-01").unwrap();
+        assert!(timestamp_is_since(Some("2026-06-01T10:00:00.000Z"), cutoff), "newer kept");
+        assert!(!timestamp_is_since(Some("2026-04-01T10:00:00.000Z"), cutoff), "older excluded");
+        assert!(!timestamp_is_since(None, cutoff), "missing timestamp excluded");
+        assert!(!timestamp_is_since(Some("not a date"), cutoff), "unparseable excluded");
     }
 
     // --- session-id prefix resolution -----------------------------------
