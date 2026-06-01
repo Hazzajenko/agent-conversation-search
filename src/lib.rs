@@ -181,6 +181,49 @@ pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<Session
     results
 }
 
+/// Maximum number of characters shown for a single Match snippet.
+const SNIPPET_MAX_CHARS: usize = 200;
+
+fn role_label(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Title => "title",
+    }
+}
+
+/// Collapse a Record's text to a single readable line, truncated to
+/// [`SNIPPET_MAX_CHARS`]. Internal runs of whitespace (including newlines)
+/// become single spaces so a multi-line Prompt stays on one output line.
+fn one_line_snippet(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > SNIPPET_MAX_CHARS {
+        let head: String = collapsed.chars().take(SNIPPET_MAX_CHARS).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
+}
+
+/// Render search results as human- and Claude-readable text: each Session as a
+/// `project · title` header followed by one `role: snippet` line per Match.
+/// An empty result set renders a clear "no matches" line.
+pub fn format_results(results: &[SessionMatches]) -> String {
+    if results.is_empty() {
+        return "No matches.\n".to_string();
+    }
+    let mut out = String::new();
+    for s in results {
+        let title = s.title.as_deref().unwrap_or("(untitled)");
+        out.push_str(&format!("{} · {}\n", s.project, title));
+        for m in &s.matches {
+            out.push_str(&format!("  {}: {}\n", role_label(m.role), one_line_snippet(&m.text)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +312,58 @@ mod tests {
                 Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
             ]
         );
+    }
+
+    fn session(project: &str, title: Option<&str>, matches: Vec<Segment>) -> SessionMatches {
+        SessionMatches {
+            project: project.into(),
+            session_id: "11111111-2222-3333-4444-555555555555".into(),
+            path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
+            title: title.map(Into::into),
+            matches,
+        }
+    }
+
+    #[test]
+    fn formats_a_session_with_a_header_and_a_readable_line_per_match() {
+        let results = vec![session(
+            "E--projects-demo",
+            Some("Borrow checker chat"),
+            vec![
+                Segment { role: Role::Title, text: "Borrow checker chat".into() },
+                Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+            ],
+        )];
+
+        let out = format_results(&results);
+
+        assert!(out.contains("E--projects-demo"), "header shows project: {out}");
+        assert!(out.contains("Borrow checker chat"), "header shows title: {out}");
+        assert!(
+            out.contains("how do I satisfy the BORROW checker"),
+            "match text shown: {out}"
+        );
+        assert!(out.to_lowercase().contains("user"), "match labelled by role: {out}");
+    }
+
+    #[test]
+    fn collapses_multiline_match_text_onto_one_line() {
+        let results = vec![session(
+            "p",
+            Some("t"),
+            vec![Segment { role: Role::User, text: "line one\n\n   line two".into() }],
+        )];
+
+        let out = format_results(&results);
+
+        assert!(out.contains("line one line two"), "collapsed: {out}");
+        assert!(!out.contains("line one\n"), "no embedded newline in snippet: {out}");
+    }
+
+    #[test]
+    fn renders_a_clear_message_when_there_are_no_matches() {
+        let out = format_results(&[]);
+        assert!(out.to_lowercase().contains("no match"), "{out}");
     }
 
     #[test]
