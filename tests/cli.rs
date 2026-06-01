@@ -289,3 +289,157 @@ fn reports_cleanly_when_there_are_no_matches() {
         .success()
         .stdout(predicates::str::contains("No matches"));
 }
+
+#[test]
+fn explicit_search_verb_behaves_like_a_bare_query() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"how to use tokio select"}}"#,
+    );
+
+    cmd.arg("search")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("how to use tokio select"));
+}
+
+/// Plant a Session with a known id under a named Project and return its full id.
+fn plant_session(store_root: &std::path::Path, project: &str, id: &str, lines: &str) -> String {
+    let dir = store_root.join("projects").join(project);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{id}.jsonl")), lines).unwrap();
+    id.to_string()
+}
+
+#[test]
+fn show_renders_a_transcript_resolved_from_a_session_id_prefix() {
+    let store = tempfile::tempdir().unwrap();
+    let id = plant_session(
+        store.path(),
+        "E--projects-demo",
+        "4c28878f-c921-4892-8d26-78df5801f301",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"fix the failing build"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me run the tests."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"error[E0433]: failed to resolve"}]}}"#,
+        ]
+        .join("\n"),
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg(&id[..8]) // git-style prefix
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("you"))
+        .stdout(predicates::str::contains("fix the failing build"))
+        .stdout(predicates::str::contains("claude"))
+        .stdout(predicates::str::contains("→ Bash cargo test"))
+        .stdout(predicates::str::contains("✗ Bash FAILED"))
+        .stdout(predicates::str::contains("E0433"));
+}
+
+#[test]
+fn show_errors_cleanly_on_an_ambiguous_prefix() {
+    let store = tempfile::tempdir().unwrap();
+    let line = r#"{"type":"user","message":{"role":"user","content":"x"}}"#;
+    plant_session(store.path(), "E--projects-demo", "abc111-aaaa", line);
+    plant_session(store.path(), "E--projects-demo", "abc222-bbbb", line);
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg("abc")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"))
+        .stderr(predicates::str::contains("abc111-aaaa"))
+        .stderr(predicates::str::contains("abc222-bbbb"));
+}
+
+#[test]
+fn show_errors_cleanly_when_no_session_matches() {
+    let store = tempfile::tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "abc111-aaaa",
+        r#"{"type":"user","message":{"role":"user","content":"x"}}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg("zzz")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session matches"));
+}
+
+#[test]
+fn show_dash_reads_a_session_path_from_stdin() {
+    let store = tempfile::tempdir().unwrap();
+    let dir = store.path().join("projects").join("E--projects-demo");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("piped.jsonl");
+    fs::write(
+        &path,
+        r#"{"type":"user","message":{"role":"user","content":"piped in from a path"}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg("-")
+        .write_stdin(format!("{}\n", path.display()))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("piped in from a path"));
+}
+
+#[test]
+fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
+    let store = tempfile::tempdir().unwrap();
+    let id = plant_session(
+        store.path(),
+        "E--projects-demo",
+        "deadbeef-0000-0000-0000-000000000000",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"a secret rumination"},{"type":"text","text":"here is my reply"}]}}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg(&id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[thinking:"))
+        .stdout(predicates::str::contains("a secret rumination").not());
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg(&id[..8])
+        .arg("--thinking")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("a secret rumination"));
+}

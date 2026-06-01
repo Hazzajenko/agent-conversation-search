@@ -1,5 +1,6 @@
 //! `ccsearch` — search your local Claude Code conversation history.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -536,6 +537,353 @@ pub fn format_results(
         out.push('\n');
     }
     out
+}
+
+// --- show: resolving a Session and rendering it as a Transcript ---------
+
+/// The outcome of resolving a git-style session-id prefix against the whole
+/// Store (see ADR 0002). A session-id is globally unique, so resolution scans
+/// every Project — you often reopen a Session from a different Project than the
+/// cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRef {
+    /// Exactly one Session matched the prefix; here is its file path.
+    Unique(PathBuf),
+    /// More than one Session shares the prefix; here are their full session-ids
+    /// (sorted) so the caller can ask the user to disambiguate.
+    Ambiguous(Vec<String>),
+    /// No Session in the Store starts with the prefix.
+    NotFound,
+}
+
+/// Resolve `prefix` to a single Session file across the whole Store, git-style.
+///
+/// A full session-id that exactly equals an existing stem wins outright (so a
+/// complete id is never reported ambiguous against a longer one). Otherwise the
+/// prefix must match exactly one Session stem. Unreadable directories are
+/// skipped rather than failing resolution.
+pub fn resolve_session_prefix(projects_root: &Path, prefix: &str) -> SessionRef {
+    let mut matches: Vec<(String, PathBuf)> = Vec::new();
+    for dir in project_dir_paths(projects_root) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            if stem == prefix {
+                return SessionRef::Unique(path); // exact id wins, git-style
+            }
+            if stem.starts_with(prefix) {
+                matches.push((stem, path));
+            }
+        }
+    }
+    match matches.len() {
+        0 => SessionRef::NotFound,
+        1 => SessionRef::Unique(matches.pop().unwrap().1),
+        _ => {
+            matches.sort();
+            SessionRef::Ambiguous(matches.into_iter().map(|(stem, _)| stem).collect())
+        }
+    }
+}
+
+/// Which kind of turn a [`Turn`] is, and therefore how it is labelled. A user
+/// Message whose content is a plain string is a [`Prompt`](TurnKind::Prompt);
+/// a user Message carrying only `tool_result` blocks is mechanically-generated
+/// [`ToolOutput`](TurnKind::ToolOutput) and renders without a "you" header,
+/// because the person did not type it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnKind {
+    /// A user Message the person typed (rendered under `you`).
+    Prompt,
+    /// An assistant Message (rendered under `claude`).
+    Reply,
+    /// A user Message that is purely tool results (rendered header-less).
+    ToolOutput,
+}
+
+/// One renderable block within a [`Turn`]. Carries enough structure for the
+/// Transcript renderer to show compact tool one-liners and flag Failures —
+/// unlike a [`Segment`], which flattens everything to searchable text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnBlock {
+    /// A Prompt or Reply text block.
+    Text(String),
+    /// An assistant `thinking` block (collapsed unless `--thinking`).
+    Thinking(String),
+    /// A tool call: the tool name plus its key argument, if any.
+    ToolUse { name: String, arg: Option<String> },
+    /// A tool result, with whether it errored and the tool it came from (joined
+    /// via `tool_use_id`), if known.
+    ToolResult { is_error: bool, tool: Option<String>, text: String },
+}
+
+/// A single turn of a Transcript — one user or assistant Message Record, with
+/// its 1-based turn number (in Message order, the same numbering search emits
+/// for the handoff) and its renderable blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    pub number: usize,
+    pub kind: TurnKind,
+    pub blocks: Vec<TurnBlock>,
+}
+
+/// Keys whose value, if present, is the most informative one-liner argument for
+/// a tool call. Tried in order; the first string value wins. Keeping this list
+/// fixed (rather than dumping raw JSON) is what makes tool calls readable.
+const TOOL_ARG_KEYS: &[&str] = &["command", "file_path", "pattern", "path", "url", "query", "prompt"];
+
+/// The single most informative argument of a `tool_use` input object, or `None`
+/// if it carries none of the known keys.
+fn tool_key_arg(input: &serde_json::Value) -> Option<String> {
+    TOOL_ARG_KEYS
+        .iter()
+        .find_map(|key| input.get(*key).and_then(|v| v.as_str()).map(str::to_string))
+}
+
+/// Parse a whole Session file into its Transcript turns (Messages only — the
+/// noise Records are dropped). Done in two passes: first map every `tool_use`
+/// id to its tool name, then build the turns so a failed `tool_result` can be
+/// labelled with the tool that produced it.
+pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
+    let values: Vec<serde_json::Value> = session_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect();
+
+    // Pass 1: tool_use_id -> tool name, for labelling tool results.
+    let mut tool_names: HashMap<String, String> = HashMap::new();
+    for value in &values {
+        if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            if let (Some(id), Some(name)) = (
+                block.get("id").and_then(|i| i.as_str()),
+                block.get("name").and_then(|n| n.as_str()),
+            ) {
+                tool_names.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+
+    // Pass 2: build turns, numbering Messages 1-based in Record order.
+    let mut turns = Vec::new();
+    let mut number = 0;
+    for value in &values {
+        let blocks = match value.get("type").and_then(|t| t.as_str()) {
+            Some("user") => match value.pointer("/message/content") {
+                Some(c) if c.is_string() => {
+                    let prompt = c.as_str().unwrap();
+                    if prompt.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![TurnBlock::Text(prompt.to_string())]
+                    }
+                }
+                Some(c) if c.is_array() => {
+                    c.as_array().unwrap().iter().filter_map(|b| user_turn_block(b, &tool_names)).collect()
+                }
+                _ => Vec::new(),
+            },
+            Some("assistant") => value
+                .pointer("/message/content")
+                .and_then(|c| c.as_array())
+                .map(|bs| bs.iter().filter_map(assistant_turn_block).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if blocks.is_empty() {
+            continue;
+        }
+        number += 1;
+        let kind = match value.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => TurnKind::Reply,
+            // A user Message that is *only* tool results is mechanical output,
+            // not something the person typed.
+            _ if blocks.iter().all(|b| matches!(b, TurnBlock::ToolResult { .. })) => {
+                TurnKind::ToolOutput
+            }
+            _ => TurnKind::Prompt,
+        };
+        turns.push(Turn { number, kind, blocks });
+    }
+    turns
+}
+
+/// The value of `block[key]` as an owned string, but only if it is present and
+/// not blank. Used to drop empty `text`/`thinking` blocks (e.g. signature-only
+/// thinking) so they do not render as phantom turns.
+fn non_empty_text(block: &serde_json::Value, key: &str) -> Option<String> {
+    block
+        .get(key)
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Map one block of a user Message's `content` array to a [`TurnBlock`]. User
+/// array content is tool results (and occasionally text); a `tool_result`'s own
+/// `content` may be a string or an array of text blocks.
+fn user_turn_block(block: &serde_json::Value, tool_names: &HashMap<String, String>) -> Option<TurnBlock> {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("text") => non_empty_text(block, "text").map(TurnBlock::Text),
+        Some("tool_result") => {
+            let is_error = block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+            let text = match block.get("content") {
+                Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
+                Some(c) if c.is_array() => c
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            };
+            let tool = block
+                .get("tool_use_id")
+                .and_then(|i| i.as_str())
+                .and_then(|id| tool_names.get(id).cloned());
+            Some(TurnBlock::ToolResult { is_error, tool, text })
+        }
+        _ => None,
+    }
+}
+
+/// Map one block of an assistant Message's `content` array to a [`TurnBlock`],
+/// or `None` for blocks that render nothing.
+fn assistant_turn_block(block: &serde_json::Value) -> Option<TurnBlock> {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("text") => non_empty_text(block, "text").map(TurnBlock::Text),
+        // Signature-only `thinking` blocks carry no readable text — drop them
+        // rather than render a phantom turn.
+        Some("thinking") => non_empty_text(block, "thinking").map(TurnBlock::Thinking),
+        Some("tool_use") => {
+            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
+            let arg = block.get("input").and_then(tool_key_arg);
+            Some(TurnBlock::ToolUse { name, arg })
+        }
+        _ => None,
+    }
+}
+
+/// Width that Transcript prose is word-wrapped to before its 2-space indent.
+const WRAP_WIDTH: usize = 88;
+/// Maximum characters of a tool one-liner (call argument or result) shown.
+const TOOL_LINE_MAX: usize = 160;
+
+/// Collapse `text`'s internal whitespace to single spaces and truncate to at
+/// most `max` characters, appending `…` when cut. Used for the one-liner tool
+/// call/result renderings.
+fn one_line(text: &str, max: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = collapsed.chars().collect();
+    if chars.len() <= max {
+        collapsed
+    } else {
+        let cut: String = chars[..max].iter().collect();
+        format!("{cut}…")
+    }
+}
+
+/// Greedy word-wrap `text` to `width` columns, preserving its existing line
+/// breaks (each input line is wrapped independently; blank lines are kept).
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        lines.push(current);
+    }
+    lines
+}
+
+/// Append `text` word-wrapped and indented 2 spaces, one line per wrapped line.
+fn push_wrapped(out: &mut String, text: &str) {
+    for line in wrap(text, WRAP_WIDTH) {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str("  ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+}
+
+/// Render parsed [`Turn`]s as a human-readable Transcript (see CONTEXT.md):
+/// `you` / `claude` speaker headers, prose wrapped readably, tool calls as
+/// compact one-liners, Failures flagged loudly with `✗ … FAILED`. Thinking is
+/// collapsed to a one-line count unless `show_thinking` is set. A Session with
+/// no Messages renders a clear placeholder.
+pub fn format_transcript(turns: &[Turn], show_thinking: bool) -> String {
+    if turns.is_empty() {
+        return "(no messages)\n".to_string();
+    }
+    let mut out = String::new();
+    for turn in turns {
+        match turn.kind {
+            TurnKind::Prompt => out.push_str("you\n"),
+            TurnKind::Reply => out.push_str("claude\n"),
+            TurnKind::ToolOutput => {} // mechanical tool output: no speaker header
+        }
+        for block in &turn.blocks {
+            render_block(&mut out, block, show_thinking);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render one [`TurnBlock`] into the Transcript.
+fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
+    match block {
+        TurnBlock::Text(text) => push_wrapped(out, text),
+        TurnBlock::Thinking(text) => {
+            if show_thinking {
+                out.push_str("  [thinking]\n");
+                push_wrapped(out, text);
+            } else {
+                let lines = text.lines().count().max(1);
+                let unit = if lines == 1 { "line" } else { "lines" };
+                out.push_str(&format!("  [thinking: {lines} {unit} hidden — pass --thinking]\n"));
+            }
+        }
+        TurnBlock::ToolUse { name, arg } => match arg {
+            Some(arg) => out.push_str(&format!("  → {name} {}\n", one_line(arg, TOOL_LINE_MAX))),
+            None => out.push_str(&format!("  → {name}\n")),
+        },
+        TurnBlock::ToolResult { is_error, tool, text } => {
+            if *is_error {
+                let label = tool.as_deref().unwrap_or("tool");
+                out.push_str(&format!("  ✗ {label} FAILED: {}\n", one_line(text, TOOL_LINE_MAX)));
+            } else {
+                out.push_str(&format!("  ← {}\n", one_line(text, TOOL_LINE_MAX)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1176,6 +1524,193 @@ mod tests {
                 Segment { role: Role::Assistant, text: "Then run it.".into() },
             ]
         );
+    }
+
+    // --- session-id prefix resolution -----------------------------------
+
+    /// Plant an (empty-content) Session file under a Project so its stem is
+    /// discoverable by prefix resolution.
+    fn plant(projects_root: &Path, project: &str, session_id: &str) -> PathBuf {
+        let dir = projects_root.join(project);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session_id}.jsonl"));
+        fs::write(&path, "").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_unique_prefix_resolves_to_one_session_across_the_whole_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let target = plant(root, "E--projects-a", "4c28878f-c921-4892-8d26-78df5801f301");
+        // A Session in a *different* Project — prefix resolution spans the Store.
+        plant(root, "C--hacking-b", "9999aaaa-0000-0000-0000-000000000000");
+
+        assert_eq!(
+            resolve_session_prefix(root, "4c28878f"),
+            SessionRef::Unique(target)
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_lists_every_matching_session_id_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, "E--projects-a", "abc222-second");
+        plant(root, "E--projects-a", "abc111-first");
+
+        assert_eq!(
+            resolve_session_prefix(root, "abc"),
+            SessionRef::Ambiguous(vec!["abc111-first".into(), "abc222-second".into()])
+        );
+    }
+
+    #[test]
+    fn a_prefix_matching_nothing_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, "E--projects-a", "abc111-first");
+
+        assert_eq!(resolve_session_prefix(root, "zzz"), SessionRef::NotFound);
+    }
+
+    #[test]
+    fn an_exact_full_id_wins_over_a_longer_session_that_shares_it() {
+        // A complete session-id must never be reported ambiguous just because a
+        // longer id starts with the same characters.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let exact = plant(root, "E--projects-a", "abc111");
+        plant(root, "E--projects-a", "abc111-longer");
+
+        assert_eq!(resolve_session_prefix(root, "abc111"), SessionRef::Unique(exact));
+    }
+
+    // --- transcript parsing + rendering ----------------------------------
+
+    #[test]
+    fn parses_messages_into_turns_dropping_noise_records() {
+        let session = [
+            r#"{"type":"queue-operation","operation":"enqueue"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"how do I borrow check"}}"#,
+            r#"{"type":"ai-title","aiTitle":"Borrow chat"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"use a reference"}]}}"#,
+        ]
+        .join("\n");
+
+        let turns = parse_transcript(&session);
+
+        assert_eq!(turns.len(), 2, "only the two Messages become turns");
+        assert_eq!(turns[0].number, 1);
+        assert_eq!(turns[0].kind, TurnKind::Prompt);
+        assert_eq!(turns[0].blocks, vec![TurnBlock::Text("how do I borrow check".into())]);
+        assert_eq!(turns[1].number, 2);
+        assert_eq!(turns[1].kind, TurnKind::Reply);
+    }
+
+    #[test]
+    fn a_tool_use_keeps_only_its_key_argument() {
+        let session = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"src/lib.rs","limit":50}}]}}"#;
+
+        let turns = parse_transcript(session);
+
+        assert_eq!(
+            turns[0].blocks,
+            vec![TurnBlock::ToolUse { name: "Read".into(), arg: Some("src/lib.rs".into()) }]
+        );
+    }
+
+    #[test]
+    fn a_failed_tool_result_is_labelled_with_the_tool_that_produced_it() {
+        // The tool name is joined from the assistant tool_use via tool_use_id.
+        let session = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"Exit code 101"}]}}"#,
+        ]
+        .join("\n");
+
+        let turns = parse_transcript(&session);
+
+        assert_eq!(turns[1].kind, TurnKind::ToolOutput, "a pure tool_result turn is header-less");
+        assert_eq!(
+            turns[1].blocks,
+            vec![TurnBlock::ToolResult {
+                is_error: true,
+                tool: Some("Bash".into()),
+                text: "Exit code 101".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn renders_speaker_labels_and_a_compact_tool_one_liner() {
+        let turns = vec![
+            Turn { number: 1, kind: TurnKind::Prompt, blocks: vec![TurnBlock::Text("fix the build".into())] },
+            Turn {
+                number: 2,
+                kind: TurnKind::Reply,
+                blocks: vec![
+                    TurnBlock::Text("Let me look.".into()),
+                    TurnBlock::ToolUse { name: "Bash".into(), arg: Some("cargo build".into()) },
+                ],
+            },
+        ];
+
+        let out = format_transcript(&turns, false);
+
+        assert!(out.contains("you\n  fix the build"), "user header + prompt: {out}");
+        assert!(out.contains("claude\n  Let me look."), "assistant header + reply: {out}");
+        assert!(out.contains("→ Bash cargo build"), "compact tool one-liner: {out}");
+        assert!(!out.contains("{"), "no raw JSON in the transcript: {out}");
+    }
+
+    #[test]
+    fn a_failed_tool_result_is_flagged_loudly() {
+        let turns = vec![Turn {
+            number: 1,
+            kind: TurnKind::ToolOutput,
+            blocks: vec![TurnBlock::ToolResult {
+                is_error: true,
+                tool: Some("Bash".into()),
+                text: "error[E0433]: failed to resolve".into(),
+            }],
+        }];
+
+        let out = format_transcript(&turns, false);
+
+        assert!(out.contains("✗ Bash FAILED"), "failure flagged loudly: {out}");
+        assert!(out.contains("E0433"), "error text carried through: {out}");
+        assert!(!out.starts_with("you"), "tool output has no speaker header: {out}");
+    }
+
+    #[test]
+    fn thinking_is_collapsed_by_default_and_expands_with_the_flag() {
+        let turns = vec![Turn {
+            number: 1,
+            kind: TurnKind::Reply,
+            blocks: vec![TurnBlock::Thinking("step one\nstep two\nstep three".into())],
+        }];
+
+        let collapsed = format_transcript(&turns, false);
+        assert!(collapsed.contains("[thinking: 3 lines hidden"), "collapsed with a count: {collapsed}");
+        assert!(!collapsed.contains("step two"), "thinking text hidden by default: {collapsed}");
+
+        let expanded = format_transcript(&turns, true);
+        assert!(expanded.contains("step two"), "--thinking reveals the text: {expanded}");
+    }
+
+    #[test]
+    fn a_signature_only_thinking_block_is_dropped_not_rendered_as_a_phantom_turn() {
+        // Real data: a `thinking` block can carry only a signature and an empty
+        // `thinking` string. It must not become a turn or a misleading count.
+        let session = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"abc"}]}}"#;
+
+        assert!(parse_transcript(session).is_empty(), "empty thinking yields no turn");
+    }
+
+    #[test]
+    fn an_empty_session_renders_a_clear_placeholder() {
+        assert_eq!(format_transcript(&parse_transcript(""), false), "(no messages)\n");
     }
 
     proptest::proptest! {
