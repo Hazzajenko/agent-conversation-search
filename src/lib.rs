@@ -297,7 +297,7 @@ mod tests {
             ],
         );
 
-        let results = search_project_dirs(&[proj.clone()], "borrow");
+        let results = search_project_dirs(std::slice::from_ref(&proj), "borrow");
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
