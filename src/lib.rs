@@ -320,27 +320,7 @@ pub fn search_project_dirs(
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Vec<SessionMatches> {
-    // Search each distinct Project once, even if a dir is passed more than once.
-    let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
-    dirs.sort();
-    dirs.dedup();
-
-    // Enumerate every Session file across the dirs, then scan them in parallel.
-    let sessions: Vec<(String, PathBuf)> = dirs
-        .iter()
-        .flat_map(|dir| {
-            let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-                .map(move |path| (project.clone(), path))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
+    let sessions = enumerate_sessions(project_dirs);
     let mut results: Vec<SessionMatches> = sessions
         .par_iter()
         .filter_map(|(project, path)| search_one_session(project, path, matcher, content))
@@ -352,6 +332,27 @@ pub fn search_project_dirs(
     // regardless of the parallel completion order.
     results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
     results
+}
+
+/// Every Session file as `(project name, path)` across the given Project dirs,
+/// each distinct dir scanned once. Shared by the search and failure scans.
+fn enumerate_sessions(project_dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs.iter()
+        .flat_map(|dir| {
+            let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+                .map(move |path| (project.clone(), path))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Scan a single Session file, returning its Matches if any. A file that cannot
@@ -505,6 +506,26 @@ fn short_id(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
 
+/// The one-line Session header shared by search and `--failed`: leads with the
+/// short session-id (paste-able into `show`), then `project · title · date ·
+/// branch`, omitting date/branch when absent.
+fn session_header(
+    short: &str,
+    project: &str,
+    title: Option<&str>,
+    timestamp: Option<&str>,
+    branch: Option<&str>,
+) -> String {
+    let mut header = vec![short.to_string(), project.to_string(), title.unwrap_or("(untitled)").to_string()];
+    if let Some(date) = timestamp.and_then(date_prefix) {
+        header.push(date.to_string());
+    }
+    if let Some(branch) = branch {
+        header.push(branch.to_string());
+    }
+    header.join(" · ")
+}
+
 /// Render just the matching Session file paths, one per line (grep `-l` style),
 /// in result order — for piping into other tools. An empty result set renders
 /// nothing.
@@ -535,17 +556,13 @@ pub fn format_results(
     let mut out = String::new();
     for s in results {
         let short = short_id(&s.session_id);
-        let title = s.title.as_deref().unwrap_or("(untitled)");
-        // Lead with the short session-id so it can be copied straight into
-        // `show` (ADR 0002), then the existing project · title · date · branch.
-        let mut header = vec![short.clone(), s.project.clone(), title.to_string()];
-        if let Some(date) = s.timestamp.as_deref().and_then(date_prefix) {
-            header.push(date.to_string());
-        }
-        if let Some(branch) = s.branch.as_deref() {
-            header.push(branch.to_string());
-        }
-        out.push_str(&header.join(" · "));
+        out.push_str(&session_header(
+            &short,
+            &s.project,
+            s.title.as_deref(),
+            s.timestamp.as_deref(),
+            s.branch.as_deref(),
+        ));
         out.push('\n');
 
         // A cap of 0 means show every Match.
@@ -785,17 +802,7 @@ fn user_turn_block(block: &serde_json::Value, tool_names: &HashMap<String, Strin
         Some("text") => non_empty_text(block, "text").map(TurnBlock::Text),
         Some("tool_result") => {
             let is_error = block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-            let text = match block.get("content") {
-                Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
-                Some(c) if c.is_array() => c
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => String::new(),
-            };
+            let text = tool_result_text(block);
             let tool = block
                 .get("tool_use_id")
                 .and_then(|i| i.as_str())
@@ -803,6 +810,22 @@ fn user_turn_block(block: &serde_json::Value, tool_names: &HashMap<String, Strin
             Some(TurnBlock::ToolResult { is_error, tool, text })
         }
         _ => None,
+    }
+}
+
+/// The text of a `tool_result` block: its `content`, which may be a plain
+/// string or an array of text blocks (joined). Empty when neither is present.
+fn tool_result_text(block: &serde_json::Value) -> String {
+    match block.get("content") {
+        Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
+        Some(c) if c.is_array() => c
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
     }
 }
 
@@ -1024,6 +1047,230 @@ fn exit_code(error_text: &str) -> Option<i64> {
     let rest = &error_text[error_text.find(marker)? + marker.len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
+}
+
+/// A Failure (see CONTEXT.md): a `tool_result` that errored, joined via its
+/// `tool_use_id` back to the `tool_use` that triggered it for the tool name and
+/// command. Found by structure, not by a Query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The turn the `tool_result` Record sits at (same numbering as search/show).
+    pub turn: Option<usize>,
+    /// The tool that failed, joined from its `tool_use` (e.g. `Bash`).
+    pub tool: Option<String>,
+    /// The tool's key argument (command / file_path / …), joined from `tool_use`.
+    pub command: Option<String>,
+    /// The exit code parsed from the error text, if it carries one.
+    pub exit_code: Option<i64>,
+    /// The full error text (the `tool_result`'s content).
+    pub error_text: String,
+}
+
+/// All Failures found within a single Session, grouped with the metadata needed
+/// to display and reopen it — the failure-analysis analogue of [`SessionMatches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFailures {
+    pub project: String,
+    pub session_id: String,
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub timestamp: Option<String>,
+    pub branch: Option<String>,
+    pub failures: Vec<Failure>,
+}
+
+/// Scan the given Project dirs for Failures, returning one [`SessionFailures`]
+/// per Session that has at least one. When `matcher` is `Some`, only Failures
+/// whose command or error text matches the Query are kept (the Query is
+/// optional under `--failed`). Newest Session first, like search.
+pub fn failed_in_project_dirs(
+    project_dirs: &[PathBuf],
+    matcher: Option<&Matcher>,
+) -> Vec<SessionFailures> {
+    let sessions = enumerate_sessions(project_dirs);
+    let mut results: Vec<SessionFailures> = sessions
+        .par_iter()
+        .filter_map(|(project, path)| failures_in_one_session(project, path, matcher))
+        .collect();
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results
+}
+
+/// Scan a single Session for Failures, joining each errored `tool_result` to
+/// its `tool_use`. A file that cannot be read yields `None`.
+fn failures_in_one_session(
+    project: &str,
+    path: &Path,
+    matcher: Option<&Matcher>,
+) -> Option<SessionFailures> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let values: Vec<serde_json::Value> =
+        text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect();
+
+    // Pass 1: tool_use_id -> (tool name, command), for the join.
+    let mut tools: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for value in &values {
+        if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
+                let command = block.get("input").and_then(tool_key_arg);
+                tools.insert(id.to_string(), (name, command));
+            }
+        }
+    }
+
+    // Pass 2: metadata, turn numbering, and the errored tool_results.
+    let mut title = None;
+    let mut timestamp: Option<String> = None;
+    let mut branch: Option<String> = None;
+    let mut failures = Vec::new();
+    let mut turn = 0;
+    for value in &values {
+        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
+            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
+                timestamp = Some(ts.to_string());
+            }
+        }
+        if branch.is_none() {
+            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
+                branch = Some(b.to_string());
+            }
+        }
+        let ty = value.get("type").and_then(|t| t.as_str());
+        if ty == Some("ai-title") {
+            if let Some(t) = value.get("aiTitle").and_then(|t| t.as_str()) {
+                title = Some(t.to_string());
+            }
+        }
+        if matches!(ty, Some("user") | Some("assistant")) {
+            turn += 1;
+        }
+        if ty != Some("user") {
+            continue;
+        }
+        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            if block.get("is_error").and_then(|e| e.as_bool()) != Some(true) {
+                continue;
+            }
+            let error_text = tool_result_text(block);
+            let (tool, command) = block
+                .get("tool_use_id")
+                .and_then(|i| i.as_str())
+                .and_then(|id| tools.get(id))
+                .map_or((None, None), |(name, command)| (Some(name.clone()), command.clone()));
+            failures.push(Failure {
+                turn: Some(turn),
+                tool,
+                command,
+                exit_code: exit_code(&error_text),
+                error_text,
+            });
+        }
+    }
+
+    // Query filter (optional under --failed): match command or error text.
+    if let Some(matcher) = matcher {
+        failures.retain(|f| {
+            f.command.as_deref().is_some_and(|c| matcher.is_match(c)) || matcher.is_match(&f.error_text)
+        });
+    }
+
+    if failures.is_empty() {
+        return None;
+    }
+    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    Some(SessionFailures {
+        project: project.to_string(),
+        session_id,
+        path: path.to_path_buf(),
+        title,
+        timestamp,
+        branch,
+        failures,
+    })
+}
+
+/// Render Failures with the search index shape: each Session as a header, then
+/// each Failure as two lines — `[turn] ✗ <tool>  <command>` and the salient
+/// error line (or the whole error text when `full`). At most `max_per_session`
+/// per Session (`0` = unlimited), with an actionable `+N more  ›  show` hint.
+pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full: bool) -> String {
+    if results.is_empty() {
+        return "No failures.\n".to_string();
+    }
+    let mut out = String::new();
+    for s in results {
+        let short = short_id(&s.session_id);
+        out.push_str(&session_header(
+            &short,
+            &s.project,
+            s.title.as_deref(),
+            s.timestamp.as_deref(),
+            s.branch.as_deref(),
+        ));
+        out.push('\n');
+
+        let shown = if max_per_session == 0 {
+            s.failures.len()
+        } else {
+            s.failures.len().min(max_per_session)
+        };
+        for f in &s.failures[..shown] {
+            render_failure(&mut out, f, full);
+        }
+        let hidden = s.failures.len() - shown;
+        if hidden > 0 {
+            out.push_str(&format!("  … +{hidden} more  ›  ccsearch show {short}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render one [`Failure`]: a `[turn] ✗ tool  command` line, then its salient
+/// error line (with exit code when known) indented beneath — or every line of
+/// the error text when `full`.
+fn render_failure(out: &mut String, f: &Failure, full: bool) {
+    let turn = match f.turn {
+        Some(turn) => format!("[{turn}] "),
+        None => String::new(),
+    };
+    let tool = f.tool.as_deref().unwrap_or("tool");
+    let command = f.command.as_deref().unwrap_or("");
+    let head = format!("  {turn}✗ {tool}  ");
+    out.push_str(&head);
+    out.push_str(command);
+    out.push('\n');
+
+    let indent = " ".repeat(head.chars().count());
+    if full {
+        for line in strip_ansi(&f.error_text).lines() {
+            out.push_str(&indent);
+            out.push_str(line);
+            out.push('\n');
+        }
+    } else {
+        let prefix = match f.exit_code {
+            Some(code) => format!("exit {code} · "),
+            None => String::new(),
+        };
+        out.push_str(&format!("{indent}{prefix}{}\n", salient_line(&f.error_text)));
+    }
 }
 
 #[cfg(test)]
@@ -1837,6 +2084,125 @@ mod tests {
     fn exit_code_is_parsed_when_present_and_absent_otherwise() {
         assert_eq!(exit_code("Exit code 101\nerror[E0433]"), Some(101));
         assert_eq!(exit_code("File does not exist: /x"), None);
+    }
+
+    // --- finding Failures by structure -----------------------------------
+
+    #[test]
+    fn finds_a_failure_joining_tool_result_to_its_tool_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "fails",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Exit code 101\nerror[E0433]: failed to resolve"}]}}"#,
+            ],
+        );
+
+        let results = failed_in_project_dirs(&[proj], None);
+
+        assert_eq!(results.len(), 1);
+        let failures = &results[0].failures;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].tool.as_deref(), Some("Bash"), "tool joined from tool_use");
+        assert_eq!(failures[0].command.as_deref(), Some("cargo test"), "command joined from tool_use");
+        assert_eq!(failures[0].exit_code, Some(101));
+        assert_eq!(failures[0].turn, Some(3), "turn 3: user(1), assistant(2), tool_result(3)");
+    }
+
+    #[test]
+    fn sessions_without_a_failure_are_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "ok",
+            &[r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"all good"}]}}"#],
+        );
+
+        assert!(failed_in_project_dirs(&[proj], None).is_empty(), "a successful tool_result is not a Failure");
+    }
+
+    #[test]
+    fn a_query_filters_failures_by_command_or_error_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "two",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"Exit code 101"}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"npm run build"}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"webpack failed"}]}}"#,
+            ],
+        );
+
+        let all = failed_in_project_dirs(std::slice::from_ref(&proj), None);
+        assert_eq!(all[0].failures.len(), 2, "no query lists every Failure");
+
+        let cargo = failed_in_project_dirs(&[proj], Some(&lit("cargo")));
+        assert_eq!(cargo[0].failures.len(), 1, "query keeps only the matching command");
+        assert_eq!(cargo[0].failures[0].command.as_deref(), Some("cargo test"));
+    }
+
+    // --- rendering Failures ----------------------------------------------
+
+    fn one_failure(failure: Failure) -> SessionFailures {
+        SessionFailures {
+            project: "E--projects-demo".into(),
+            session_id: "abcd1234-rest".into(),
+            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+            title: Some("Build chat".into()),
+            timestamp: None,
+            branch: None,
+            failures: vec![failure],
+        }
+    }
+
+    #[test]
+    fn format_failures_renders_id_turn_tool_command_and_salient_line() {
+        let s = one_failure(Failure {
+            turn: Some(3),
+            tool: Some("Bash".into()),
+            command: Some("cargo test".into()),
+            exit_code: Some(101),
+            error_text: "Exit code 101\nerror[E0433]: failed to resolve".into(),
+        });
+
+        let out = format_failures(&[s], 3, false);
+
+        assert!(out.starts_with("abcd1234"), "header leads with the short id: {out}");
+        assert!(out.contains("[3] ✗ Bash"), "turn + failed tool: {out}");
+        assert!(out.contains("cargo test"), "command shown: {out}");
+        assert!(out.contains("exit 101 · error[E0433]: failed to resolve"), "salient line with exit: {out}");
+    }
+
+    #[test]
+    fn format_failures_full_shows_the_entire_error_text() {
+        let s = one_failure(Failure {
+            turn: Some(3),
+            tool: Some("Bash".into()),
+            command: Some("cargo test".into()),
+            exit_code: Some(101),
+            error_text: "Exit code 101\nline two\nerror[E0433]: failed".into(),
+        });
+
+        let out = format_failures(&[s], 3, true);
+
+        assert!(out.contains("line two"), "--full shows non-salient lines too: {out}");
+        assert!(out.contains("error[E0433]: failed"), "and the salient one: {out}");
+    }
+
+    #[test]
+    fn format_failures_reports_cleanly_when_there_are_none() {
+        assert!(format_failures(&[], 3, false).to_lowercase().contains("no failures"));
     }
 
     // --- session-id prefix resolution -----------------------------------
