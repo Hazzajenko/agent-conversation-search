@@ -89,6 +89,72 @@ pub fn parse_line(line: &str) -> Vec<Segment> {
     }
 }
 
+/// All Matches found within a single Session, grouped with the metadata needed
+/// to display and reopen it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMatches {
+    /// The Project directory name the Session lives in.
+    pub project: String,
+    /// The Session id (the `.jsonl` file stem).
+    pub session_id: String,
+    /// Full path to the Session file.
+    pub path: PathBuf,
+    /// The Session's AI-generated Title, if it has one.
+    pub title: Option<String>,
+    /// The matching Segments, in the order they appear in the Session.
+    pub matches: Vec<Segment>,
+}
+
+/// Search the given Project directories for `query`, returning one
+/// [`SessionMatches`] per Session that contains at least one Match.
+///
+/// Matching is a case-insensitive literal substring over the default content
+/// set (see [`parse_line`]). Sessions with no Matches are omitted. Unreadable
+/// directories and files are skipped rather than failing the whole search.
+pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<SessionMatches> {
+    let needle = query.to_lowercase();
+    let mut results = Vec::new();
+    for dir in project_dirs {
+        let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut title = None;
+            let mut matches = Vec::new();
+            for line in content.lines() {
+                for seg in parse_line(line) {
+                    if seg.role == Role::Title {
+                        title = Some(seg.text.clone());
+                    }
+                    if seg.text.to_lowercase().contains(&needle) {
+                        matches.push(seg);
+                    }
+                }
+            }
+            if !matches.is_empty() {
+                let session_id =
+                    path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                results.push(SessionMatches {
+                    project: project.clone(),
+                    session_id,
+                    path,
+                    title,
+                    matches,
+                });
+            }
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +205,82 @@ mod tests {
     fn returns_empty_when_the_projects_root_does_not_exist() {
         let missing = Path::new("this-store-does-not-exist-anywhere");
         assert!(find_project_dirs(missing, r"E:\whatever").is_empty());
+    }
+
+    fn write_session(dir: &Path, id: &str, lines: &[&str]) -> PathBuf {
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn finds_matching_segments_in_a_session_grouped_with_its_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        let path = write_session(
+            &proj,
+            "11111111-1111-1111-1111-111111111111",
+            &[
+                r#"{"type":"ai-title","aiTitle":"Borrow checker chat"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"how do I satisfy the BORROW checker"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"use a reference"}]}}"#,
+            ],
+        );
+
+        let results = search_project_dirs(&[proj.clone()], "borrow");
+
+        assert_eq!(results.len(), 1);
+        let s = &results[0];
+        assert_eq!(s.project, "E--projects-demo");
+        assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(s.path, path);
+        assert_eq!(s.title.as_deref(), Some("Borrow checker chat"));
+        assert_eq!(
+            s.matches,
+            vec![
+                Segment { role: Role::Title, text: "Borrow checker chat".into() },
+                Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn omits_sessions_with_no_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "hit",
+            &[r#"{"type":"user","message":{"role":"user","content":"set up tokio runtime"}}"#],
+        );
+        write_session(
+            &proj,
+            "miss",
+            &[r#"{"type":"user","message":{"role":"user","content":"unrelated chatter"}}"#],
+        );
+
+        let results = search_project_dirs(&[proj], "tokio");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "hit");
+    }
+
+    #[test]
+    fn a_query_only_present_in_thinking_does_not_match_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "only-thinking",
+            &[r#"{"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"the secret password is hunter2"}
+            ]}}"#],
+        );
+
+        assert!(search_project_dirs(&[proj], "hunter2").is_empty());
     }
 
     #[test]
