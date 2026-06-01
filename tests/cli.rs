@@ -291,6 +291,39 @@ fn reports_cleanly_when_there_are_no_matches() {
 }
 
 #[test]
+fn search_output_carries_the_session_id_and_turn_handoff() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let projects = store.path().join("projects");
+    let encoded = ccsearch::encode_project_dir(&workdir.path().to_string_lossy());
+    let project_dir = projects.join(encoded);
+    fs::create_dir_all(&project_dir).unwrap();
+    // A two-Message Session whose id has a recognisable short prefix.
+    fs::write(
+        project_dir.join("abcd1234-feed-feed-feed-feedfeedfeed.jsonl"),
+        [
+            r#"{"type":"user","message":{"role":"user","content":"first tokio question"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a reply about tokio"}]}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("tokio")
+        .assert()
+        .success()
+        // Header leads with the short session-id; matches carry their turns.
+        .stdout(predicates::str::contains("abcd1234"))
+        .stdout(predicates::str::contains("[1] user:"))
+        .stdout(predicates::str::contains("[2] assistant:"));
+}
+
+#[test]
 fn explicit_search_verb_behaves_like_a_bare_query() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

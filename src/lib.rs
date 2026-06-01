@@ -498,6 +498,13 @@ fn date_prefix(timestamp: &str) -> Option<&str> {
     timestamp.get(..10)
 }
 
+/// The short session-id shown in headers and the `show` hint: the first 8
+/// characters of the session-id (git-style), or the whole id if shorter. This
+/// is what `show <prefix>` resolves against (ADR 0002).
+fn short_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
+}
+
 /// Render just the matching Session file paths, one per line (grep `-l` style),
 /// in result order — for piping into other tools. An empty result set renders
 /// nothing.
@@ -511,10 +518,11 @@ pub fn format_paths(results: &[SessionMatches]) -> String {
 }
 
 /// Render search results as human- and Claude-readable text: each Session as a
-/// `project · title · date · branch` header followed by one `role: snippet`
-/// line per Match. At most `max_per_session` Matches are shown per Session
-/// (`0` = unlimited), with a `… +N more matches` line when some are hidden.
-/// An empty result set renders a clear "no matches" line.
+/// `short-id · project · title · date · branch` header followed by one
+/// `[turn] role: snippet` line per Match. At most `max_per_session` Matches are
+/// shown per Session (`0` = unlimited), with an actionable `… +N more  ›
+/// ccsearch show <id>` line when some are hidden. An empty result set renders a
+/// clear "no matches" line.
 pub fn format_results(
     results: &[SessionMatches],
     matcher: &Matcher,
@@ -526,8 +534,11 @@ pub fn format_results(
     }
     let mut out = String::new();
     for s in results {
+        let short = short_id(&s.session_id);
         let title = s.title.as_deref().unwrap_or("(untitled)");
-        let mut header = vec![s.project.clone(), title.to_string()];
+        // Lead with the short session-id so it can be copied straight into
+        // `show` (ADR 0002), then the existing project · title · date · branch.
+        let mut header = vec![short.clone(), s.project.clone(), title.to_string()];
         if let Some(date) = s.timestamp.as_deref().and_then(date_prefix) {
             header.push(date.to_string());
         }
@@ -544,15 +555,22 @@ pub fn format_results(
             s.matches.len().min(max_per_session)
         };
         for m in &s.matches[..shown] {
+            // Lead each Match with its turn number so it points at
+            // `show --around <turn>`; a Title match has no turn.
+            let turn = match m.turn {
+                Some(turn) => format!("[{turn}] "),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "  {}: {}\n",
+                "  {turn}{}: {}\n",
                 role_label(m.segment.role),
                 centered_snippet(&m.segment.text, matcher, color)
             ));
         }
         let hidden = s.matches.len() - shown;
         if hidden > 0 {
-            out.push_str(&format!("  … +{hidden} more matches\n"));
+            // Turn the overflow into an actionable hint at the rest.
+            out.push_str(&format!("  … +{hidden} more  ›  ccsearch show {short}\n"));
         }
         out.push('\n');
     }
@@ -1085,6 +1103,36 @@ mod tests {
     }
 
     #[test]
+    fn search_and_show_agree_on_turn_numbers_for_the_same_session() {
+        // The handoff invariant (ADR 0002): the turn search prints for a Match
+        // must equal the turn `show` numbers that Message. The tricky case is a
+        // contentless Record (here a signature-only thinking block) — it must
+        // consume a turn number in *both* views or every later turn drifts.
+        let lines = [
+            r#"{"type":"queue-operation","operation":"enqueue"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"alpha one"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"s"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"alpha two"}}"#,
+        ];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(&proj, "agree", &lines);
+        let results = search_project_dirs(&[proj], &lit("alpha two"), &ContentSet::default());
+        let search_turn = results[0].matches[0].turn;
+
+        let turns = parse_transcript(&lines.join("\n"));
+        let show_turn = turns
+            .iter()
+            .find(|t| t.blocks.iter().any(|b| matches!(b, TurnBlock::Text(s) if s.contains("alpha two"))))
+            .map(|t| t.number);
+
+        assert_eq!(search_turn, show_turn, "search and show must agree");
+        assert_eq!(search_turn, Some(3), "the contentless thinking Record at turn 2 still counts");
+    }
+
+    #[test]
     fn finds_matching_segments_in_a_session_grouped_with_its_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
@@ -1188,6 +1236,57 @@ mod tests {
     }
 
     #[test]
+    fn header_leads_with_the_short_session_id() {
+        let s = session(
+            "E--projects-demo",
+            Some("Borrow chat"),
+            vec![Segment { role: Role::User, text: "borrow".into() }],
+        );
+
+        let out = format_results(&[s], &lit("borrow"), 0, false);
+
+        // The helper's session_id is 11111111-2222-… so the short id is 11111111.
+        assert!(out.lines().next().unwrap().starts_with("11111111"), "header leads with short id: {out}");
+    }
+
+    #[test]
+    fn each_match_line_is_prefixed_with_its_turn_number() {
+        let s = session(
+            "p",
+            Some("t"),
+            vec![
+                Segment { role: Role::User, text: "alpha".into() },
+                Segment { role: Role::Assistant, text: "alpha beta".into() },
+            ],
+        );
+
+        let out = format_results(&[s], &lit("alpha"), 0, false);
+
+        assert!(out.contains("[1] user:"), "first match shows its turn: {out}");
+        assert!(out.contains("[2] assistant:"), "second match shows its turn: {out}");
+    }
+
+    #[test]
+    fn a_title_match_shows_no_turn_bracket() {
+        let s = SessionMatches {
+            project: "p".into(),
+            session_id: "abcd1234-rest".into(),
+            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+            title: Some("Borrow chat".into()),
+            timestamp: None,
+            branch: None,
+            matches: vec![Match {
+                turn: None,
+                segment: Segment { role: Role::Title, text: "Borrow chat".into() },
+            }],
+        };
+
+        let out = format_results(&[s], &lit("borrow"), 0, false);
+
+        assert!(out.contains("  title: Borrow chat"), "title rendered without a turn bracket: {out}");
+    }
+
+    #[test]
     fn snippet_is_centered_on_the_match_with_ellipses_when_cut() {
         let text = format!("{}NEEDLE {}", "alpha ".repeat(60), "omega ".repeat(60));
         let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
@@ -1214,7 +1313,7 @@ mod tests {
         let out = format_results(&[s], &lit("NEEDLE"), 0, false);
         let snippet = out.lines().find(|l| l.contains("NEEDLE")).unwrap().trim_start();
 
-        assert!(snippet.starts_with("user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
+        assert!(snippet.starts_with("[1] user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
         assert!(snippet.ends_with('…'), "trailing ellipsis where cut: {snippet}");
     }
 
@@ -1247,6 +1346,10 @@ mod tests {
         assert!(out.contains("match-one") && out.contains("match-three"), "first 3 shown: {out}");
         assert!(!out.contains("match-four") && !out.contains("match-five"), "rest hidden: {out}");
         assert!(out.contains("+2 more"), "notes how many were hidden: {out}");
+        assert!(
+            out.contains("ccsearch show 11111111"),
+            "overflow line is an actionable show hint: {out}"
+        );
     }
 
     #[test]

@@ -12,11 +12,11 @@ Turn search output from a standalone snippet list into the **index half of the s
 
 ## Acceptance criteria
 
-- [ ] Each Session header shows the short session-id alongside the existing `title · date · branch`
-- [ ] Each Match line shows its turn number
-- [ ] The overflow line suggests the concrete `ccsearch show <id>` command
-- [ ] Snippets stay one line — no surrounding-turn context is added
-- [ ] Updated `assert_cmd` output tests
+- [x] Each Session header shows the short session-id alongside the existing `title · date · branch`
+- [x] Each Match line shows its turn number
+- [x] The overflow line suggests the concrete `ccsearch show <id>` command
+- [x] Snippets stay one line — no surrounding-turn context is added
+- [x] Updated `assert_cmd` output tests
 
 ## Blocked by
 
