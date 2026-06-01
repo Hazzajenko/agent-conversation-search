@@ -286,6 +286,8 @@ pub struct SessionMatches {
     /// string. `None` if no record carried one. ISO 8601 strings sort
     /// lexically in chronological order, so this doubles as the recency key.
     pub timestamp: Option<String>,
+    /// The git branch the Session was recorded on (`gitBranch`), if any.
+    pub branch: Option<String>,
     /// The matching Segments, in the order they appear in the Session.
     pub matches: Vec<Segment>,
 }
@@ -346,6 +348,7 @@ fn search_one_session(
     let text = std::fs::read_to_string(path).ok()?;
     let mut title = None;
     let mut timestamp: Option<String> = None;
+    let mut branch: Option<String> = None;
     let mut matches = Vec::new();
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -355,6 +358,11 @@ fn search_one_session(
             // ISO 8601 sorts lexically, so the max string is the newest record.
             if timestamp.as_deref().is_none_or(|cur| ts > cur) {
                 timestamp = Some(ts.to_string());
+            }
+        }
+        if branch.is_none() {
+            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
+                branch = Some(b.to_string());
             }
         }
         for seg in segments_from_value(&value) {
@@ -376,6 +384,7 @@ fn search_one_session(
         path: path.to_path_buf(),
         title,
         timestamp,
+        branch,
         matches,
     })
 }
@@ -406,6 +415,12 @@ fn one_line_snippet(text: &str) -> String {
     }
 }
 
+/// The `YYYY-MM-DD` date prefix of an ISO 8601 timestamp, or `None` if the
+/// string is too short to carry one. Slicing avoids pulling in a date library.
+fn date_prefix(timestamp: &str) -> Option<&str> {
+    timestamp.get(..10)
+}
+
 /// Render search results as human- and Claude-readable text: each Session as a
 /// `project · title` header followed by one `role: snippet` line per Match.
 /// An empty result set renders a clear "no matches" line.
@@ -416,7 +431,15 @@ pub fn format_results(results: &[SessionMatches]) -> String {
     let mut out = String::new();
     for s in results {
         let title = s.title.as_deref().unwrap_or("(untitled)");
-        out.push_str(&format!("{} · {}\n", s.project, title));
+        let mut header = vec![s.project.clone(), title.to_string()];
+        if let Some(date) = s.timestamp.as_deref().and_then(date_prefix) {
+            header.push(date.to_string());
+        }
+        if let Some(branch) = s.branch.as_deref() {
+            header.push(branch.to_string());
+        }
+        out.push_str(&header.join(" · "));
+        out.push('\n');
         for m in &s.matches {
             out.push_str(&format!("  {}: {}\n", role_label(m.role), one_line_snippet(&m.text)));
         }
@@ -609,6 +632,7 @@ mod tests {
             path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
             title: title.map(Into::into),
             timestamp: None,
+            branch: None,
             matches,
         }
     }
@@ -633,6 +657,32 @@ mod tests {
             "match text shown: {out}"
         );
         assert!(out.to_lowercase().contains("user"), "match labelled by role: {out}");
+    }
+
+    #[test]
+    fn header_shows_the_date_sliced_from_the_timestamp() {
+        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
+            Segment { role: Role::User, text: "borrow".into() },
+        ]);
+        s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
+
+        let out = format_results(&[s]);
+
+        assert!(out.contains("2026-06-01"), "header shows YYYY-MM-DD date: {out}");
+        assert!(!out.contains("10:00:00"), "but not the time component: {out}");
+    }
+
+    #[test]
+    fn header_shows_the_git_branch() {
+        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
+            Segment { role: Role::User, text: "borrow".into() },
+        ]);
+        s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
+        s.branch = Some("feature/search".into());
+
+        let out = format_results(&[s]);
+
+        assert!(out.contains("feature/search"), "header shows branch: {out}");
     }
 
     #[test]
@@ -774,6 +824,22 @@ mod tests {
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["99-alphabetically-last", "01-alphabetically-first"]);
+    }
+
+    #[test]
+    fn search_captures_the_git_branch_from_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "branchy",
+            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"gitBranch":"feature/search"}"#],
+        );
+
+        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
+
+        assert_eq!(results[0].branch.as_deref(), Some("feature/search"));
     }
 
     #[test]
