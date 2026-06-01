@@ -220,6 +220,24 @@ fn max_per_session_flag_caps_matches_and_notes_the_rest() {
 }
 
 #[test]
+fn files_flag_prints_only_the_matching_path() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"how to use tokio select"}}"#,
+    );
+
+    cmd.arg("-l")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session.jsonl"))
+        .stdout(predicates::str::contains("how to use tokio select").not());
+}
+
+#[test]
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ccsearch::{
-    format_results, projects_root, resolve_claude_dir, resolve_scope, search_project_dirs,
-    ContentSet, Matcher, Scope,
+    format_paths, format_results, projects_root, resolve_claude_dir, resolve_scope,
+    search_project_dirs, ContentSet, Matcher, Scope,
 };
 
 /// Search your local Claude Code conversation history.
@@ -55,6 +55,10 @@ struct Cli {
     /// Maximum matches shown per session; 0 means unlimited.
     #[arg(long, short = 'm', value_name = "N", default_value_t = 3)]
     max_per_session: usize,
+
+    /// Print only the matching session file paths (for piping).
+    #[arg(long, short = 'l')]
+    files: bool,
 }
 
 fn main() -> ExitCode {
@@ -106,6 +110,10 @@ fn main() -> ExitCode {
     };
     let results = search_project_dirs(&project_dirs, &matcher, &content);
 
-    print!("{}", format_results(&results, &matcher, cli.max_per_session));
+    if cli.files {
+        print!("{}", format_paths(&results));
+    } else {
+        print!("{}", format_results(&results, &matcher, cli.max_per_session));
+    }
     ExitCode::SUCCESS
 }
