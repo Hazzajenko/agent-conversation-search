@@ -1,6 +1,6 @@
 # Match modes — `--regex` and `--case-sensitive`
 
-Status: ready-for-agent
+Status: done
 
 ## What to build
 
@@ -14,12 +14,12 @@ Add the two non-default ways to match a Query, routed through a single `regex`-b
 
 ## Acceptance criteria
 
-- [ ] `--regex` matches the Query as a regular expression
-- [ ] `--case-sensitive` makes both literal and regex matching case-sensitive
-- [ ] Default (no flags) remains literal, case-insensitive
-- [ ] Literal and regex modes share one match path via `regex::escape`
-- [ ] An invalid regex exits non-zero with a readable error and no panic
-- [ ] Each mode/case combination is covered by unit tests plus an `assert_cmd` end-to-end test
+- [x] `--regex` matches the Query as a regular expression
+- [x] `--case-sensitive` makes both literal and regex matching case-sensitive
+- [x] Default (no flags) remains literal, case-insensitive
+- [x] Literal and regex modes share one match path via `regex::escape`
+- [x] An invalid regex exits non-zero with a readable error and no panic
+- [x] Each mode/case combination is covered by unit tests plus an `assert_cmd` end-to-end test
 
 ## Blocked by
 

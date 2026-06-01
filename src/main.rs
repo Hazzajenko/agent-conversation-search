@@ -31,6 +31,14 @@ struct Cli {
     /// (case-insensitive).
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
+
+    /// Treat the query as a regular expression instead of a literal substring.
+    #[arg(long, short = 'e')]
+    regex: bool,
+
+    /// Match case-sensitively (the default ignores case).
+    #[arg(long, short = 's')]
+    case_sensitive: bool,
 }
 
 fn main() -> ExitCode {
@@ -66,7 +74,7 @@ fn main() -> ExitCode {
         Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
     };
 
-    let matcher = match Matcher::new(&cli.query, false, false) {
+    let matcher = match Matcher::new(&cli.query, cli.regex, cli.case_sensitive) {
         Ok(matcher) => matcher,
         Err(err) => {
             eprintln!("ccsearch: {err}");
