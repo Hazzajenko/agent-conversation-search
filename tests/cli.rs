@@ -369,6 +369,59 @@ fn failed_query_filters_and_full_shows_everything() {
 }
 
 #[test]
+fn since_excludes_sessions_older_than_an_absolute_date() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Both Sessions in the cwd's own Project, so the default scope covers them.
+    let project = store
+        .path()
+        .join("projects")
+        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("newish.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":"recent tokio talk"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("oldie.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":"ancient tokio talk"},"timestamp":"2026-01-01T10:00:00.000Z"}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--since")
+        .arg("2026-05-01")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("recent tokio talk"))
+        .stdout(predicates::str::contains("ancient tokio talk").not());
+}
+
+#[test]
+fn since_rejects_an_unparseable_value() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+    );
+
+    cmd.arg("--since")
+        .arg("yesterday")
+        .arg("x")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("could not parse --since"));
+}
+
+#[test]
 fn session_scope_searches_only_the_named_session() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

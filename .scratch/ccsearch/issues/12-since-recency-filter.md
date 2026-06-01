@@ -12,11 +12,11 @@ Add `--since <duration|date>` as a **general** filter (not specific to `--failed
 
 ## Acceptance criteria
 
-- [ ] `--since` parses relative durations (`3d`, `2w`, `1h`) and absolute ISO dates
-- [ ] Sessions whose recency timestamp is older than the cutoff are excluded
-- [ ] Composes with `--all` / `--project` / `--session` / `--failed`
-- [ ] Sessions lacking a timestamp are excluded (behaviour documented)
-- [ ] Unit tests for the duration / date parser and the filtering
+- [x] `--since` parses relative durations (`3d`, `2w`, `1h`) and absolute ISO dates
+- [x] Sessions whose recency timestamp is older than the cutoff are excluded
+- [x] Composes with `--all` / `--project` / `--session` / `--failed`
+- [x] Sessions lacking a timestamp are excluded (behaviour documented)
+- [x] Unit tests for the duration / date parser and the filtering
 
 ## Blocked by
 

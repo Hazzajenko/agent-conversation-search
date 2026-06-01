@@ -1,14 +1,15 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
     failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_results,
     format_transcript, format_windowed, parse_transcript, projects_root, resolve_claude_dir,
-    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, ContentSet,
-    Matcher, Scope, SessionRef,
+    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, since_cutoff,
+    timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -99,6 +100,11 @@ struct SearchArgs {
     /// single salient line.
     #[arg(long)]
     full: bool,
+
+    /// Only Sessions touched since this point: a relative duration (3d, 2w, 1h)
+    /// or an absolute ISO date (2026-05-01). Composes with every scope.
+    #[arg(long, value_name = "WHEN")]
+    since: Option<String>,
 }
 
 /// Arguments for the `show` verb.
@@ -191,11 +197,35 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         None => None,
     };
 
+    // Optional recency cutoff, applied to whichever result set we produce.
+    let cutoff = match &args.since {
+        Some(value) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match since_cutoff(value, now) {
+                Some(cutoff) => Some(cutoff),
+                None => {
+                    eprintln!(
+                        "ccsearch: could not parse --since '{value}' \
+                         (use a duration like 3d/2w/1h, or an ISO date like 2026-05-01)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
+
     if args.failed {
-        let results = match &session_path {
+        let mut results = match &session_path {
             Some(path) => failed_in_session_file(path, matcher.as_ref()),
             None => failed_in_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), matcher.as_ref()),
         };
+        if let Some(cutoff) = cutoff {
+            results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
+        }
         let rendered = format_failures(&results, args.max_per_session, args.full);
         let _ = write!(anstream::stdout(), "{rendered}");
         return ExitCode::SUCCESS;
@@ -210,10 +240,13 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         thinking: args.thinking || args.all_content,
         tools: args.tools || args.all_content,
     };
-    let results = match &session_path {
+    let mut results = match &session_path {
         Some(path) => search_session_file(path, &matcher, &content),
         None => search_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), &matcher, &content),
     };
+    if let Some(cutoff) = cutoff {
+        results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
+    }
 
     // Let anstream decide whether colour is wanted (TTY, NO_COLOR, CLICOLOR_*)
     // and strip codes on the way out when it is not.
