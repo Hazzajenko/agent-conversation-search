@@ -1,0 +1,19 @@
+[package]
+name = "ccsearch"
+version = "0.1.0"
+edition = "2021"
+description = "Search your local Claude Code conversation history"
+license = "MIT"
+
+[[bin]]
+name = "ccsearch"
+path = "src/main.rs"
+
+[lib]
+name = "ccsearch"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
