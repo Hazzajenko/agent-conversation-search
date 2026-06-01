@@ -455,9 +455,11 @@ fn date_prefix(timestamp: &str) -> Option<&str> {
 }
 
 /// Render search results as human- and Claude-readable text: each Session as a
-/// `project · title` header followed by one `role: snippet` line per Match.
+/// `project · title · date · branch` header followed by one `role: snippet`
+/// line per Match. At most `max_per_session` Matches are shown per Session
+/// (`0` = unlimited), with a `… +N more matches` line when some are hidden.
 /// An empty result set renders a clear "no matches" line.
-pub fn format_results(results: &[SessionMatches], matcher: &Matcher) -> String {
+pub fn format_results(results: &[SessionMatches], matcher: &Matcher, max_per_session: usize) -> String {
     if results.is_empty() {
         return "No matches.\n".to_string();
     }
@@ -473,8 +475,19 @@ pub fn format_results(results: &[SessionMatches], matcher: &Matcher) -> String {
         }
         out.push_str(&header.join(" · "));
         out.push('\n');
-        for m in &s.matches {
+
+        // A cap of 0 means show every Match.
+        let shown = if max_per_session == 0 {
+            s.matches.len()
+        } else {
+            s.matches.len().min(max_per_session)
+        };
+        for m in &s.matches[..shown] {
             out.push_str(&format!("  {}: {}\n", role_label(m.role), centered_snippet(&m.text, matcher)));
+        }
+        let hidden = s.matches.len() - shown;
+        if hidden > 0 {
+            out.push_str(&format!("  … +{hidden} more matches\n"));
         }
         out.push('\n');
     }
@@ -681,7 +694,7 @@ mod tests {
             ],
         )];
 
-        let out = format_results(&results, &lit("borrow"));
+        let out = format_results(&results, &lit("borrow"), 0);
 
         assert!(out.contains("E--projects-demo"), "header shows project: {out}");
         assert!(out.contains("Borrow checker chat"), "header shows title: {out}");
@@ -699,7 +712,7 @@ mod tests {
         ]);
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
 
-        let out = format_results(&[s], &lit("borrow"));
+        let out = format_results(&[s], &lit("borrow"), 0);
 
         assert!(out.contains("2026-06-01"), "header shows YYYY-MM-DD date: {out}");
         assert!(!out.contains("10:00:00"), "but not the time component: {out}");
@@ -713,7 +726,7 @@ mod tests {
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
         s.branch = Some("feature/search".into());
 
-        let out = format_results(&[s], &lit("borrow"));
+        let out = format_results(&[s], &lit("borrow"), 0);
 
         assert!(out.contains("feature/search"), "header shows branch: {out}");
     }
@@ -723,7 +736,7 @@ mod tests {
         let text = format!("{}NEEDLE {}", "alpha ".repeat(60), "omega ".repeat(60));
         let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
 
-        let out = format_results(&[s], &lit("NEEDLE"));
+        let out = format_results(&[s], &lit("NEEDLE"), 0);
         // The match line is the indented one carrying NEEDLE.
         let line = out.lines().find(|l| l.contains("NEEDLE")).expect("a line with the match");
 
@@ -742,7 +755,7 @@ mod tests {
         let text = format!("NEEDLE {}", "omega ".repeat(100));
         let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
 
-        let out = format_results(&[s], &lit("NEEDLE"));
+        let out = format_results(&[s], &lit("NEEDLE"), 0);
         let snippet = out.lines().find(|l| l.contains("NEEDLE")).unwrap().trim_start();
 
         assert!(snippet.starts_with("user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
@@ -757,15 +770,47 @@ mod tests {
             vec![Segment { role: Role::User, text: "line one\n\n   line two".into() }],
         )];
 
-        let out = format_results(&results, &lit("line"));
+        let out = format_results(&results, &lit("line"), 0);
 
         assert!(out.contains("line one line two"), "collapsed: {out}");
         assert!(!out.contains("line one\n"), "no embedded newline in snippet: {out}");
     }
 
     #[test]
+    fn caps_matches_per_session_and_notes_how_many_more() {
+        let s = session("p", Some("t"), vec![
+            Segment { role: Role::User, text: "match-one".into() },
+            Segment { role: Role::User, text: "match-two".into() },
+            Segment { role: Role::User, text: "match-three".into() },
+            Segment { role: Role::User, text: "match-four".into() },
+            Segment { role: Role::User, text: "match-five".into() },
+        ]);
+
+        let out = format_results(&[s], &lit("match"), 3);
+
+        assert!(out.contains("match-one") && out.contains("match-three"), "first 3 shown: {out}");
+        assert!(!out.contains("match-four") && !out.contains("match-five"), "rest hidden: {out}");
+        assert!(out.contains("+2 more"), "notes how many were hidden: {out}");
+    }
+
+    #[test]
+    fn a_cap_of_zero_means_unlimited() {
+        let s = session("p", Some("t"), vec![
+            Segment { role: Role::User, text: "match-one".into() },
+            Segment { role: Role::User, text: "match-two".into() },
+            Segment { role: Role::User, text: "match-three".into() },
+            Segment { role: Role::User, text: "match-four".into() },
+        ]);
+
+        let out = format_results(&[s], &lit("match"), 0);
+
+        assert!(out.contains("match-four"), "no cap applied: {out}");
+        assert!(!out.contains("more"), "no '+N more' line: {out}");
+    }
+
+    #[test]
     fn renders_a_clear_message_when_there_are_no_matches() {
-        let out = format_results(&[], &lit("anything"));
+        let out = format_results(&[], &lit("anything"), 0);
         assert!(out.to_lowercase().contains("no match"), "{out}");
     }
 
