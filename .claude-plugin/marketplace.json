@@ -1,0 +1,17 @@
+{
+  "name": "ccsearch",
+  "description": "The ccsearch conversation-history search skill.",
+  "owner": {
+    "name": "Harry Jenkins",
+    "email": "jenkinsh1@outlook.com"
+  },
+  "plugins": [
+    {
+      "name": "ccsearch",
+      "source": ".",
+      "description": "Search your local Claude Code conversation history from any project, to recall past sessions.",
+      "license": "MIT",
+      "keywords": ["search", "conversation-history", "claude-code", "recall"]
+    }
+  ]
+}
