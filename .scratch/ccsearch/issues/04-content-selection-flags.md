@@ -1,6 +1,6 @@
 # Content selection — `--thinking`, `--tools`, `--all-content`
 
-Status: ready-for-agent
+Status: done
 
 ## What to build
 
@@ -14,13 +14,13 @@ Let the user widen what gets searched beyond the slice-1 default set (Prompts + 
 
 ## Acceptance criteria
 
-- [ ] Default run (no content flags) searches only Prompts, Replies, and Titles
-- [ ] `--thinking` includes thinking blocks in matching
-- [ ] `--tools` includes tool calls and tool results in matching
-- [ ] `--all-content` includes every content kind
-- [ ] Content flags compose correctly
-- [ ] Matches are attributed to their content kind in output
-- [ ] Covered by unit tests over fixtures plus an `assert_cmd` end-to-end test
+- [x] Default run (no content flags) searches only Prompts, Replies, and Titles
+- [x] `--thinking` includes thinking blocks in matching
+- [x] `--tools` includes tool calls and tool results in matching
+- [x] `--all-content` includes every content kind
+- [x] Content flags compose correctly
+- [x] Matches are attributed to their content kind in output
+- [x] Covered by unit tests over fixtures plus an `assert_cmd` end-to-end test
 
 ## Blocked by
 

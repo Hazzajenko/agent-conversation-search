@@ -39,6 +39,18 @@ struct Cli {
     /// Match case-sensitively (the default ignores case).
     #[arg(long, short = 's')]
     case_sensitive: bool,
+
+    /// Also search assistant thinking blocks.
+    #[arg(long)]
+    thinking: bool,
+
+    /// Also search tool calls and tool results.
+    #[arg(long)]
+    tools: bool,
+
+    /// Search every content kind (equivalent to --thinking --tools).
+    #[arg(long)]
+    all_content: bool,
 }
 
 fn main() -> ExitCode {
@@ -84,7 +96,10 @@ fn main() -> ExitCode {
 
     let root = projects_root(&claude_dir);
     let project_dirs = resolve_scope(&root, &scope);
-    let content = ContentSet::default();
+    let content = ContentSet {
+        thinking: cli.thinking || cli.all_content,
+        tools: cli.tools || cli.all_content,
+    };
     let results = search_project_dirs(&project_dirs, &matcher, &content);
 
     print!("{}", format_results(&results));
