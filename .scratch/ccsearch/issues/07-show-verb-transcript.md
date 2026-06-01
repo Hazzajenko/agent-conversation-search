@@ -1,0 +1,29 @@
+# `show` verb: render a whole Session as a Transcript
+
+Status: ready-for-agent
+
+## What to build
+
+Introduce clap subcommands with `search` as the **default** verb (bare `ccsearch <QUERY>` still searches — no muscle-memory break) and add `show` as an explicit sibling. See ADR 0002.
+
+- `ccsearch show <session>` resolves `<session>` as a **git-style unique prefix** of a session-id, matched across the **whole Store** (a session-id is globally unique; you often reopen a Session from a different Project than the cwd). Ambiguous or no match → clean error, non-zero exit.
+- `ccsearch show -` reads a Session **file path** from stdin (for `ccsearch -l … | … | ccsearch show -`).
+- Renders a **Transcript** (see CONTEXT.md): **Messages only** — drop the noise Records (`queue-operation`, `mode`, `attachment`).
+  - `text` blocks → the Prompt / Reply, wrapped readably, with a clear `you` / `claude` speaker label per turn.
+  - `tool_use` → a **compact one-liner**: tool name + the key arg (command / file_path / pattern), not the raw JSON blob.
+  - `tool_result` → compact, but **failed results flagged loudly** (`✗ … FAILED`) using `is_error`.
+  - `thinking` → **collapsed by default** with a count; `--thinking` expands it (mirrors search's `--thinking`).
+- Bare `show <id>` (no window) renders the **whole** Transcript to stdout. **No built-in pager** — pipe to `more` for the rare huge dump.
+
+## Acceptance criteria
+
+- [x] `ccsearch search "x"` and bare `ccsearch "x"` behave identically; `ccsearch show <id>` is a distinct verb
+- [x] `show <prefix>` resolves a unique session-id across the whole Store; ambiguous / no-match errors cleanly with a non-zero exit
+- [x] `show -` reads a path from stdin and renders it
+- [x] Transcript shows Messages only, with speaker labels, compact tool one-liners, and `✗`-flagged failed tool results
+- [x] Thinking is collapsed by default and shown under `--thinking`
+- [x] Unit tests for prefix resolution (unique / ambiguous / none) plus an `assert_cmd` e2e rendering a fixture Session
+
+## Blocked by
+
+- 01-walking-skeleton-current-project-search
