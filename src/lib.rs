@@ -975,6 +975,57 @@ fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
     }
 }
 
+// --- failure analysis: finding failed tool calls by structure -----------
+
+/// Markers that identify the salient line of a tool Failure, in **priority
+/// order**. Applied top-to-bottom: the first marker that matches any line wins,
+/// so a compiler `error[` outranks a generic `Error:` regardless of where each
+/// appears. This is a fixed, documented lookup table — not a relevance ranker.
+/// (Real data: the naive "first line" is just `Exit code 101`; the real error
+/// is several lines below it — issue 11 / ADR 0002.)
+const FAILURE_MARKERS: &[&str] = &[
+    "error[",
+    "panicked at",
+    "assertion failed",
+    "assertion `",
+    "Error:",
+    "does not exist",
+    "No such file",
+    "unexpected EOF",
+    "command not found",
+    "fatal:",
+    "Traceback",
+    "error:",
+];
+
+/// Strip ANSI escape sequences from `text` so a Failure's error line is plain.
+fn strip_ansi(text: &str) -> String {
+    anstream::adapter::strip_str(text).to_string()
+}
+
+/// The single most informative line of a Failure's error text: the first line
+/// matching the highest-priority [`FAILURE_MARKERS`] entry, falling back to the
+/// last non-empty line when none match. ANSI codes are stripped first.
+fn salient_line(error_text: &str) -> String {
+    let stripped = strip_ansi(error_text);
+    let lines: Vec<&str> = stripped.lines().collect();
+    for marker in FAILURE_MARKERS {
+        if let Some(line) = lines.iter().find(|l| l.contains(marker)) {
+            return line.trim().to_string();
+        }
+    }
+    lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string()
+}
+
+/// The exit code embedded in a Failure's error text (`Exit code N`, as Bash and
+/// cargo emit), or `None` when the text carries no such line.
+fn exit_code(error_text: &str) -> Option<i64> {
+    let marker = "Exit code ";
+    let rest = &error_text[error_text.find(marker)? + marker.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1736,6 +1787,56 @@ mod tests {
                 Segment { role: Role::Assistant, text: "Then run it.".into() },
             ]
         );
+    }
+
+    // --- failure salient-line picker -------------------------------------
+
+    #[test]
+    fn salient_line_prefers_a_compiler_error_over_the_useless_exit_code_line() {
+        // The handoff's load-bearing finding: the first line is just the exit
+        // code; the real error is several lines down.
+        let text = "Exit code 101\n   Compiling x\nerror[E0433]: failed to resolve: use of undeclared crate\n  --> src/main.rs:3:5";
+        assert_eq!(salient_line(text), "error[E0433]: failed to resolve: use of undeclared crate");
+    }
+
+    #[test]
+    fn salient_line_finds_a_panic() {
+        let text = "Exit code 101\nrunning 1 test\nthread 'main' panicked at src/lib.rs:5:9:\nassertion `left == right` failed";
+        // `panicked at` outranks `assertion failed` in the priority list.
+        assert_eq!(salient_line(text), "thread 'main' panicked at src/lib.rs:5:9:");
+    }
+
+    #[test]
+    fn salient_line_finds_a_bash_eof() {
+        let text = "Exit code 2\n/usr/bin/bash: eval: line 1: unexpected EOF while looking for matching `\"'";
+        assert_eq!(
+            salient_line(text),
+            "/usr/bin/bash: eval: line 1: unexpected EOF while looking for matching `\"'"
+        );
+    }
+
+    #[test]
+    fn salient_line_finds_a_missing_file() {
+        let text = "File does not exist: /tmp/nope.txt";
+        assert_eq!(salient_line(text), "File does not exist: /tmp/nope.txt");
+    }
+
+    #[test]
+    fn salient_line_falls_back_to_the_last_non_empty_line() {
+        let text = "some output\nwith no recognised marker\nfinal line\n\n";
+        assert_eq!(salient_line(text), "final line");
+    }
+
+    #[test]
+    fn salient_line_strips_ansi_colour_codes() {
+        let text = "\u{1b}[31merror[E0382]: borrow of moved value\u{1b}[0m";
+        assert_eq!(salient_line(text), "error[E0382]: borrow of moved value");
+    }
+
+    #[test]
+    fn exit_code_is_parsed_when_present_and_absent_otherwise() {
+        assert_eq!(exit_code("Exit code 101\nerror[E0433]"), Some(101));
+        assert_eq!(exit_code("File does not exist: /x"), None);
     }
 
     // --- session-id prefix resolution -----------------------------------
