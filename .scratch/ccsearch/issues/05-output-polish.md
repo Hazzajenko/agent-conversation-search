@@ -1,6 +1,6 @@
 # Output polish
 
-Status: ready-for-agent
+Status: done
 
 ## What to build
 
@@ -15,13 +15,13 @@ Turn the slice-1 basic output into the final readable, scannable format.
 
 ## Acceptance criteria
 
-- [ ] Sessions are printed most-recent-first
-- [ ] Each Session header shows project, Title, `YYYY-MM-DD` date, and git branch
-- [ ] Snippets are centered on the Match, truncated to a readable width, with the Match highlighted and ellipses where cut
-- [ ] At most 3 Matches per Session by default, with a `… +N more` indicator; `-m` overrides and `-m 0` is unlimited
-- [ ] `-l` / `--files` prints only matching file paths
-- [ ] Color is applied on a TTY and suppressed under `NO_COLOR` or when piped
-- [ ] Covered by unit tests plus `assert_cmd` end-to-end tests (including a `NO_COLOR` / piped case)
+- [x] Sessions are printed most-recent-first
+- [x] Each Session header shows project, Title, `YYYY-MM-DD` date, and git branch
+- [x] Snippets are centered on the Match, truncated to a readable width, with the Match highlighted and ellipses where cut
+- [x] At most 3 Matches per Session by default, with a `… +N more` indicator; `-m` overrides and `-m 0` is unlimited
+- [x] `-l` / `--files` prints only matching file paths
+- [x] Color is applied on a TTY and suppressed under `NO_COLOR` or when piped
+- [x] Covered by unit tests plus `assert_cmd` end-to-end tests (including a `NO_COLOR` / piped case)
 
 ## Blocked by
 

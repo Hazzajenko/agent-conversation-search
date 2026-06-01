@@ -21,6 +21,8 @@ dirs = "5"
 rayon = "1"
 regex = "1.12.3"
 anyhow = "1.0.102"
+anstream = "1.0.0"
+owo-colors = "4.3.0"
 
 [dev-dependencies]
 proptest = "1"

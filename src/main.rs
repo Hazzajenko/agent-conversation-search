@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -110,10 +111,14 @@ fn main() -> ExitCode {
     };
     let results = search_project_dirs(&project_dirs, &matcher, &content);
 
-    if cli.files {
-        print!("{}", format_paths(&results));
+    // Let anstream decide whether colour is wanted (TTY, NO_COLOR, CLICOLOR_*)
+    // and strip codes on the way out when it is not.
+    let color = anstream::AutoStream::choice(&std::io::stdout()) != anstream::ColorChoice::Never;
+    let rendered = if cli.files {
+        format_paths(&results)
     } else {
-        print!("{}", format_results(&results, &matcher, cli.max_per_session));
-    }
+        format_results(&results, &matcher, cli.max_per_session, color)
+    };
+    let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
 }
