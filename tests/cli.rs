@@ -94,6 +94,58 @@ fn project_flag_targets_a_named_project_by_substring() {
 }
 
 #[test]
+fn regex_flag_matches_the_query_as_a_pattern() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"reading the borrow checker docs"}}"#,
+    );
+
+    cmd.arg("--regex")
+        .arg("bo+rrow")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("reading the borrow checker docs"));
+}
+
+#[test]
+fn case_sensitive_flag_excludes_a_wrong_case_match() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"the BORROW checker"}}"#,
+    );
+
+    cmd.arg("--case-sensitive")
+        .arg("borrow")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches"));
+}
+
+#[test]
+fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"anything"}}"#,
+    );
+
+    cmd.arg("--regex")
+        .arg("foo(bar")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ccsearch:"))
+        .stderr(predicates::str::contains("regex"));
+}
+
+#[test]
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
