@@ -277,6 +277,16 @@ pub fn resolve_scope(projects_root: &Path, scope: &Scope) -> Vec<PathBuf> {
     }
 }
 
+/// A single Match: the matching [`Segment`] plus the turn it was found in. The
+/// turn number is the same numbering [`parse_transcript`] / `show` use, so a
+/// search hit points straight at `show --around <turn>` (ADR 0002). It is
+/// `None` for a Title match — a Title is session metadata, not a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match {
+    pub turn: Option<usize>,
+    pub segment: Segment,
+}
+
 /// All Matches found within a single Session, grouped with the metadata needed
 /// to display and reopen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,8 +305,8 @@ pub struct SessionMatches {
     pub timestamp: Option<String>,
     /// The git branch the Session was recorded on (`gitBranch`), if any.
     pub branch: Option<String>,
-    /// The matching Segments, in the order they appear in the Session.
-    pub matches: Vec<Segment>,
+    /// The Matches, in the order they appear in the Session.
+    pub matches: Vec<Match>,
 }
 
 /// Search the given Project directories for `query`, returning one
@@ -357,6 +367,10 @@ fn search_one_session(
     let mut timestamp: Option<String> = None;
     let mut branch: Option<String> = None;
     let mut matches = Vec::new();
+    // Turn number = position among user/assistant Message Records, in file
+    // order — the same numbering `parse_transcript` assigns, so the turn a
+    // search hit reports lands `show --around <turn>` on the same Message.
+    let mut turn = 0;
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -372,12 +386,18 @@ fn search_one_session(
                 branch = Some(b.to_string());
             }
         }
+        let is_message = matches!(value.get("type").and_then(|t| t.as_str()), Some("user") | Some("assistant"));
+        if is_message {
+            turn += 1;
+        }
         for seg in segments_from_value(&value) {
             if seg.role == Role::Title {
                 title = Some(seg.text.clone());
             }
             if content.includes(seg.role) && matcher.is_match(&seg.text) {
-                matches.push(seg);
+                // A Title comes from an `ai-title` Record, not a turn.
+                let turn = if seg.role == Role::Title { None } else { Some(turn) };
+                matches.push(Match { turn, segment: seg });
             }
         }
     }
@@ -526,8 +546,8 @@ pub fn format_results(
         for m in &s.matches[..shown] {
             out.push_str(&format!(
                 "  {}: {}\n",
-                role_label(m.role),
-                centered_snippet(&m.text, matcher, color)
+                role_label(m.segment.role),
+                centered_snippet(&m.segment.text, matcher, color)
             ));
         }
         let hidden = s.matches.len() - shown;
@@ -678,11 +698,18 @@ pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
         }
     }
 
-    // Pass 2: build turns, numbering Messages 1-based in Record order.
+    // Pass 2: build turns, numbering every Message Record 1-based in Record
+    // order. Contentless Records (e.g. signature-only thinking) still consume a
+    // number but are not pushed — search numbers them identically, so the
+    // numbers stay aligned across the find→read handoff (ADR 0002).
     let mut turns = Vec::new();
     let mut number = 0;
     for value in &values {
-        let blocks = match value.get("type").and_then(|t| t.as_str()) {
+        let ty = value.get("type").and_then(|t| t.as_str());
+        if matches!(ty, Some("user") | Some("assistant")) {
+            number += 1;
+        }
+        let blocks = match ty {
             Some("user") => match value.pointer("/message/content") {
                 Some(c) if c.is_string() => {
                     let prompt = c.as_str().unwrap();
@@ -707,8 +734,7 @@ pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
         if blocks.is_empty() {
             continue;
         }
-        number += 1;
-        let kind = match value.get("type").and_then(|t| t.as_str()) {
+        let kind = match ty {
             Some("assistant") => TurnKind::Reply,
             // A user Message that is *only* tool results is mechanical output,
             // not something the person typed.
@@ -1031,6 +1057,34 @@ mod tests {
     }
 
     #[test]
+    fn a_match_carries_the_turn_number_of_the_message_it_was_found_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "turns",
+            &[
+                r#"{"type":"ai-title","aiTitle":"Tokio chat"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"first prompt about tokio"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a reply"}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":"second tokio question"}}"#,
+            ],
+        );
+
+        let results = search_project_dirs(&[proj], &lit("tokio"), &ContentSet::default());
+        let matches = &results[0].matches;
+
+        // A Title match is metadata, not a turn. The two user prompts are turns
+        // 1 and 3 (the assistant reply is turn 2) — the same numbering `show`
+        // uses, so a search hit points straight at `show --around <turn>`.
+        assert_eq!(matches[0].segment.role, Role::Title);
+        assert_eq!(matches[0].turn, None);
+        assert_eq!(matches[1].turn, Some(1));
+        assert_eq!(matches[2].turn, Some(3));
+    }
+
+    #[test]
     fn finds_matching_segments_in_a_session_grouped_with_its_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
@@ -1057,13 +1111,23 @@ mod tests {
         assert_eq!(
             s.matches,
             vec![
-                Segment { role: Role::Title, text: "Borrow checker chat".into() },
-                Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+                Match { turn: None, segment: Segment { role: Role::Title, text: "Borrow checker chat".into() } },
+                Match {
+                    turn: Some(1),
+                    segment: Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+                },
             ]
         );
     }
 
-    fn session(project: &str, title: Option<&str>, matches: Vec<Segment>) -> SessionMatches {
+    /// Build a [`SessionMatches`] from bare Segments, assigning each a 1-based
+    /// turn for tests that only care about rendering, not turn alignment.
+    fn session(project: &str, title: Option<&str>, segments: Vec<Segment>) -> SessionMatches {
+        let matches = segments
+            .into_iter()
+            .enumerate()
+            .map(|(i, segment)| Match { turn: Some(i + 1), segment })
+            .collect();
         SessionMatches {
             project: project.into(),
             session_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1504,7 +1568,7 @@ mod tests {
         let results = search_project_dirs(&[proj], &lit("zzztest"), &with_tools);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matches.len(), 2, "both the tool_use and tool_result match");
-        assert!(results[0].matches.iter().all(|m| m.role == Role::Tool));
+        assert!(results[0].matches.iter().all(|m| m.segment.role == Role::Tool));
     }
 
     #[test]
