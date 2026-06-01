@@ -115,9 +115,16 @@ impl ContentSet {
 /// not recognise, contributes no Segments instead of failing. This keeps a
 /// single malformed or future-versioned Record from aborting a search.
 pub fn parse_line(line: &str) -> Vec<Segment> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return Vec::new();
-    };
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => segments_from_value(&value),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The [`Segment`]s carried by an already-parsed Record. Split out from
+/// [`parse_line`] so the search pipeline can parse each line once and read both
+/// its Segments and its metadata (timestamp, branch) from the same value.
+fn segments_from_value(value: &serde_json::Value) -> Vec<Segment> {
     match value.get("type").and_then(|t| t.as_str()) {
         Some("user") => match value.pointer("/message/content") {
             // A plain string is a Prompt.
@@ -275,6 +282,10 @@ pub struct SessionMatches {
     pub path: PathBuf,
     /// The Session's AI-generated Title, if it has one.
     pub title: Option<String>,
+    /// The newest record timestamp seen in the Session, as the raw ISO 8601
+    /// string. `None` if no record carried one. ISO 8601 strings sort
+    /// lexically in chronological order, so this doubles as the recency key.
+    pub timestamp: Option<String>,
     /// The matching Segments, in the order they appear in the Session.
     pub matches: Vec<Segment>,
 }
@@ -316,9 +327,11 @@ pub fn search_project_dirs(
         .filter_map(|(project, path)| search_one_session(project, path, matcher, content))
         .collect();
 
-    // Stable order regardless of the parallel completion order; issue 05 will
-    // re-sort by recency.
-    results.sort_by(|a, b| a.path.cmp(&b.path));
+    // Newest Session first (timestamps are ISO 8601 strings, so reverse
+    // lexical = newest-first; Sessions without a timestamp sort last). Ties
+    // and missing timestamps fall back to path order for determinism
+    // regardless of the parallel completion order.
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
     results
 }
 
@@ -332,9 +345,19 @@ fn search_one_session(
 ) -> Option<SessionMatches> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut title = None;
+    let mut timestamp: Option<String> = None;
     let mut matches = Vec::new();
     for line in text.lines() {
-        for seg in parse_line(line) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
+            // ISO 8601 sorts lexically, so the max string is the newest record.
+            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
+                timestamp = Some(ts.to_string());
+            }
+        }
+        for seg in segments_from_value(&value) {
             if seg.role == Role::Title {
                 title = Some(seg.text.clone());
             }
@@ -352,6 +375,7 @@ fn search_one_session(
         session_id,
         path: path.to_path_buf(),
         title,
+        timestamp,
         matches,
     })
 }
@@ -584,6 +608,7 @@ mod tests {
             session_id: "11111111-2222-3333-4444-555555555555".into(),
             path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
             title: title.map(Into::into),
+            timestamp: None,
             matches,
         }
     }
@@ -725,6 +750,30 @@ mod tests {
             search_project_dirs(&[proj], &case_insensitive, &ContentSet::default()).len(),
             1
         );
+    }
+
+    #[test]
+    fn sessions_are_returned_newest_first_by_record_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        // IDs are chosen so alphabetical order (the old path sort) is the
+        // OPPOSITE of recency order, so a path-sorted result would fail.
+        write_session(
+            &proj,
+            "01-alphabetically-first",
+            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-01-15T10:00:00.000Z"}"#],
+        );
+        write_session(
+            &proj,
+            "99-alphabetically-last",
+            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-06-01T10:00:00.000Z"}"#],
+        );
+
+        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
+
+        let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["99-alphabetically-last", "01-alphabetically-first"]);
     }
 
     #[test]
