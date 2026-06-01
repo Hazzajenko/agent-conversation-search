@@ -48,6 +48,14 @@ _Avoid_: hit, result.
 The truncated, Query-centered excerpt of a Record's text shown for a Match, with the matched span highlighted.
 _Avoid_: excerpt, preview, context.
 
+**Transcript**:
+The full, human-readable rendering of a single Session in turn order, produced by the `show` verb. Query-agnostic — unlike a Snippet, it is not centered on a Match. Shows Messages only (the noise Records are dropped); tool calls render as compact one-liners and failed tool results are flagged.
+_Avoid_: dump, log, printout, history.
+
+**Failure**:
+A tool call that errored — a `tool_result` Record carrying `is_error: true`, joined via its `tool_use_id` back to the `tool_use` block that triggered it (which supplies the tool name and command). The unit that failure-analysis lists and counts; distinct from a Match (a Failure is found by structure, not by a Query).
+_Avoid_: error, crash, exception, bug.
+
 ## Example dialogue
 
 > **Dev:** When I run a search, does a hit mean the Query matched a whole Session?
