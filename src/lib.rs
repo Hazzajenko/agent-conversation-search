@@ -24,17 +24,14 @@ pub fn encode_project_dir(path: &str) -> String {
 /// an empty result rather than an error — a missing Store is "no matches".
 pub fn find_project_dirs(projects_root: &Path, cwd: &str) -> Vec<PathBuf> {
     let target = encode_project_dir(cwd).to_lowercase();
-    let Ok(entries) = std::fs::read_dir(projects_root) else {
-        return Vec::new();
-    };
-    let mut matches: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter(|e| e.file_name().to_string_lossy().to_lowercase() == target)
-        .map(|e| e.path())
-        .collect();
-    matches.sort();
-    matches
+    project_dir_paths(projects_root)
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_lowercase() == target)
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 /// Which kind of conversation content a [`Segment`] came from. Determines how
@@ -113,6 +110,52 @@ pub fn resolve_claude_dir(
 /// The Store (Projects root) under a resolved Claude config directory.
 pub fn projects_root(claude_dir: &Path) -> PathBuf {
     claude_dir.join("projects")
+}
+
+/// Which Projects a search covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Only the Project for the given working directory (the default).
+    Current { cwd: String },
+    /// Every Project in the Store.
+    All,
+    /// Projects whose directory name contains `name_substring` (case-insensitive).
+    Project { name_substring: String },
+}
+
+/// List every Project directory under `projects_root`, sorted. Returns empty if
+/// the root is unreadable.
+fn project_dir_paths(projects_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(projects_root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Resolve a [`Scope`] to the concrete Project directories a search should
+/// cover.
+pub fn resolve_scope(projects_root: &Path, scope: &Scope) -> Vec<PathBuf> {
+    match scope {
+        Scope::Current { cwd } => find_project_dirs(projects_root, cwd),
+        Scope::All => project_dir_paths(projects_root),
+        Scope::Project { name_substring } => {
+            let needle = name_substring.to_lowercase();
+            project_dir_paths(projects_root)
+                .into_iter()
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                })
+                .collect()
+        }
+    }
 }
 
 /// All Matches found within a single Session, grouped with the metadata needed
@@ -253,6 +296,38 @@ mod tests {
         assert_eq!(
             encode_project_dir(r"E:\projects\ai\agent-quiz-generator"),
             "E--projects-ai-agent-quiz-generator"
+        );
+    }
+
+    #[test]
+    fn all_scope_returns_every_project_dir_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("E--projects-a")).unwrap();
+        fs::create_dir(root.join("C--hacking-b")).unwrap();
+        fs::write(root.join("loose-file.txt"), "ignored").unwrap();
+
+        let dirs = resolve_scope(root, &Scope::All);
+
+        assert_eq!(dirs, vec![root.join("C--hacking-b"), root.join("E--projects-a")]);
+    }
+
+    #[test]
+    fn project_scope_matches_name_substring_case_insensitively_and_unions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("E--projects-games-creature-game")).unwrap();
+        fs::create_dir(root.join("E--projects-rust-ccsearch")).unwrap();
+        fs::create_dir(root.join("C--hacking-jplag")).unwrap();
+
+        let dirs = resolve_scope(root, &Scope::Project { name_substring: "PROJECTS".into() });
+
+        assert_eq!(
+            dirs,
+            vec![
+                root.join("E--projects-games-creature-game"),
+                root.join("E--projects-rust-ccsearch"),
+            ]
         );
     }
 
