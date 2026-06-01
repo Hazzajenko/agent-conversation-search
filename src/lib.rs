@@ -106,8 +106,10 @@ impl ContentSet {
     }
 }
 
-/// Extract the searchable [`Segment`]s a single JSONL line contributes, for the
-/// default content set (Prompts, Replies, Titles).
+/// Extract **every** searchable [`Segment`] a single JSONL line contributes,
+/// each tagged with its [`Role`] (Prompt, Reply, Title, Thinking, tool call or
+/// tool result). This parser applies no content policy — the search pipeline
+/// decides which roles to actually match via a [`ContentSet`].
 ///
 /// Parsing is **lenient**: a line that is not valid JSON, or whose shape we do
 /// not recognise, contributes no Segments instead of failing. This keeps a
