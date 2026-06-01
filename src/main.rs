@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ccsearch::{
-    format_results, projects_root, resolve_claude_dir, resolve_scope, search_project_dirs, Matcher,
-    Scope,
+    format_results, projects_root, resolve_claude_dir, resolve_scope, search_project_dirs,
+    ContentSet, Matcher, Scope,
 };
 
 /// Search your local Claude Code conversation history.
@@ -84,7 +84,8 @@ fn main() -> ExitCode {
 
     let root = projects_root(&claude_dir);
     let project_dirs = resolve_scope(&root, &scope);
-    let results = search_project_dirs(&project_dirs, &matcher);
+    let content = ContentSet::default();
+    let results = search_project_dirs(&project_dirs, &matcher, &content);
 
     print!("{}", format_results(&results));
     ExitCode::SUCCESS

@@ -71,6 +71,7 @@ pub enum Role {
     User,
     Assistant,
     Title,
+    Thinking,
 }
 
 /// A single searchable unit of text extracted from one Record, tagged with the
@@ -79,6 +80,28 @@ pub enum Role {
 pub struct Segment {
     pub role: Role,
     pub text: String,
+}
+
+/// Which kinds of content a search includes beyond the always-on default set
+/// (Prompts, Replies, Titles). [`parse_line`] emits every kind tagged by
+/// [`Role`]; this is the policy the search pipeline applies to decide what to
+/// actually match. The [`Default`] is the default set only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentSet {
+    /// Also search assistant `thinking` blocks.
+    pub thinking: bool,
+    /// Also search tool calls (`tool_use`) and tool results (`tool_result`).
+    pub tools: bool,
+}
+
+impl ContentSet {
+    /// Whether a [`Segment`] of the given [`Role`] is in scope for this set.
+    fn includes(&self, role: Role) -> bool {
+        match role {
+            Role::User | Role::Assistant | Role::Title => true,
+            Role::Thinking => self.thinking,
+        }
+    }
 }
 
 /// Extract the searchable [`Segment`]s a single JSONL line contributes, for the
@@ -99,20 +122,31 @@ pub fn parse_line(line: &str) -> Vec<Segment> {
         Some("assistant") => value
             .pointer("/message/content")
             .and_then(|c| c.as_array())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .map(|text| Segment { role: Role::Assistant, text: text.to_string() })
-                    .collect()
-            })
+            .map(|blocks| blocks.iter().filter_map(assistant_block_segment).collect())
             .unwrap_or_default(),
         Some("ai-title") => match value.get("aiTitle").and_then(|t| t.as_str()) {
             Some(text) => vec![Segment { role: Role::Title, text: text.to_string() }],
             None => Vec::new(),
         },
         _ => Vec::new(),
+    }
+}
+
+/// Map one block of an assistant Message's `content` array to the [`Segment`]
+/// it contributes, or `None` for blocks that carry no searchable text. Every
+/// recognised block is tagged with its [`Role`]; the search pipeline decides
+/// which roles to actually search.
+fn assistant_block_segment(block: &serde_json::Value) -> Option<Segment> {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("text") => block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(|text| Segment { role: Role::Assistant, text: text.to_string() }),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(|t| t.as_str())
+            .map(|text| Segment { role: Role::Thinking, text: text.to_string() }),
+        _ => None,
     }
 }
 
@@ -210,7 +244,11 @@ pub struct SessionMatches {
 /// Matching is delegated to `matcher` over the default content set (see
 /// [`parse_line`]). Sessions with no Matches are omitted. Unreadable directories
 /// and files are skipped rather than failing the whole search.
-pub fn search_project_dirs(project_dirs: &[PathBuf], matcher: &Matcher) -> Vec<SessionMatches> {
+pub fn search_project_dirs(
+    project_dirs: &[PathBuf],
+    matcher: &Matcher,
+    content: &ContentSet,
+) -> Vec<SessionMatches> {
     // Search each distinct Project once, even if a dir is passed more than once.
     let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
     dirs.sort();
@@ -234,7 +272,7 @@ pub fn search_project_dirs(project_dirs: &[PathBuf], matcher: &Matcher) -> Vec<S
 
     let mut results: Vec<SessionMatches> = sessions
         .par_iter()
-        .filter_map(|(project, path)| search_one_session(project, path, matcher))
+        .filter_map(|(project, path)| search_one_session(project, path, matcher, content))
         .collect();
 
     // Stable order regardless of the parallel completion order; issue 05 will
@@ -245,16 +283,21 @@ pub fn search_project_dirs(project_dirs: &[PathBuf], matcher: &Matcher) -> Vec<S
 
 /// Scan a single Session file, returning its Matches if any. A file that cannot
 /// be read yields `None` rather than failing the whole search.
-fn search_one_session(project: &str, path: &Path, matcher: &Matcher) -> Option<SessionMatches> {
-    let content = std::fs::read_to_string(path).ok()?;
+fn search_one_session(
+    project: &str,
+    path: &Path,
+    matcher: &Matcher,
+    content: &ContentSet,
+) -> Option<SessionMatches> {
+    let text = std::fs::read_to_string(path).ok()?;
     let mut title = None;
     let mut matches = Vec::new();
-    for line in content.lines() {
+    for line in text.lines() {
         for seg in parse_line(line) {
             if seg.role == Role::Title {
                 title = Some(seg.text.clone());
             }
-            if matcher.is_match(&seg.text) {
+            if content.includes(seg.role) && matcher.is_match(&seg.text) {
                 matches.push(seg);
             }
         }
@@ -280,6 +323,7 @@ fn role_label(role: Role) -> &'static str {
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::Title => "title",
+        Role::Thinking => "thinking",
     }
 }
 
@@ -474,7 +518,8 @@ mod tests {
             ],
         );
 
-        let results = search_project_dirs(std::slice::from_ref(&proj), &lit("borrow"));
+        let results =
+            search_project_dirs(std::slice::from_ref(&proj), &lit("borrow"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
@@ -589,7 +634,8 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"alpha match"}}"#],
         );
 
-        let results = search_project_dirs(&[proj.clone(), proj.clone()], &lit("alpha"));
+        let results =
+            search_project_dirs(&[proj.clone(), proj.clone()], &lit("alpha"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
     }
@@ -607,7 +653,7 @@ mod tests {
             );
         }
 
-        let results = search_project_dirs(&[proj], &lit("alpha"));
+        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["11-a", "22-b", "33-c"]);
@@ -625,10 +671,18 @@ mod tests {
         );
 
         let case_sensitive = Matcher::new("borrow", false, true).unwrap();
-        assert!(search_project_dirs(std::slice::from_ref(&proj), &case_sensitive).is_empty());
+        assert!(search_project_dirs(
+            std::slice::from_ref(&proj),
+            &case_sensitive,
+            &ContentSet::default()
+        )
+        .is_empty());
 
         let case_insensitive = Matcher::new("borrow", false, false).unwrap();
-        assert_eq!(search_project_dirs(&[proj], &case_insensitive).len(), 1);
+        assert_eq!(
+            search_project_dirs(&[proj], &case_insensitive, &ContentSet::default()).len(),
+            1
+        );
     }
 
     #[test]
@@ -647,26 +701,46 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"unrelated chatter"}}"#],
         );
 
-        let results = search_project_dirs(&[proj], &lit("tokio"));
+        let results = search_project_dirs(&[proj], &lit("tokio"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "hit");
     }
 
     #[test]
-    fn a_query_only_present_in_thinking_does_not_match_by_default() {
+    fn a_query_only_present_in_thinking_is_excluded_by_default_but_found_with_thinking() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
         fs::create_dir(&proj).unwrap();
         write_session(
             &proj,
             "only-thinking",
-            &[r#"{"type":"assistant","message":{"role":"assistant","content":[
-                {"type":"thinking","thinking":"the secret password is hunter2"}
-            ]}}"#],
+            &[r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"the secret password is hunter2"}]}}"#],
         );
 
-        assert!(search_project_dirs(&[proj], &lit("hunter2")).is_empty());
+        let default = ContentSet::default();
+        assert!(
+            search_project_dirs(std::slice::from_ref(&proj), &lit("hunter2"), &default).is_empty(),
+            "thinking is not in the default content set"
+        );
+
+        let with_thinking = ContentSet { thinking: true, ..ContentSet::default() };
+        assert_eq!(
+            search_project_dirs(&[proj], &lit("hunter2"), &with_thinking).len(),
+            1,
+            "--thinking includes thinking blocks"
+        );
+    }
+
+    #[test]
+    fn parses_an_assistant_thinking_block_into_a_thinking_segment() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"thinking","thinking":"the secret password is hunter2"}
+        ]}}"#;
+        assert_eq!(
+            parse_line(line),
+            vec![Segment { role: Role::Thinking, text: "the secret password is hunter2".into() }]
+        );
     }
 
     #[test]
@@ -705,16 +779,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_assistant_text_blocks_and_ignores_thinking_and_tool_use() {
+    fn parses_assistant_text_and_thinking_blocks_tagged_by_role_in_order() {
+        // parse_line emits every text-bearing block tagged with its Role; the
+        // search pipeline (not the parser) decides which roles to search.
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
-            {"type":"thinking","thinking":"internal reasoning we exclude by default"},
+            {"type":"thinking","thinking":"internal reasoning"},
             {"type":"text","text":"You can use a reference."},
-            {"type":"tool_use","name":"Bash","input":{}},
             {"type":"text","text":"Then run it."}
         ]}}"#;
         assert_eq!(
             parse_line(line),
             vec![
+                Segment { role: Role::Thinking, text: "internal reasoning".into() },
                 Segment { role: Role::Assistant, text: "You can use a reference.".into() },
                 Segment { role: Role::Assistant, text: "Then run it.".into() },
             ]
