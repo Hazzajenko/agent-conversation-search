@@ -146,6 +146,60 @@ fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
 }
 
 #[test]
+fn thinking_flag_includes_thinking_blocks() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering the zylophone problem"}]}}"#,
+    );
+
+    cmd.arg("--thinking")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("zylophone"))
+        .stdout(predicates::str::contains("thinking"));
+}
+
+#[test]
+fn tools_flag_includes_tool_results() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"the zylophone build log"}]}}"#,
+    );
+
+    cmd.arg("--tools")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("zylophone"))
+        .stdout(predicates::str::contains("tool"));
+}
+
+#[test]
+fn all_content_flag_includes_tool_calls() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"zylophone --tune"}}]}}"#,
+    );
+
+    cmd.arg("--all-content")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("zylophone"))
+        .stdout(predicates::str::contains("tool"));
+}
+
+#[test]
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
