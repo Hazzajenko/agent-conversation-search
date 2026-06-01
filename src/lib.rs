@@ -355,6 +355,21 @@ fn enumerate_sessions(project_dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// Search a single Session file by path (the `--session` scope — ADR 0002),
+/// returning 0 or 1 [`SessionMatches`]. The Project name is derived from the
+/// file's parent directory.
+pub fn search_session_file(path: &Path, matcher: &Matcher, content: &ContentSet) -> Vec<SessionMatches> {
+    search_one_session(&session_project_name(path), path, matcher, content).into_iter().collect()
+}
+
+/// The Project name for a Session file: its parent directory's name.
+fn session_project_name(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Scan a single Session file, returning its Matches if any. A file that cannot
 /// be read yields `None` rather than failing the whole search.
 fn search_one_session(
@@ -1096,6 +1111,12 @@ pub fn failed_in_project_dirs(
     results
 }
 
+/// List Failures within a single Session file by path, so `--failed` composes
+/// with the `--session` scope. Returns 0 or 1 [`SessionFailures`].
+pub fn failed_in_session_file(path: &Path, matcher: Option<&Matcher>) -> Vec<SessionFailures> {
+    failures_in_one_session(&session_project_name(path), path, matcher).into_iter().collect()
+}
+
 /// Scan a single Session for Failures, joining each errored `tool_result` to
 /// its `tool_use`. A file that cannot be read yields `None`.
 fn failures_in_one_session(
@@ -1415,6 +1436,24 @@ mod tests {
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, lines.join("\n")).unwrap();
         path
+    }
+
+    #[test]
+    fn search_session_file_scans_just_that_one_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        let path = write_session(
+            &proj,
+            "solo",
+            &[r#"{"type":"user","message":{"role":"user","content":"tokio here"}}"#],
+        );
+
+        let results = search_session_file(&path, &lit("tokio"), &ContentSet::default());
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].project, "E--projects-demo", "project derived from the parent dir");
+        assert_eq!(results[0].session_id, "solo");
     }
 
     #[test]

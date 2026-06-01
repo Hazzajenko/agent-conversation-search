@@ -12,11 +12,11 @@ Add `--session <id-prefix>` as a fourth scope, alongside the default current-Pro
 
 ## Acceptance criteria
 
-- [ ] `ccsearch "x" --session <prefix>` searches only that Session, printing turn-numbered Matches
-- [ ] The prefix resolves across the whole Store; ambiguous / no-match errors cleanly
-- [ ] Omitting the Query together with `--session` is a usage error
-- [ ] `--session` conflicts with `--all` and `--project`
-- [ ] Unit plus e2e tests
+- [x] `ccsearch "x" --session <prefix>` searches only that Session, printing turn-numbered Matches
+- [x] The prefix resolves across the whole Store; ambiguous / no-match errors cleanly
+- [x] Omitting the Query together with `--session` is a usage error
+- [x] `--session` conflicts with `--all` and `--project`
+- [x] Unit plus e2e tests
 
 ## Blocked by
 
