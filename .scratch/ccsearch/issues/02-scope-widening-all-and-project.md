@@ -1,6 +1,6 @@
 # Scope widening — `--all` and `--project`
 
-Status: ready-for-agent
+Status: done
 
 ## What to build
 
