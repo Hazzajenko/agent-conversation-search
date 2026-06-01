@@ -369,6 +369,96 @@ fn failed_query_filters_and_full_shows_everything() {
 }
 
 #[test]
+fn session_scope_searches_only_the_named_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Two Sessions in the same Project; the Query matches both.
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "aaaa1111-0000-0000-0000-000000000000",
+        r#"{"type":"user","message":{"role":"user","content":"tokio in session A"}}"#,
+    );
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "bbbb2222-0000-0000-0000-000000000000",
+        r#"{"type":"user","message":{"role":"user","content":"tokio in session B"}}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--session")
+        .arg("aaaa1111")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("tokio in session A"))
+        .stdout(predicates::str::contains("tokio in session B").not());
+}
+
+#[test]
+fn session_scope_errors_on_an_ambiguous_prefix() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let line = r#"{"type":"user","message":{"role":"user","content":"x"}}"#;
+    plant_session(store.path(), "E--projects-demo", "dupe1111-aaaa", line);
+    plant_session(store.path(), "E--projects-demo", "dupe2222-bbbb", line);
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--session")
+        .arg("dupe")
+        .arg("x")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+}
+
+#[test]
+fn session_scope_requires_a_query() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "aaaa1111-0000-0000-0000-000000000000",
+        r#"{"type":"user","message":{"role":"user","content":"x"}}"#,
+    );
+
+    // --session without a Query is not "dump the session" — that is show's job.
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--session")
+        .arg("aaaa1111")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("query is required"));
+}
+
+#[test]
+fn session_scope_conflicts_with_all() {
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--session")
+        .arg("abc")
+        .arg("--all")
+        .arg("x")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
 fn explicit_search_verb_behaves_like_a_bare_query() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

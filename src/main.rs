@@ -5,9 +5,10 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
-    failed_in_project_dirs, format_failures, format_paths, format_results, format_transcript,
-    format_windowed, parse_transcript, projects_root, resolve_claude_dir, resolve_scope,
-    resolve_session_prefix, search_project_dirs, ContentSet, Matcher, Scope, SessionRef,
+    failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_results,
+    format_transcript, format_windowed, parse_transcript, projects_root, resolve_claude_dir,
+    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, ContentSet,
+    Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -55,6 +56,11 @@ struct SearchArgs {
     /// (case-insensitive).
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
+
+    /// Search within a single Session, resolved by git-style id-prefix across
+    /// the whole Store (the "where in this conversation" scope).
+    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["all", "project"])]
+    session: Option<String>,
 
     /// Treat the query as a regular expression instead of a literal substring.
     #[arg(long, short = 'e')]
@@ -151,15 +157,27 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         }
     };
 
-    let scope = if args.all {
-        Scope::All
-    } else if let Some(name_substring) = args.project.clone() {
-        Scope::Project { name_substring }
-    } else {
-        Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
-    };
     let root = projects_root(claude_dir);
-    let project_dirs = resolve_scope(&root, &scope);
+
+    // --session resolves to one Session file; otherwise we operate over the
+    // scope's Project dirs. (--session conflicts with --all / --project.)
+    let session_path = match &args.session {
+        Some(prefix) => match resolve_session_prefix(&root, prefix) {
+            SessionRef::Unique(path) => Some(path),
+            SessionRef::NotFound => {
+                eprintln!("ccsearch: no session matches '{prefix}'");
+                return ExitCode::FAILURE;
+            }
+            SessionRef::Ambiguous(ids) => {
+                eprintln!("ccsearch: '{prefix}' is ambiguous — {} sessions match:", ids.len());
+                for id in ids.iter().take(10) {
+                    eprintln!("  {id}");
+                }
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
 
     // A Query, compiled — required for text search, optional under --failed.
     let matcher = match &args.query {
@@ -174,7 +192,10 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     };
 
     if args.failed {
-        let results = failed_in_project_dirs(&project_dirs, matcher.as_ref());
+        let results = match &session_path {
+            Some(path) => failed_in_session_file(path, matcher.as_ref()),
+            None => failed_in_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), matcher.as_ref()),
+        };
         let rendered = format_failures(&results, args.max_per_session, args.full);
         let _ = write!(anstream::stdout(), "{rendered}");
         return ExitCode::SUCCESS;
@@ -189,7 +210,10 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         thinking: args.thinking || args.all_content,
         tools: args.tools || args.all_content,
     };
-    let results = search_project_dirs(&project_dirs, &matcher, &content);
+    let results = match &session_path {
+        Some(path) => search_session_file(path, &matcher, &content),
+        None => search_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), &matcher, &content),
+    };
 
     // Let anstream decide whether colour is wanted (TTY, NO_COLOR, CLICOLOR_*)
     // and strip codes on the way out when it is not.
@@ -201,6 +225,18 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
+}
+
+/// The scope a search covers when not pinned to a single Session: `--all`,
+/// `--project <substr>`, or the current working directory's Project.
+fn scope(args: &SearchArgs, cwd: &Path) -> Scope {
+    if args.all {
+        Scope::All
+    } else if let Some(name_substring) = args.project.clone() {
+        Scope::Project { name_substring }
+    } else {
+        Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
+    }
 }
 
 /// Run the `show` verb: resolve the Session (by prefix, or a path from stdin),
