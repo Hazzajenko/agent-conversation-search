@@ -207,12 +207,10 @@ pub struct SessionMatches {
 /// Search the given Project directories for `query`, returning one
 /// [`SessionMatches`] per Session that contains at least one Match.
 ///
-/// Matching is a case-insensitive literal substring over the default content
-/// set (see [`parse_line`]). Sessions with no Matches are omitted. Unreadable
-/// directories and files are skipped rather than failing the whole search.
-pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<SessionMatches> {
-    let needle = query.to_lowercase();
-
+/// Matching is delegated to `matcher` over the default content set (see
+/// [`parse_line`]). Sessions with no Matches are omitted. Unreadable directories
+/// and files are skipped rather than failing the whole search.
+pub fn search_project_dirs(project_dirs: &[PathBuf], matcher: &Matcher) -> Vec<SessionMatches> {
     // Search each distinct Project once, even if a dir is passed more than once.
     let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
     dirs.sort();
@@ -236,7 +234,7 @@ pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<Session
 
     let mut results: Vec<SessionMatches> = sessions
         .par_iter()
-        .filter_map(|(project, path)| search_one_session(project, path, &needle))
+        .filter_map(|(project, path)| search_one_session(project, path, matcher))
         .collect();
 
     // Stable order regardless of the parallel completion order; issue 05 will
@@ -247,7 +245,7 @@ pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<Session
 
 /// Scan a single Session file, returning its Matches if any. A file that cannot
 /// be read yields `None` rather than failing the whole search.
-fn search_one_session(project: &str, path: &Path, needle: &str) -> Option<SessionMatches> {
+fn search_one_session(project: &str, path: &Path, matcher: &Matcher) -> Option<SessionMatches> {
     let content = std::fs::read_to_string(path).ok()?;
     let mut title = None;
     let mut matches = Vec::new();
@@ -256,7 +254,7 @@ fn search_one_session(project: &str, path: &Path, needle: &str) -> Option<Sessio
             if seg.role == Role::Title {
                 title = Some(seg.text.clone());
             }
-            if seg.text.to_lowercase().contains(needle) {
+            if matcher.is_match(&seg.text) {
                 matches.push(seg);
             }
         }
@@ -449,6 +447,12 @@ mod tests {
         assert!(find_project_dirs(missing, r"E:\whatever").is_empty());
     }
 
+    /// A default Matcher (literal, case-insensitive) for tests that only care
+    /// about which Sessions match, not how the Query is compiled.
+    fn lit(query: &str) -> Matcher {
+        Matcher::new(query, false, false).unwrap()
+    }
+
     fn write_session(dir: &Path, id: &str, lines: &[&str]) -> PathBuf {
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, lines.join("\n")).unwrap();
@@ -470,7 +474,7 @@ mod tests {
             ],
         );
 
-        let results = search_project_dirs(std::slice::from_ref(&proj), "borrow");
+        let results = search_project_dirs(std::slice::from_ref(&proj), &lit("borrow"));
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
@@ -585,7 +589,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"alpha match"}}"#],
         );
 
-        let results = search_project_dirs(&[proj.clone(), proj.clone()], "alpha");
+        let results = search_project_dirs(&[proj.clone(), proj.clone()], &lit("alpha"));
 
         assert_eq!(results.len(), 1);
     }
@@ -603,10 +607,28 @@ mod tests {
             );
         }
 
-        let results = search_project_dirs(&[proj], "alpha");
+        let results = search_project_dirs(&[proj], &lit("alpha"));
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["11-a", "22-b", "33-c"]);
+    }
+
+    #[test]
+    fn search_honours_the_matcher_case_sensitivity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "shouting",
+            &[r#"{"type":"user","message":{"role":"user","content":"the BORROW checker"}}"#],
+        );
+
+        let case_sensitive = Matcher::new("borrow", false, true).unwrap();
+        assert!(search_project_dirs(std::slice::from_ref(&proj), &case_sensitive).is_empty());
+
+        let case_insensitive = Matcher::new("borrow", false, false).unwrap();
+        assert_eq!(search_project_dirs(&[proj], &case_insensitive).len(), 1);
     }
 
     #[test]
@@ -625,7 +647,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"unrelated chatter"}}"#],
         );
 
-        let results = search_project_dirs(&[proj], "tokio");
+        let results = search_project_dirs(&[proj], &lit("tokio"));
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "hit");
@@ -644,7 +666,7 @@ mod tests {
             ]}}"#],
         );
 
-        assert!(search_project_dirs(&[proj], "hunter2").is_empty());
+        assert!(search_project_dirs(&[proj], &lit("hunter2")).is_empty());
     }
 
     #[test]
