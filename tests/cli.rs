@@ -324,6 +324,51 @@ fn search_output_carries_the_session_id_and_turn_handoff() {
 }
 
 #[test]
+fn failed_lists_failures_by_structure_with_the_handoff_shape() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Exit code 101\nerror[E0433]: failed to resolve"}]}}"#,
+        ]
+        .join("\n"),
+    );
+
+    // No query: lists all Failures in scope, joined to the failing tool.
+    cmd.arg("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("✗ Bash"))
+        .stdout(predicates::str::contains("cargo test"))
+        .stdout(predicates::str::contains("exit 101 · error[E0433]: failed to resolve"));
+}
+
+#[test]
+fn failed_query_filters_and_full_shows_everything() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Exit code 101\nmid line\nerror[E0433]: failed to resolve"}]}}"#,
+        ]
+        .join("\n"),
+    );
+
+    cmd.arg("cargo")
+        .arg("--failed")
+        .arg("--full")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mid line")); // --full shows non-salient lines
+}
+
+#[test]
 fn explicit_search_verb_behaves_like_a_bare_query() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
