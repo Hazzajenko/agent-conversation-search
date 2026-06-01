@@ -200,6 +200,26 @@ fn all_content_flag_includes_tool_calls() {
 }
 
 #[test]
+fn max_per_session_flag_caps_matches_and_notes_the_rest() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"{"type":"user","message":{"role":"user","content":"zebra one"}}"#,
+        r#"{"type":"user","message":{"role":"user","content":"zebra two"}}"#,
+        r#"{"type":"user","message":{"role":"user","content":"zebra three"}}"#,
+    ]
+    .join("\n");
+    let mut cmd = ccsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("-m")
+        .arg("1")
+        .arg("zebra")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("+2 more"));
+}
+
+#[test]
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

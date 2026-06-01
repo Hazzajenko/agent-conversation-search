@@ -51,6 +51,10 @@ struct Cli {
     /// Search every content kind (equivalent to --thinking --tools).
     #[arg(long)]
     all_content: bool,
+
+    /// Maximum matches shown per session; 0 means unlimited.
+    #[arg(long, short = 'm', value_name = "N", default_value_t = 3)]
+    max_per_session: usize,
 }
 
 fn main() -> ExitCode {
@@ -102,6 +106,6 @@ fn main() -> ExitCode {
     };
     let results = search_project_dirs(&project_dirs, &matcher, &content);
 
-    print!("{}", format_results(&results, &matcher));
+    print!("{}", format_results(&results, &matcher, cli.max_per_session));
     ExitCode::SUCCESS
 }
