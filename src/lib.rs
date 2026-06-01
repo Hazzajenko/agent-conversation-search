@@ -72,6 +72,7 @@ pub enum Role {
     Assistant,
     Title,
     Thinking,
+    Tool,
 }
 
 /// A single searchable unit of text extracted from one Record, tagged with the
@@ -100,6 +101,7 @@ impl ContentSet {
         match role {
             Role::User | Role::Assistant | Role::Title => true,
             Role::Thinking => self.thinking,
+            Role::Tool => self.tools,
         }
     }
 }
@@ -115,9 +117,16 @@ pub fn parse_line(line: &str) -> Vec<Segment> {
         return Vec::new();
     };
     match value.get("type").and_then(|t| t.as_str()) {
-        Some("user") => match value.pointer("/message/content").and_then(|c| c.as_str()) {
-            Some(text) => vec![Segment { role: Role::User, text: text.to_string() }],
-            None => Vec::new(),
+        Some("user") => match value.pointer("/message/content") {
+            // A plain string is a Prompt.
+            Some(c) if c.is_string() => {
+                vec![Segment { role: Role::User, text: c.as_str().unwrap().to_string() }]
+            }
+            // An array is tool_result content, not a Prompt.
+            Some(c) if c.is_array() => {
+                c.as_array().unwrap().iter().filter_map(user_block_segment).collect()
+            }
+            _ => Vec::new(),
         },
         Some("assistant") => value
             .pointer("/message/content")
@@ -129,6 +138,30 @@ pub fn parse_line(line: &str) -> Vec<Segment> {
             None => Vec::new(),
         },
         _ => Vec::new(),
+    }
+}
+
+/// Map one block of a user Message's `content` array to the [`Segment`] it
+/// contributes. User array content is tool_result content (a Prompt is a plain
+/// string, handled separately). A tool_result's own `content` may be a string
+/// or an array of text blocks.
+fn user_block_segment(block: &serde_json::Value) -> Option<Segment> {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("tool_result") => {
+            let text = match block.get("content") {
+                Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
+                Some(c) if c.is_array() => c
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => return None,
+            };
+            Some(Segment { role: Role::Tool, text })
+        }
+        _ => None,
     }
 }
 
@@ -146,6 +179,12 @@ fn assistant_block_segment(block: &serde_json::Value) -> Option<Segment> {
             .get("thinking")
             .and_then(|t| t.as_str())
             .map(|text| Segment { role: Role::Thinking, text: text.to_string() }),
+        Some("tool_use") => {
+            // Make both the tool name and its input arguments searchable.
+            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let input = block.get("input").map(|i| i.to_string()).unwrap_or_default();
+            Some(Segment { role: Role::Tool, text: format!("{name} {input}").trim().to_string() })
+        }
         _ => None,
     }
 }
@@ -324,6 +363,7 @@ fn role_label(role: Role) -> &'static str {
         Role::Assistant => "assistant",
         Role::Title => "title",
         Role::Thinking => "thinking",
+        Role::Tool => "tool",
     }
 }
 
@@ -744,6 +784,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_assistant_tool_use_block_into_a_tool_segment_with_name_and_input() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
+        let segs = parse_line(line);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].role, Role::Tool);
+        assert!(segs[0].text.contains("Bash"), "tool name searchable: {:?}", segs[0].text);
+        assert!(segs[0].text.contains("cargo test"), "tool input searchable: {:?}", segs[0].text);
+    }
+
+    #[test]
+    fn parses_a_user_tool_result_into_a_tool_segment() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"pasted file contents here"}]}}"#;
+        assert_eq!(
+            parse_line(line),
+            vec![Segment { role: Role::Tool, text: "pasted file contents here".into() }]
+        );
+    }
+
+    #[test]
     fn parses_a_user_message_into_a_user_segment() {
         let line = r#"{"type":"user","message":{"role":"user","content":"how do I borrow check"}}"#;
         assert_eq!(
@@ -769,13 +828,30 @@ mod tests {
     }
 
     #[test]
-    fn excludes_user_tool_results_from_the_default_content_set() {
-        // A user Record whose content is an array is a tool_result, not a typed
-        // Prompt — it must not be searched by default.
-        let line = r#"{"type":"user","message":{"role":"user","content":[
-            {"type":"tool_result","content":"pasted file contents here"}
-        ]}}"#;
-        assert_eq!(parse_line(line), vec![]);
+    fn tool_calls_and_results_are_excluded_by_default_but_found_with_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "with-tools",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo zzztest"}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"zzztest output here"}]}}"#,
+            ],
+        );
+
+        let default = ContentSet::default();
+        assert!(
+            search_project_dirs(std::slice::from_ref(&proj), &lit("zzztest"), &default).is_empty(),
+            "tool calls/results are not in the default content set"
+        );
+
+        let with_tools = ContentSet { tools: true, ..ContentSet::default() };
+        let results = search_project_dirs(&[proj], &lit("zzztest"), &with_tools);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matches.len(), 2, "both the tool_use and tool_result match");
+        assert!(results[0].matches.iter().all(|m| m.role == Role::Tool));
     }
 
     #[test]
