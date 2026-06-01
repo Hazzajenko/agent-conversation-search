@@ -5,9 +5,9 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
-    format_paths, format_results, format_transcript, parse_transcript, projects_root,
-    resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs, ContentSet,
-    Matcher, Scope, SessionRef,
+    format_paths, format_results, format_transcript, format_windowed, parse_transcript,
+    projects_root, resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
+    ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -95,6 +95,15 @@ struct ShowArgs {
     /// Expand assistant thinking blocks (collapsed to a count by default).
     #[arg(long)]
     thinking: bool,
+
+    /// Render only the turns around this turn number (e.g. a turn from a search
+    /// hit) instead of the whole Transcript.
+    #[arg(long, value_name = "TURN")]
+    around: Option<usize>,
+
+    /// Turns of context to show on either side of --around.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    context: usize,
 }
 
 fn main() -> ExitCode {
@@ -217,7 +226,12 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
     };
 
     let turns = parse_transcript(&text);
-    let rendered = format_transcript(&turns, args.thinking);
+    // --around windows the Transcript on a turn (from a search hit); without it
+    // the whole Transcript is rendered. --context only applies inside a window.
+    let rendered = match args.around {
+        Some(around) => format_windowed(&turns, around, args.context, args.thinking),
+        None => format_transcript(&turns, args.thinking),
+    };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
 }

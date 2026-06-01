@@ -12,11 +12,11 @@ Add turn-addressed windowing to `show`, so that arriving from a search / `--fail
 
 ## Acceptance criteria
 
-- [ ] Turn numbering matches the numbers search prints for the same Session
-- [ ] `--around T --context N` renders only the window, with hidden-turn indicators above/below
-- [ ] `--context` overrides the default; bare `show` is unaffected
-- [ ] Window bounds clamp correctly at the start and end of a Session
-- [ ] Unit plus `assert_cmd` tests for the bounds
+- [x] Turn numbering matches the numbers search prints for the same Session
+- [x] `--around T --context N` renders only the window, with hidden-turn indicators above/below
+- [x] `--context` overrides the default; bare `show` is unaffected
+- [x] Window bounds clamp correctly at the start and end of a Session
+- [x] Unit plus `assert_cmd` tests for the bounds
 
 ## Blocked by
 

@@ -445,6 +445,61 @@ fn show_dash_reads_a_session_path_from_stdin() {
 }
 
 #[test]
+fn show_around_windows_the_transcript_on_a_turn() {
+    let store = tempfile::tempdir().unwrap();
+    // Six user prompts → turns 1..=6, each with a unique marker.
+    let lines: String = (1..=6)
+        .map(|i| format!(r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let id = plant_session(store.path(), "E--projects-demo", "feed0001-0000-0000-0000-000000000000", &lines);
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg(&id[..8])
+        .arg("--around")
+        .arg("3")
+        .arg("--context")
+        .arg("1")
+        .assert()
+        .success()
+        // Window is turns 2..=4; turns 1 and 5,6 are hidden with indicators.
+        .stdout(predicates::str::contains("prompt number 3"))
+        .stdout(predicates::str::contains("prompt number 2"))
+        .stdout(predicates::str::contains("prompt number 4"))
+        .stdout(predicates::str::contains("prompt number 1").not())
+        .stdout(predicates::str::contains("prompt number 5").not())
+        .stdout(predicates::str::contains("1 earlier turn hidden"))
+        .stdout(predicates::str::contains("2 later turns hidden"));
+}
+
+#[test]
+fn bare_show_is_unaffected_by_the_default_context() {
+    let store = tempfile::tempdir().unwrap();
+    let lines: String = (1..=6)
+        .map(|i| format!(r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let id = plant_session(store.path(), "E--projects-demo", "feed0002-0000-0000-0000-000000000000", &lines);
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("show")
+        .arg(&id[..8])
+        .assert()
+        .success()
+        // No --around: the whole Transcript, no hidden-turn indicators.
+        .stdout(predicates::str::contains("prompt number 1"))
+        .stdout(predicates::str::contains("prompt number 6"))
+        .stdout(predicates::str::contains("hidden").not());
+}
+
+#[test]
 fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
     let store = tempfile::tempdir().unwrap();
     let id = plant_session(

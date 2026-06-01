@@ -888,15 +888,60 @@ pub fn format_transcript(turns: &[Turn], show_thinking: bool) -> String {
     }
     let mut out = String::new();
     for turn in turns {
-        match turn.kind {
-            TurnKind::Prompt => out.push_str("you\n"),
-            TurnKind::Reply => out.push_str("claude\n"),
-            TurnKind::ToolOutput => {} // mechanical tool output: no speaker header
+        render_turn(&mut out, turn, show_thinking);
+    }
+    out
+}
+
+/// Render one [`Turn`]: its speaker header (tool output has none) followed by
+/// its blocks, then a trailing blank line.
+fn render_turn(out: &mut String, turn: &Turn, show_thinking: bool) {
+    match turn.kind {
+        TurnKind::Prompt => out.push_str("you\n"),
+        TurnKind::Reply => out.push_str("claude\n"),
+        TurnKind::ToolOutput => {} // mechanical tool output: no speaker header
+    }
+    for block in &turn.blocks {
+        render_block(out, block, show_thinking);
+    }
+    out.push('\n');
+}
+
+/// The contiguous slice of `turns` to render for a `--around T --context N`
+/// window, plus how many turns fall before and after it. Turns are
+/// number-sorted, so the window is a slice. The range is `[T-N, T+N]` on the
+/// turn-number axis (the numbering search emits), clamping naturally at the
+/// ends of the Session; a target past the last turn yields an empty window.
+pub fn window_turns(turns: &[Turn], around: usize, context: usize) -> (&[Turn], usize, usize) {
+    let lo = around.saturating_sub(context);
+    let hi = around.saturating_add(context);
+    let start = turns.iter().position(|t| t.number >= lo).unwrap_or(turns.len());
+    let end = turns.iter().rposition(|t| t.number <= hi).map_or(start, |i| i + 1);
+    (&turns[start..end], start, turns.len() - end)
+}
+
+/// Render a windowed Transcript: the turns around `around` (see
+/// [`window_turns`]), bracketed by indicators of how many turns are hidden
+/// above and below so the reader knows where they are in the Session.
+pub fn format_windowed(turns: &[Turn], around: usize, context: usize, show_thinking: bool) -> String {
+    let (window, above, below) = window_turns(turns, around, context);
+    let mut out = String::new();
+    if above > 0 {
+        let unit = if above == 1 { "turn" } else { "turns" };
+        out.push_str(&format!(
+            "… {above} earlier {unit} hidden — omit --around for the whole transcript\n\n"
+        ));
+    }
+    if window.is_empty() {
+        out.push_str("(no turns in this window)\n");
+    } else {
+        for turn in window {
+            render_turn(&mut out, turn, show_thinking);
         }
-        for block in &turn.blocks {
-            render_block(&mut out, block, show_thinking);
-        }
-        out.push('\n');
+    }
+    if below > 0 {
+        let unit = if below == 1 { "turn" } else { "turns" };
+        out.push_str(&format!("… {below} later {unit} hidden\n"));
     }
     out
 }
@@ -1878,6 +1923,65 @@ mod tests {
     #[test]
     fn an_empty_session_renders_a_clear_placeholder() {
         assert_eq!(format_transcript(&parse_transcript(""), false), "(no messages)\n");
+    }
+
+    /// `n` plain Prompt turns numbered 1..=n, each carrying a unique marker.
+    fn numbered_turns(n: usize) -> Vec<Turn> {
+        (1..=n)
+            .map(|i| Turn {
+                number: i,
+                kind: TurnKind::Prompt,
+                blocks: vec![TurnBlock::Text(format!("turn-{i}-text"))],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn window_selects_the_turns_around_the_target_and_counts_the_rest() {
+        let turns = numbered_turns(10);
+
+        let (window, above, below) = window_turns(&turns, 5, 2);
+
+        let nums: Vec<usize> = window.iter().map(|t| t.number).collect();
+        assert_eq!(nums, vec![3, 4, 5, 6, 7], "turns 5±2");
+        assert_eq!(above, 2, "turns 1,2 hidden above");
+        assert_eq!(below, 3, "turns 8,9,10 hidden below");
+    }
+
+    #[test]
+    fn window_clamps_at_the_start() {
+        let turns = numbered_turns(10);
+
+        let (window, above, below) = window_turns(&turns, 1, 3);
+
+        assert_eq!(window.first().map(|t| t.number), Some(1));
+        assert_eq!(window.last().map(|t| t.number), Some(4));
+        assert_eq!(above, 0, "nothing hidden before turn 1");
+        assert_eq!(below, 6);
+    }
+
+    #[test]
+    fn window_clamps_at_the_end() {
+        let turns = numbered_turns(10);
+
+        let (window, above, below) = window_turns(&turns, 10, 3);
+
+        assert_eq!(window.first().map(|t| t.number), Some(7));
+        assert_eq!(window.last().map(|t| t.number), Some(10));
+        assert_eq!(above, 6);
+        assert_eq!(below, 0, "nothing hidden after the last turn");
+    }
+
+    #[test]
+    fn format_windowed_renders_only_the_window_with_hidden_indicators() {
+        let turns = numbered_turns(10);
+
+        let out = format_windowed(&turns, 5, 2, false);
+
+        assert!(out.contains("turn-5-text"), "the target turn is shown: {out}");
+        assert!(!out.contains("turn-2-text") && !out.contains("turn-8-text"), "outside hidden: {out}");
+        assert!(out.contains("2 earlier turns hidden"), "above indicator: {out}");
+        assert!(out.contains("3 later turns hidden"), "below indicator: {out}");
     }
 
     proptest::proptest! {
