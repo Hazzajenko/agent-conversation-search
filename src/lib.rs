@@ -89,6 +89,32 @@ pub fn parse_line(line: &str) -> Vec<Segment> {
     }
 }
 
+/// Resolve the Claude config directory (the `~/.claude` equivalent that
+/// contains the `projects/` Store) from the available sources, in precedence
+/// order: an explicit `--claude-dir` override, then `$CLAUDE_CONFIG_DIR`, then
+/// `<home>/.claude`. Returns `None` only when none of the three is available.
+///
+/// Sources are passed in rather than read from the environment so the
+/// precedence is pure and testable; the binary supplies the real values.
+pub fn resolve_claude_dir(
+    cli_override: Option<&Path>,
+    env_config_dir: Option<&str>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = cli_override {
+        return Some(dir.to_path_buf());
+    }
+    if let Some(dir) = env_config_dir {
+        return Some(PathBuf::from(dir));
+    }
+    home.map(|h| h.join(".claude"))
+}
+
+/// The Store (Projects root) under a resolved Claude config directory.
+pub fn projects_root(claude_dir: &Path) -> PathBuf {
+    claude_dir.join("projects")
+}
+
 /// All Matches found within a single Session, grouped with the metadata needed
 /// to display and reopen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +268,41 @@ mod tests {
                 Segment { role: Role::Title, text: "Borrow checker chat".into() },
                 Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
             ]
+        );
+    }
+
+    #[test]
+    fn cli_override_wins_over_env_and_home() {
+        let dir = resolve_claude_dir(
+            Some(Path::new("/explicit/claude")),
+            Some("/env/claude"),
+            Some(Path::new("/home/jenki")),
+        );
+        assert_eq!(dir, Some(PathBuf::from("/explicit/claude")));
+    }
+
+    #[test]
+    fn env_config_dir_wins_over_home_when_no_override() {
+        let dir = resolve_claude_dir(None, Some("/env/claude"), Some(Path::new("/home/jenki")));
+        assert_eq!(dir, Some(PathBuf::from("/env/claude")));
+    }
+
+    #[test]
+    fn falls_back_to_home_dot_claude() {
+        let dir = resolve_claude_dir(None, None, Some(Path::new("/home/jenki")));
+        assert_eq!(dir, Some(PathBuf::from("/home/jenki/.claude")));
+    }
+
+    #[test]
+    fn resolves_to_none_when_no_source_is_available() {
+        assert_eq!(resolve_claude_dir(None, None, None), None);
+    }
+
+    #[test]
+    fn projects_root_is_the_projects_subdir_of_the_claude_dir() {
+        assert_eq!(
+            projects_root(Path::new("/home/jenki/.claude")),
+            PathBuf::from("/home/jenki/.claude/projects")
         );
     }
 
