@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 /// Encode a working-directory path into the directory name Claude Code uses
 /// for that Project under `<store>/projects/`.
 ///
@@ -182,46 +184,66 @@ pub struct SessionMatches {
 /// directories and files are skipped rather than failing the whole search.
 pub fn search_project_dirs(project_dirs: &[PathBuf], query: &str) -> Vec<SessionMatches> {
     let needle = query.to_lowercase();
-    let mut results = Vec::new();
-    for dir in project_dirs {
-        let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
+
+    // Search each distinct Project once, even if a dir is passed more than once.
+    let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
+    dirs.sort();
+    dirs.dedup();
+
+    // Enumerate every Session file across the dirs, then scan them in parallel.
+    let sessions: Vec<(String, PathBuf)> = dirs
+        .iter()
+        .flat_map(|dir| {
+            let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+                .map(move |path| (project.clone(), path))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut results: Vec<SessionMatches> = sessions
+        .par_iter()
+        .filter_map(|(project, path)| search_one_session(project, path, &needle))
+        .collect();
+
+    // Stable order regardless of the parallel completion order; issue 05 will
+    // re-sort by recency.
+    results.sort_by(|a, b| a.path.cmp(&b.path));
+    results
+}
+
+/// Scan a single Session file, returning its Matches if any. A file that cannot
+/// be read yields `None` rather than failing the whole search.
+fn search_one_session(project: &str, path: &Path, needle: &str) -> Option<SessionMatches> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut title = None;
+    let mut matches = Vec::new();
+    for line in content.lines() {
+        for seg in parse_line(line) {
+            if seg.role == Role::Title {
+                title = Some(seg.text.clone());
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let mut title = None;
-            let mut matches = Vec::new();
-            for line in content.lines() {
-                for seg in parse_line(line) {
-                    if seg.role == Role::Title {
-                        title = Some(seg.text.clone());
-                    }
-                    if seg.text.to_lowercase().contains(&needle) {
-                        matches.push(seg);
-                    }
-                }
-            }
-            if !matches.is_empty() {
-                let session_id =
-                    path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-                results.push(SessionMatches {
-                    project: project.clone(),
-                    session_id,
-                    path,
-                    title,
-                    matches,
-                });
+            if seg.text.to_lowercase().contains(needle) {
+                matches.push(seg);
             }
         }
     }
-    results
+    if matches.is_empty() {
+        return None;
+    }
+    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    Some(SessionMatches {
+        project: project.to_string(),
+        session_id,
+        path: path.to_path_buf(),
+        title,
+        matches,
+    })
 }
 
 /// Maximum number of characters shown for a single Match snippet.
@@ -474,6 +496,41 @@ mod tests {
             projects_root(Path::new("/home/jenki/.claude")),
             PathBuf::from("/home/jenki/.claude/projects")
         );
+    }
+
+    #[test]
+    fn deduplicates_when_the_same_project_dir_is_passed_more_than_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        write_session(
+            &proj,
+            "only",
+            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"}}"#],
+        );
+
+        let results = search_project_dirs(&[proj.clone(), proj.clone()], "alpha");
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn returns_sessions_in_deterministic_order_despite_parallel_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        for id in ["33-c", "11-a", "22-b"] {
+            write_session(
+                &proj,
+                id,
+                &[r#"{"type":"user","message":{"role":"user","content":"alpha match"}}"#],
+            );
+        }
+
+        let results = search_project_dirs(&[proj], "alpha");
+
+        let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["11-a", "22-b", "33-c"]);
     }
 
     #[test]
