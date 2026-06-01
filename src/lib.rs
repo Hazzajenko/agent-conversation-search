@@ -454,6 +454,18 @@ fn date_prefix(timestamp: &str) -> Option<&str> {
     timestamp.get(..10)
 }
 
+/// Render just the matching Session file paths, one per line (grep `-l` style),
+/// in result order — for piping into other tools. An empty result set renders
+/// nothing.
+pub fn format_paths(results: &[SessionMatches]) -> String {
+    let mut out = String::new();
+    for s in results {
+        out.push_str(&s.path.to_string_lossy());
+        out.push('\n');
+    }
+    out
+}
+
 /// Render search results as human- and Claude-readable text: each Session as a
 /// `project · title · date · branch` header followed by one `role: snippet`
 /// line per Match. At most `max_per_session` Matches are shown per Session
@@ -806,6 +818,18 @@ mod tests {
 
         assert!(out.contains("match-four"), "no cap applied: {out}");
         assert!(!out.contains("more"), "no '+N more' line: {out}");
+    }
+
+    #[test]
+    fn files_mode_prints_one_session_path_per_line() {
+        let mut a = session("p", Some("t"), vec![Segment { role: Role::User, text: "x".into() }]);
+        a.path = PathBuf::from("/store/proj/aaa.jsonl");
+        let mut b = session("p", Some("t"), vec![Segment { role: Role::User, text: "x".into() }]);
+        b.path = PathBuf::from("/store/proj/bbb.jsonl");
+
+        let out = format_paths(&[a, b]);
+
+        assert_eq!(out, "/store/proj/aaa.jsonl\n/store/proj/bbb.jsonl\n");
     }
 
     #[test]
