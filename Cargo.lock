@@ -124,12 +124,14 @@ dependencies = [
 name = "ccsearch"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "assert_cmd",
  "clap",
  "dirs",
  "predicates",
  "proptest",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

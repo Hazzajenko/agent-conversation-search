@@ -3,6 +3,34 @@
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
+use regex::RegexBuilder;
+
+/// A compiled Query matcher. Both literal and regex Queries compile to one
+/// [`regex::Regex`], so the search pipeline has a single match path. Literal
+/// Queries are escaped first; case sensitivity is folded into the compiled
+/// pattern rather than re-checked per Match.
+pub struct Matcher {
+    re: regex::Regex,
+}
+
+impl Matcher {
+    /// Compile a [`Matcher`] for `query`. When `regex` is false the Query is
+    /// matched literally (metacharacters escaped); when `case_sensitive` is
+    /// false matching ignores ASCII/Unicode case. An invalid regex Query yields
+    /// an error rather than a panic.
+    pub fn new(query: &str, regex: bool, case_sensitive: bool) -> anyhow::Result<Matcher> {
+        let pattern = if regex { query.to_string() } else { regex::escape(query) };
+        let re = RegexBuilder::new(&pattern)
+            .case_insensitive(!case_sensitive)
+            .build()?;
+        Ok(Matcher { re })
+    }
+
+    /// Whether the Query matches anywhere within `text`.
+    pub fn is_match(&self, text: &str) -> bool {
+        self.re.is_match(text)
+    }
+}
 
 /// Encode a working-directory path into the directory name Claude Code uses
 /// for that Project under `<store>/projects/`.
@@ -293,6 +321,54 @@ pub fn format_results(results: &[SessionMatches]) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn default_matcher_is_literal_and_case_insensitive() {
+        let m = Matcher::new("borrow", false, false).unwrap();
+        assert!(m.is_match("how do I satisfy the BORROW checker"));
+        assert!(m.is_match("borrow"));
+        assert!(!m.is_match("unrelated text"));
+    }
+
+    #[test]
+    fn literal_mode_treats_regex_metacharacters_as_plain_text() {
+        let m = Matcher::new("a.c", false, false).unwrap();
+        assert!(m.is_match("the literal a.c string"));
+        assert!(!m.is_match("abc"), "the dot must not act as a wildcard");
+    }
+
+    #[test]
+    fn regex_mode_matches_the_query_as_a_pattern() {
+        let m = Matcher::new("foo|bar", true, false).unwrap();
+        assert!(m.is_match("a bar walked in"));
+        assert!(m.is_match("FOO shouted"), "still case-insensitive by default");
+        assert!(!m.is_match("neither here"));
+    }
+
+    #[test]
+    fn case_sensitive_mode_distinguishes_case_in_both_literal_and_regex() {
+        let lit = Matcher::new("borrow", false, true).unwrap();
+        assert!(lit.is_match("how to borrow safely"));
+        assert!(!lit.is_match("the BORROW checker"));
+
+        let re = Matcher::new("Foo|Bar", true, true).unwrap();
+        assert!(re.is_match("a Bar appeared"));
+        assert!(!re.is_match("a bar appeared"));
+    }
+
+    #[test]
+    fn an_invalid_regex_query_returns_an_error_instead_of_panicking() {
+        let result = Matcher::new("foo(bar", true, false);
+        assert!(result.is_err(), "an unbalanced group must be a clean error");
+    }
+
+    #[test]
+    fn an_invalid_pattern_is_harmless_in_literal_mode() {
+        // The same string that is invalid as a regex is fine as a literal,
+        // because it is escaped before compilation.
+        let m = Matcher::new("foo(bar", false, false).unwrap();
+        assert!(m.is_match("got foo(bar here"));
+    }
 
     #[test]
     fn encodes_a_windows_path_the_way_claude_code_stores_it() {
