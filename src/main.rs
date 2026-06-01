@@ -102,6 +102,6 @@ fn main() -> ExitCode {
     };
     let results = search_project_dirs(&project_dirs, &matcher, &content);
 
-    print!("{}", format_results(&results));
+    print!("{}", format_results(&results, &matcher));
     ExitCode::SUCCESS
 }

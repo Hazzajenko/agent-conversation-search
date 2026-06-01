@@ -30,6 +30,12 @@ impl Matcher {
     pub fn is_match(&self, text: &str) -> bool {
         self.re.is_match(text)
     }
+
+    /// The byte range of the first Match within `text`, if any. Used to center
+    /// and highlight a Snippet on the Match.
+    pub fn find(&self, text: &str) -> Option<(usize, usize)> {
+        self.re.find(text).map(|m| (m.start(), m.end()))
+    }
 }
 
 /// Encode a working-directory path into the directory name Claude Code uses
@@ -402,17 +408,44 @@ fn role_label(role: Role) -> &'static str {
     }
 }
 
-/// Collapse a Record's text to a single readable line, truncated to
-/// [`SNIPPET_MAX_CHARS`]. Internal runs of whitespace (including newlines)
-/// become single spaces so a multi-line Prompt stays on one output line.
-fn one_line_snippet(text: &str) -> String {
+/// Build a one-line Snippet for a Match: collapse internal whitespace (so a
+/// multi-line Record stays on one line), then take a window of at most
+/// [`SNIPPET_MAX_CHARS`] characters centered on the Match, adding `…` at either
+/// end that was cut. If the Match cannot be located in the collapsed text
+/// (e.g. it spanned whitespace that collapsed), the window falls back to the
+/// head of the text.
+fn centered_snippet(text: &str, matcher: &Matcher) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > SNIPPET_MAX_CHARS {
-        let head: String = collapsed.chars().take(SNIPPET_MAX_CHARS).collect();
-        format!("{head}…")
-    } else {
-        collapsed
+    let chars: Vec<char> = collapsed.chars().collect();
+    if chars.len() <= SNIPPET_MAX_CHARS {
+        return collapsed;
     }
+
+    // Locate the Match in char indices (regex gives byte offsets).
+    let (match_start, match_end) = match matcher.find(&collapsed) {
+        Some((b0, b1)) => (
+            collapsed[..b0].chars().count(),
+            collapsed[..b1].chars().count(),
+        ),
+        None => (0, 0),
+    };
+
+    // Center the window on the Match, clamped to the text bounds.
+    let match_len = match_end - match_start;
+    let pad = SNIPPET_MAX_CHARS.saturating_sub(match_len) / 2;
+    let mut start = match_start.saturating_sub(pad);
+    let end = (start + SNIPPET_MAX_CHARS).min(chars.len());
+    start = end.saturating_sub(SNIPPET_MAX_CHARS).min(start);
+
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// The `YYYY-MM-DD` date prefix of an ISO 8601 timestamp, or `None` if the
@@ -424,7 +457,7 @@ fn date_prefix(timestamp: &str) -> Option<&str> {
 /// Render search results as human- and Claude-readable text: each Session as a
 /// `project · title` header followed by one `role: snippet` line per Match.
 /// An empty result set renders a clear "no matches" line.
-pub fn format_results(results: &[SessionMatches]) -> String {
+pub fn format_results(results: &[SessionMatches], matcher: &Matcher) -> String {
     if results.is_empty() {
         return "No matches.\n".to_string();
     }
@@ -441,7 +474,7 @@ pub fn format_results(results: &[SessionMatches]) -> String {
         out.push_str(&header.join(" · "));
         out.push('\n');
         for m in &s.matches {
-            out.push_str(&format!("  {}: {}\n", role_label(m.role), one_line_snippet(&m.text)));
+            out.push_str(&format!("  {}: {}\n", role_label(m.role), centered_snippet(&m.text, matcher)));
         }
         out.push('\n');
     }
@@ -648,7 +681,7 @@ mod tests {
             ],
         )];
 
-        let out = format_results(&results);
+        let out = format_results(&results, &lit("borrow"));
 
         assert!(out.contains("E--projects-demo"), "header shows project: {out}");
         assert!(out.contains("Borrow checker chat"), "header shows title: {out}");
@@ -666,7 +699,7 @@ mod tests {
         ]);
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
 
-        let out = format_results(&[s]);
+        let out = format_results(&[s], &lit("borrow"));
 
         assert!(out.contains("2026-06-01"), "header shows YYYY-MM-DD date: {out}");
         assert!(!out.contains("10:00:00"), "but not the time component: {out}");
@@ -680,9 +713,40 @@ mod tests {
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
         s.branch = Some("feature/search".into());
 
-        let out = format_results(&[s]);
+        let out = format_results(&[s], &lit("borrow"));
 
         assert!(out.contains("feature/search"), "header shows branch: {out}");
+    }
+
+    #[test]
+    fn snippet_is_centered_on_the_match_with_ellipses_when_cut() {
+        let text = format!("{}NEEDLE {}", "alpha ".repeat(60), "omega ".repeat(60));
+        let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
+
+        let out = format_results(&[s], &lit("NEEDLE"));
+        // The match line is the indented one carrying NEEDLE.
+        let line = out.lines().find(|l| l.contains("NEEDLE")).expect("a line with the match");
+
+        assert!(line.contains('…'), "ellipsis marks the cut: {line}");
+        assert!(line.contains("alpha"), "context before the match is shown: {line}");
+        assert!(line.contains("omega"), "context after the match is shown: {line}");
+        assert!(
+            line.chars().count() <= SNIPPET_MAX_CHARS + 30,
+            "the window is bounded (got {} chars): {line}",
+            line.chars().count()
+        );
+    }
+
+    #[test]
+    fn snippet_at_the_start_has_no_leading_ellipsis() {
+        let text = format!("NEEDLE {}", "omega ".repeat(100));
+        let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
+
+        let out = format_results(&[s], &lit("NEEDLE"));
+        let snippet = out.lines().find(|l| l.contains("NEEDLE")).unwrap().trim_start();
+
+        assert!(snippet.starts_with("user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
+        assert!(snippet.ends_with('…'), "trailing ellipsis where cut: {snippet}");
     }
 
     #[test]
@@ -693,7 +757,7 @@ mod tests {
             vec![Segment { role: Role::User, text: "line one\n\n   line two".into() }],
         )];
 
-        let out = format_results(&results);
+        let out = format_results(&results, &lit("line"));
 
         assert!(out.contains("line one line two"), "collapsed: {out}");
         assert!(!out.contains("line one\n"), "no embedded newline in snippet: {out}");
@@ -701,7 +765,7 @@ mod tests {
 
     #[test]
     fn renders_a_clear_message_when_there_are_no_matches() {
-        let out = format_results(&[]);
+        let out = format_results(&[], &lit("anything"));
         assert!(out.to_lowercase().contains("no match"), "{out}");
     }
 
