@@ -5,9 +5,9 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
-    format_paths, format_results, format_transcript, format_windowed, parse_transcript,
-    projects_root, resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
-    ContentSet, Matcher, Scope, SessionRef,
+    failed_in_project_dirs, format_failures, format_paths, format_results, format_transcript,
+    format_windowed, parse_transcript, projects_root, resolve_claude_dir, resolve_scope,
+    resolve_session_prefix, search_project_dirs, ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -83,6 +83,16 @@ struct SearchArgs {
     /// Print only the matching session file paths (for piping).
     #[arg(long, short = 'l')]
     files: bool,
+
+    /// List failed tool calls by structure instead of searching text. The query
+    /// becomes optional and, when given, filters failures by command / error.
+    #[arg(long)]
+    failed: bool,
+
+    /// With --failed, print each failure's full error text instead of the
+    /// single salient line.
+    #[arg(long)]
+    full: bool,
 }
 
 /// Arguments for the `show` verb.
@@ -130,13 +140,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run the `search` verb: resolve the scope, compile the Query, scan, render.
+/// Run the `search` verb: resolve the scope, then either list Failures by
+/// structure (`--failed`, Query optional) or search text (Query required).
 fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
-    let Some(query) = args.query.as_deref() else {
-        eprintln!("ccsearch: a query is required (or use `ccsearch show <session>`)");
-        return ExitCode::FAILURE;
-    };
-
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
@@ -152,17 +158,33 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     } else {
         Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
     };
-
-    let matcher = match Matcher::new(query, args.regex, args.case_sensitive) {
-        Ok(matcher) => matcher,
-        Err(err) => {
-            eprintln!("ccsearch: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     let root = projects_root(claude_dir);
     let project_dirs = resolve_scope(&root, &scope);
+
+    // A Query, compiled — required for text search, optional under --failed.
+    let matcher = match &args.query {
+        Some(query) => match Matcher::new(query, args.regex, args.case_sensitive) {
+            Ok(matcher) => Some(matcher),
+            Err(err) => {
+                eprintln!("ccsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    if args.failed {
+        let results = failed_in_project_dirs(&project_dirs, matcher.as_ref());
+        let rendered = format_failures(&results, args.max_per_session, args.full);
+        let _ = write!(anstream::stdout(), "{rendered}");
+        return ExitCode::SUCCESS;
+    }
+
+    let Some(matcher) = matcher else {
+        eprintln!("ccsearch: a query is required (or use `ccsearch show <session>`, or `--failed`)");
+        return ExitCode::FAILURE;
+    };
+
     let content = ContentSet {
         thinking: args.thinking || args.all_content,
         tools: args.tools || args.all_content,

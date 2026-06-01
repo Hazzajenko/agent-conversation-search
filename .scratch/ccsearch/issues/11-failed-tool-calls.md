@@ -18,12 +18,12 @@ Add `--failed`, a flag on search that finds **Failures** (see CONTEXT.md) by *st
 
 ## Acceptance criteria
 
-- [ ] `--failed` lists Failures joined `tool_use` ↔ `tool_result`, grouped like search with id + turns + show hint
-- [ ] The salient line uses the fixed marker list with a last-line fallback; ANSI is stripped
-- [ ] `--full` shows the complete error text inline
-- [ ] Query is optional under `--failed` and filters Failures when present
-- [ ] Respects scope and `-m`
-- [ ] Unit tests for the join and the salient-line picker over fixtures (compiler error, panic, bash EOF, missing file); plus an e2e test
+- [x] `--failed` lists Failures joined `tool_use` ↔ `tool_result`, grouped like search with id + turns + show hint
+- [x] The salient line uses the fixed marker list with a last-line fallback; ANSI is stripped
+- [x] `--full` shows the complete error text inline
+- [x] Query is optional under `--failed` and filters Failures when present
+- [x] Respects scope and `-m` (`--all`/`--project`/current + `-m`; `--session` composes automatically once issue 10 lands)
+- [x] Unit tests for the join and the salient-line picker over fixtures (compiler error, panic, bash EOF, missing file); plus an e2e test
 
 ## Blocked by
 
