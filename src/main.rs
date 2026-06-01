@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ccsearch::{
-    find_project_dirs, format_results, projects_root, resolve_claude_dir, search_project_dirs,
+    format_results, projects_root, resolve_claude_dir, resolve_scope, search_project_dirs, Scope,
 };
 
 /// Search your local Claude Code conversation history.
@@ -21,6 +21,15 @@ struct Cli {
     /// then ~/.claude.
     #[arg(long, value_name = "PATH")]
     claude_dir: Option<PathBuf>,
+
+    /// Search across every project, not just the current directory's.
+    #[arg(long, conflicts_with = "project")]
+    all: bool,
+
+    /// Search projects whose directory name contains this substring
+    /// (case-insensitive).
+    #[arg(long, value_name = "SUBSTR")]
+    project: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -48,8 +57,16 @@ fn main() -> ExitCode {
         }
     };
 
+    let scope = if cli.all {
+        Scope::All
+    } else if let Some(name_substring) = cli.project {
+        Scope::Project { name_substring }
+    } else {
+        Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
+    };
+
     let root = projects_root(&claude_dir);
-    let project_dirs = find_project_dirs(&root, &cwd.to_string_lossy());
+    let project_dirs = resolve_scope(&root, &scope);
     let results = search_project_dirs(&project_dirs, &cli.query);
 
     print!("{}", format_results(&results));
