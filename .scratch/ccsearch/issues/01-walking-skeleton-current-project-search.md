@@ -1,6 +1,6 @@
 # Walking skeleton — substring search of the current Project
 
-Status: ready-for-agent
+Status: done
 
 ## What to build
 
