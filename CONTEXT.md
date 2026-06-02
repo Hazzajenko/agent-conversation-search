@@ -20,6 +20,14 @@ _Avoid_: line, entry, event.
 A Record of type `user` or `assistant` — an actual turn in the conversation. A user Message's content is normally a plain string; an assistant Message's content is an array of blocks (`text`, `thinking`, `tool_use`).
 _Avoid_: turn, post.
 
+**Block**:
+One element of a Message's `content` array. A user Message's Blocks are
+`tool_result` (and occasionally `text`); an assistant Message's Blocks are
+`text`, `thinking`, or `tool_use`. Parsed into a typed value with **distinct
+kinds for user and assistant**, so a user Block can never be a `tool_use` nor an
+assistant Block a `tool_result` (see ADR 0006).
+_Avoid_: element, item, part.
+
 **Prompt**:
 The text content of a user Message — what the person typed to Claude. Distinct from a Query.
 _Avoid_: input, request.
