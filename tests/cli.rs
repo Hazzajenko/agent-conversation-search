@@ -930,3 +930,124 @@ fn sessions_rejects_search_only_flags() {
             .failure(); // clap rejects an argument `sessions` does not define
     }
 }
+
+// --- projects: list Projects in the Store (issue 17, ADR 0005) -----------
+
+#[test]
+fn projects_lists_projects_by_real_cwd_with_counts_newest_first() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // A recent Project with two Sessions, and an older Project with one.
+    plant_project(
+        store.path(),
+        "E--projects-recent",
+        r#"{"type":"user","message":{"role":"user","content":"a"},"timestamp":"2026-06-01T10:00:00.000Z","cwd":"E:\\projects\\recent"}"#,
+    );
+    // Second Session in the recent Project (distinct file).
+    fs::write(
+        store.path().join("projects").join("E--projects-recent").join("second.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":"b"},"timestamp":"2026-06-02T10:00:00.000Z","cwd":"E:\\projects\\recent"}"#,
+    )
+    .unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-ancient",
+        r#"{"type":"user","message":{"role":"user","content":"c"},"timestamp":"2026-01-01T10:00:00.000Z","cwd":"E:\\projects\\ancient"}"#,
+    );
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("projects")
+        .assert()
+        .success()
+        // Real cwd as the name, with a Session count.
+        .stdout(predicates::str::contains("E:\\projects\\recent · 2 sessions · 2026-06-02"))
+        .stdout(predicates::str::contains("E:\\projects\\ancient · 1 session · 2026-01-01"))
+        // Newest-touched first.
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("recent").unwrap() < out.find("ancient").unwrap()
+        }));
+}
+
+#[test]
+fn projects_since_and_project_filter_compose() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-recent",
+        r#"{"type":"user","message":{"role":"user","content":"a"},"timestamp":"2026-06-01T10:00:00.000Z","cwd":"E:\\projects\\recent"}"#,
+    );
+    plant_project(
+        store.path(),
+        "E--projects-ancient",
+        r#"{"type":"user","message":{"role":"user","content":"c"},"timestamp":"2026-01-01T10:00:00.000Z","cwd":"E:\\projects\\ancient"}"#,
+    );
+
+    // --since drops the ancient Project.
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("projects")
+        .arg("--since")
+        .arg("2026-05-01")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("recent"))
+        .stdout(predicates::str::contains("ancient").not());
+
+    // --project filters by directory-name substring.
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("projects")
+        .arg("--project")
+        .arg("ancient")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ancient"))
+        .stdout(predicates::str::contains("recent").not());
+}
+
+#[test]
+fn projects_reports_cleanly_when_the_store_is_empty() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir_all(store.path().join("projects")).unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("projects")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No projects."));
+}
+
+#[test]
+fn projects_rejects_all_and_files_flags() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir_all(store.path().join("projects")).unwrap();
+
+    for flag in ["--all", "-l"] {
+        Command::cargo_bin("ccsearch")
+            .unwrap()
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path())
+            .arg("projects")
+            .arg(flag)
+            .assert()
+            .failure(); // clap rejects an argument `projects` does not define
+    }
+}

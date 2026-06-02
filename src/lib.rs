@@ -450,6 +450,9 @@ pub struct SessionInfo {
     pub timestamp: Option<String>,
     /// The git branch the Session was recorded on (`gitBranch`), if any.
     pub branch: Option<String>,
+    /// The real working directory the Session was recorded in (`cwd`), if any —
+    /// the human-readable name the `projects` verb shows for a Project.
+    pub cwd: Option<String>,
 }
 
 /// List every Session across the given Project dirs, newest first — the
@@ -481,6 +484,7 @@ fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
     let mut title = None;
     let mut timestamp: Option<String> = None;
     let mut branch: Option<String> = None;
+    let mut cwd: Option<String> = None;
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -495,13 +499,83 @@ fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
                 branch = Some(b.to_string());
             }
         }
+        // The cwd is constant within a Session, so the first one seen is enough.
+        if cwd.is_none() {
+            if let Some(c) = value.get("cwd").and_then(|c| c.as_str()) {
+                cwd = Some(c.to_string());
+            }
+        }
         for seg in segments_from_value(&value) {
             if seg.role == Role::Title {
                 title = Some(seg.text.clone());
             }
         }
     }
-    Some(SessionInfo { project: project.to_string(), session_id, path: path.to_path_buf(), title, timestamp, branch })
+    Some(SessionInfo { project: project.to_string(), session_id, path: path.to_path_buf(), title, timestamp, branch, cwd })
+}
+
+/// A Project's display metadata — the unit the `projects` verb lists (ADR 0004,
+/// ADR 0005). Identity is the on-disk directory; case-variant directories are
+/// folded into one `ProjectInfo` so the listing is identical on every OS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectInfo {
+    /// Display name: the real `cwd` of the group's newest Session, falling back
+    /// to the encoded directory name when no Session carries a `cwd`.
+    pub name: String,
+    /// How many Sessions the Project holds (summed across folded directories).
+    pub session_count: usize,
+    /// Newest Session `timestamp` in the group (raw ISO 8601), the recency key;
+    /// `None` if no Session is dateable, in which case the Project sorts last.
+    pub last_touched: Option<String>,
+}
+
+/// List the Projects across the given directories, newest-touched first (ADR
+/// 0005). Identity is the on-disk directory; directories whose names are equal
+/// case-insensitively are folded into one Project (ADR 0001's union rule without
+/// a cwd), so the listing behaves the same on case-insensitive (Windows/macOS)
+/// and case-sensitive (Linux/WSL) Stores. A directory with no listable Session
+/// contributes nothing. Each Project's display name is the `cwd` of its newest
+/// Session, falling back to the encoded directory name.
+pub fn list_projects(project_dirs: &[PathBuf]) -> Vec<ProjectInfo> {
+    // Reuse the Session listing: it already carries each Session's directory
+    // name, newest timestamp, and cwd — everything a Project row needs. The
+    // fold itself is a pure step over that data (see [`group_projects`]).
+    group_projects(list_sessions(project_dirs))
+}
+
+/// Fold a flat list of Sessions into Projects: group by the lower-cased
+/// directory name (ADR 0001's union key without a cwd), summing counts and
+/// taking the newest `timestamp` / its `cwd` per group. Split from
+/// [`list_projects`] because the case-variant fold cannot be staged on a
+/// case-insensitive filesystem (the two directories can't coexist), so the
+/// logic is tested here on constructed data rather than the real Store.
+fn group_projects(sessions: Vec<SessionInfo>) -> Vec<ProjectInfo> {
+    // Group by the lower-cased directory name (the case-fold union key).
+    let mut groups: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    for s in sessions {
+        groups.entry(s.project.to_lowercase()).or_default().push(s);
+    }
+
+    let mut projects: Vec<(String, ProjectInfo)> = groups
+        .into_iter()
+        .map(|(key, mut members)| {
+            // Newest Session first within the group (same comparator as
+            // list_sessions), so member[0] supplies the display cwd and date.
+            members.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+            let newest = &members[0];
+            let name = newest.cwd.clone().unwrap_or_else(|| newest.project.clone());
+            let info = ProjectInfo {
+                name,
+                session_count: members.len(),
+                last_touched: newest.timestamp.clone(),
+            };
+            (key, info)
+        })
+        .collect();
+
+    // Newest-touched first; ties broken by the lower-cased group key.
+    projects.sort_by(|a, b| b.1.last_touched.cmp(&a.1.last_touched).then_with(|| a.0.cmp(&b.0)));
+    projects.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Maximum number of characters shown for a single Match snippet.
@@ -643,6 +717,27 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
             s.timestamp.as_deref(),
             s.branch.as_deref(),
         ));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a Project listing (the `projects` verb, ADR 0004): one
+/// `name · N sessions · date` row per Project, newest-touched first. The date is
+/// omitted when the Project has no dateable Session. An empty listing renders a
+/// clear "no projects" line. Plain text (no colour), like `sessions`.
+pub fn format_projects(projects: &[ProjectInfo]) -> String {
+    if projects.is_empty() {
+        return "No projects.\n".to_string();
+    }
+    let mut out = String::new();
+    for p in projects {
+        let noun = if p.session_count == 1 { "session" } else { "sessions" };
+        out.push_str(&format!("{} · {} {noun}", p.name, p.session_count));
+        if let Some(date) = p.last_touched.as_deref().and_then(date_prefix) {
+            out.push_str(" · ");
+            out.push_str(date);
+        }
         out.push('\n');
     }
     out
@@ -1897,6 +1992,7 @@ mod tests {
             title: None,
             timestamp: Some("2026-06-01T10:00:00.000Z".into()),
             branch: Some("main".into()),
+            cwd: None,
         };
         let out = format_sessions(std::slice::from_ref(&info));
         // Byte-identical to a search Session header (ADR 0004): short-id leads,
@@ -1904,6 +2000,68 @@ mod tests {
         assert_eq!(out, "abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
 
         assert_eq!(format_sessions(&[]), "No sessions.\n");
+    }
+
+    /// A bare [`SessionInfo`] for a directory, dated and with a cwd — for
+    /// exercising the Project fold without touching the filesystem.
+    fn sess(dir: &str, id: &str, timestamp: Option<&str>, cwd: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            project: dir.into(),
+            session_id: id.into(),
+            path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
+            title: None,
+            timestamp: timestamp.map(Into::into),
+            branch: None,
+            cwd: cwd.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn group_projects_folds_case_variant_dirs_and_names_by_newest_cwd() {
+        // Two directories differing only by case — the same logical Project on a
+        // case-sensitive Store. (This can't be staged on a case-insensitive
+        // filesystem, hence constructed data rather than the real Store.)
+        let sessions = vec![
+            sess("E--projects-demo", "aaaa", Some("2026-01-01T10:00:00.000Z"), Some("E:\\projects\\demo")),
+            sess("e--projects-demo", "bbbb", Some("2026-06-01T10:00:00.000Z"), Some("E:\\projects\\demo")),
+            sess("E--projects-other", "cccc", Some("2026-06-02T10:00:00.000Z"), Some("E:\\projects\\other")),
+        ];
+
+        let projects = group_projects(sessions);
+
+        assert_eq!(projects.len(), 2, "the two case-variant dirs fold into one Project");
+        // Newest-touched first.
+        assert_eq!(projects[0].name, "E:\\projects\\other");
+        assert_eq!(projects[0].session_count, 1);
+        // The folded Project: count summed, last-touched = the newer Session,
+        // name from the newest Session's cwd.
+        assert_eq!(projects[1].name, "E:\\projects\\demo");
+        assert_eq!(projects[1].session_count, 2);
+        assert_eq!(projects[1].last_touched.as_deref(), Some("2026-06-01T10:00:00.000Z"));
+    }
+
+    #[test]
+    fn group_projects_falls_back_to_the_encoded_name_without_a_cwd() {
+        let projects = group_projects(vec![sess("E--projects-x", "aaaa", Some("2026-06-01T10:00:00.000Z"), None)]);
+        assert_eq!(projects[0].name, "E--projects-x");
+    }
+
+    #[test]
+    fn format_projects_renders_rows_and_pluralises() {
+        let projects = vec![
+            ProjectInfo {
+                name: "E:\\projects\\rust".into(),
+                session_count: 7,
+                last_touched: Some("2026-06-02T10:00:00.000Z".into()),
+            },
+            ProjectInfo { name: "E:\\projects\\solo".into(), session_count: 1, last_touched: None },
+        ];
+        let out = format_projects(&projects);
+        assert_eq!(
+            out,
+            "E:\\projects\\rust · 7 sessions · 2026-06-02\nE:\\projects\\solo · 1 session\n"
+        );
+        assert_eq!(format_projects(&[]), "No projects.\n");
     }
 
     /// Build a [`SessionMatches`] from bare Segments, assigning each a 1-based

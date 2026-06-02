@@ -6,11 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
-    failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_results,
-    format_session_paths, format_sessions, format_stats, format_transcript, format_windowed,
-    group_failures, list_sessions, parse_transcript, projects_root, resolve_claude_dir,
-    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, since_cutoff,
-    timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
+    failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_projects,
+    format_results, format_session_paths, format_sessions, format_stats, format_transcript,
+    format_windowed, group_failures, list_projects, list_sessions, parse_transcript, projects_root,
+    resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
+    search_session_file, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -42,6 +42,8 @@ enum Command {
     Show(ShowArgs),
     /// List the Sessions in a scope, newest first (no Query).
     Sessions(SessionsArgs),
+    /// List the Projects in the Store, newest-touched first (no Query).
+    Projects(ProjectsArgs),
 }
 
 /// Arguments for the `search` verb. Flattened into [`Cli`] so bare
@@ -161,6 +163,22 @@ struct SessionsArgs {
     files: bool,
 }
 
+/// Arguments for the `projects` verb: a whole-Store listing with optional
+/// recency and name filters. No `--all` (it is always whole-Store) and no `-l`
+/// (nothing consumes a Project path) — clap rejects them. ADR 0004 / ADR 0005.
+#[derive(Args)]
+struct ProjectsArgs {
+    /// Only Projects touched since this point: a relative duration (3d, 2w, 1h)
+    /// or an absolute ISO date (2026-05-01).
+    #[arg(long, value_name = "WHEN")]
+    since: Option<String>,
+
+    /// List only Projects whose directory name contains this substring
+    /// (case-insensitive).
+    #[arg(long, value_name = "SUBSTR")]
+    project: Option<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -182,6 +200,7 @@ fn main() -> ExitCode {
         Some(Command::Show(args)) => run_show(&claude_dir, &args),
         Some(Command::Search(args)) => run_search(&claude_dir, &args),
         Some(Command::Sessions(args)) => run_sessions(&claude_dir, &args),
+        Some(Command::Projects(args)) => run_projects(&claude_dir, &args),
         None => run_search(&claude_dir, &cli.search),
     }
 }
@@ -236,6 +255,30 @@ fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
         format_sessions(&sessions)
     };
     let _ = write!(anstream::stdout(), "{rendered}");
+    ExitCode::SUCCESS
+}
+
+/// Run the `projects` verb: list the Store's Projects (optionally narrowed to
+/// directories whose name matches `--project`), newest-touched first, applying
+/// `--since`. Always whole-Store, so it needs no cwd or `build_scope`.
+fn run_projects(claude_dir: &Path, args: &ProjectsArgs) -> ExitCode {
+    let root = projects_root(claude_dir);
+
+    let cutoff = match parse_since(args.since.as_deref()) {
+        Ok(cutoff) => cutoff,
+        Err(()) => return ExitCode::FAILURE,
+    };
+
+    let scope = match args.project.as_deref() {
+        Some(name_substring) => Scope::Project { name_substring: name_substring.to_string() },
+        None => Scope::All,
+    };
+    let mut projects = list_projects(&resolve_scope(&root, &scope));
+    if let Some(cutoff) = cutoff {
+        projects.retain(|p| timestamp_is_since(p.last_touched.as_deref(), cutoff));
+    }
+
+    let _ = write!(anstream::stdout(), "{}", format_projects(&projects));
     ExitCode::SUCCESS
 }
 
