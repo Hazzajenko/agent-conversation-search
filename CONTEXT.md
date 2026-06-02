@@ -5,7 +5,7 @@ A CLI tool that searches the local conversation history Claude Code writes to di
 ## Language
 
 **Project**:
-A working directory in which Claude Code was used. On disk it is one directory under `~/.claude/projects/`, named by replacing every path separator in the working directory with `-`.
+A working directory in which Claude Code was used. On disk it is normally one directory under `~/.claude/projects/`, named by replacing every path separator in the working directory with `-`; on a case-sensitive Store one logical Project can span several directories that differ only by case (see ADR 0001).
 _Avoid_: folder, workspace, repo.
 
 **Session**:
