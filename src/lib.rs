@@ -1015,25 +1015,54 @@ fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
 
 // --- failure analysis: finding failed tool calls by structure -----------
 
-/// Markers that identify the salient line of a tool Failure, in **priority
-/// order**. Applied top-to-bottom: the first marker that matches any line wins,
-/// so a compiler `error[` outranks a generic `Error:` regardless of where each
-/// appears. This is a fixed, documented lookup table — not a relevance ranker.
-/// (Real data: the naive "first line" is just `Exit code 101`; the real error
-/// is several lines below it — issue 11 / ADR 0002.)
-const FAILURE_MARKERS: &[&str] = &[
-    "error[",
-    "panicked at",
-    "assertion failed",
-    "assertion `",
-    "Error:",
-    "does not exist",
-    "No such file",
-    "unexpected EOF",
-    "command not found",
-    "fatal:",
-    "Traceback",
-    "error:",
+/// One classifier entry: a `needle` substring that identifies a failure class,
+/// and the short `label` shown as its signature in `stats`. For most entries the
+/// label is the needle itself; harness-noise entries use a terse label distinct
+/// from the verbose message they match (e.g. `rejected` for "tool use was
+/// rejected"). See [`FAILURE_MARKERS`].
+struct FailureMarker {
+    needle: &'static str,
+    label: &'static str,
+}
+
+const fn fm(needle: &'static str, label: &'static str) -> FailureMarker {
+    FailureMarker { needle, label }
+}
+
+/// Markers that classify a tool Failure, in **priority order**. Applied
+/// top-to-bottom: the first whose `needle` matches any line wins, so a compiler
+/// `error[` outranks a generic `Error:` regardless of where each appears. A
+/// fixed, documented lookup table — not a relevance ranker (ADR 0002 / 0003).
+///
+/// Ordering: specific code errors first, then common tool errors (issue 14),
+/// then harness noise last — a real error always out-ranks an incidental match.
+/// (Real data: the naive "first line" is just `Exit code 101`; the real error is
+/// several lines below it — issue 11.)
+const FAILURE_MARKERS: &[FailureMarker] = &[
+    // Code / command errors.
+    fm("error[", "error["),
+    fm("panicked at", "panicked at"),
+    fm("assertion failed", "assertion failed"),
+    fm("assertion `", "assertion `"),
+    fm("Error:", "Error:"),
+    fm("does not exist", "does not exist"),
+    fm("No such file", "No such file"),
+    fm("unexpected EOF", "unexpected EOF"),
+    fm("command not found", "command not found"),
+    fm("fatal:", "fatal:"),
+    fm("Traceback", "Traceback"),
+    fm("error:", "error:"),
+    // Common tool errors that match no code marker (issue 14).
+    fm("String to replace not found", "String to replace not found"),
+    fm("has not been read", "has not been read"),
+    fm("exceeds maximum allowed tokens", "exceeds maximum allowed tokens"),
+    fm("is not recognized", "is not recognized"),
+    fm("Blocked:", "Blocked"),
+    // Harness noise: structurally is_error, but the tool did not error. Bucketed
+    // (not filtered) under a terse label so they are visible but not conflated.
+    fm("tool use was rejected", "rejected"),
+    fm("temporarily unavailable", "unavailable"),
+    fm("Cancelled: parallel tool call", "cancelled"),
 ];
 
 /// Strip ANSI escape sequences from `text` so a Failure's error line is plain.
@@ -1041,25 +1070,42 @@ fn strip_ansi(text: &str) -> String {
     anstream::adapter::strip_str(text).to_string()
 }
 
-/// The Failure's **signature**: the highest-priority [`FAILURE_MARKERS`] entry
-/// its error text matches, or `None` when none do. This is the grouping key for
-/// `stats` (ADR 0003) and the marker [`salient_line`] keys on, so the per-Failure
-/// list and the aggregate table can never disagree about a Failure's class.
+/// Normalise a Failure's error text for classification and display: unwrap the
+/// `<tool_use_error>…</tool_use_error>` envelope the tools wrap their messages in
+/// (otherwise the inner message never matches a marker — issue 14), then strip
+/// ANSI codes. Shared by [`failure_signature`] and [`salient_line`] so the
+/// aggregate table and the per-Failure list always agree.
+fn clean_error_text(error_text: &str) -> String {
+    let unwrapped = error_text.replace("<tool_use_error>", "").replace("</tool_use_error>", "");
+    strip_ansi(&unwrapped)
+}
+
+/// The highest-priority [`FAILURE_MARKERS`] entry the (cleaned) error text
+/// matches, or `None` when none do.
+fn matched_marker(error_text: &str) -> Option<&'static FailureMarker> {
+    let cleaned = clean_error_text(error_text);
+    FAILURE_MARKERS.iter().find(|m| cleaned.lines().any(|l| l.contains(m.needle)))
+}
+
+/// The Failure's **signature**: the matched marker's display `label`, or `None`
+/// when nothing matches. This is the grouping key for `stats` (ADR 0003); it
+/// shares [`matched_marker`] with [`salient_line`] so the list and the aggregate
+/// table can never disagree about a Failure's class.
 fn failure_signature(error_text: &str) -> Option<&'static str> {
-    let stripped = strip_ansi(error_text);
-    FAILURE_MARKERS.iter().copied().find(|m| stripped.lines().any(|l| l.contains(m)))
+    matched_marker(error_text).map(|m| m.label)
 }
 
 /// The single most informative line of a Failure's error text: the first line
-/// matching the highest-priority [`FAILURE_MARKERS`] entry, falling back to the
-/// last non-empty line when none match. ANSI codes are stripped first.
+/// containing the matched marker's needle, falling back to the last non-empty
+/// line when none match. The `<tool_use_error>` envelope and ANSI codes are
+/// stripped first.
 fn salient_line(error_text: &str) -> String {
-    let stripped = strip_ansi(error_text);
-    let lines: Vec<&str> = stripped.lines().collect();
-    match failure_signature(error_text) {
-        Some(marker) => lines
+    let cleaned = clean_error_text(error_text);
+    let lines: Vec<&str> = cleaned.lines().collect();
+    match matched_marker(error_text) {
+        Some(m) => lines
             .iter()
-            .find(|l| l.contains(marker))
+            .find(|l| l.contains(m.needle))
             .map_or_else(String::new, |l| l.trim().to_string()),
         None => lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string(),
     }
@@ -1351,7 +1397,7 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
 
     let indent = " ".repeat(head.chars().count());
     if full {
-        for line in strip_ansi(&f.error_text).lines() {
+        for line in clean_error_text(&f.error_text).lines() {
             out.push_str(&indent);
             out.push_str(line);
             out.push('\n');
@@ -2277,7 +2323,7 @@ mod tests {
 
     #[test]
     fn failure_signature_is_none_when_no_marker_matches() {
-        assert_eq!(failure_signature("File content exceeds maximum allowed tokens"), None);
+        assert_eq!(failure_signature("just some unremarkable stdout\nwith nothing notable"), None);
     }
 
     #[test]
@@ -2287,6 +2333,52 @@ mod tests {
         let text = "Exit code 101\nrunning 1 test\nthread 'main' panicked at src/lib.rs:5:9:";
         assert_eq!(failure_signature(text), Some("panicked at"));
         assert!(salient_line(text).contains("panicked at"));
+    }
+
+    #[test]
+    fn failure_signature_unwraps_tool_use_error_and_classifies_the_inner_message() {
+        // The wrapper must not defeat classification (issue 14).
+        let text = "<tool_use_error>String to replace not found in file.</tool_use_error>";
+        assert_eq!(failure_signature(text), Some("String to replace not found"));
+    }
+
+    #[test]
+    fn failure_signature_classifies_the_common_unmarked_tool_errors() {
+        assert_eq!(
+            failure_signature("File has not been read yet. Read it first before writing to it."),
+            Some("has not been read"),
+        );
+        assert_eq!(
+            failure_signature("File content (38631 tokens) exceeds maximum allowed tokens (25000)."),
+            Some("exceeds maximum allowed tokens"),
+        );
+        assert_eq!(
+            failure_signature("foo : The term 'foo' is not recognized as the name of a cmdlet"),
+            Some("is not recognized"),
+        );
+        assert_eq!(
+            failure_signature("<tool_use_error>Blocked: sleep 90 followed by: cat x</tool_use_error>"),
+            Some("Blocked"),
+        );
+    }
+
+    #[test]
+    fn failure_signature_buckets_harness_noise_under_clean_labels() {
+        // Structurally is_error, but the tool did not error — bucketed, not
+        // filtered, under a short label distinct from the matched substring.
+        let rejected = "The user doesn't want to proceed with this tool use. The tool use was rejected";
+        assert_eq!(failure_signature(rejected), Some("rejected"));
+        let unavailable = "claude-opus-4-8 is temporarily unavailable, so auto mode cannot determine safety";
+        assert_eq!(failure_signature(unavailable), Some("unavailable"));
+        // A parallel-batch sibling errored, so this call was cancelled unrun.
+        let cancelled = "Cancelled: parallel tool call Bash(cd \"D:\\x\" && git status) errored";
+        assert_eq!(failure_signature(cancelled), Some("cancelled"));
+    }
+
+    #[test]
+    fn salient_line_unwraps_the_tool_use_error_wrapper() {
+        let text = "<tool_use_error>String to replace not found in file.</tool_use_error>";
+        assert_eq!(salient_line(text), "String to replace not found in file.");
     }
 
     // --- finding Failures by structure -----------------------------------
@@ -2406,14 +2498,30 @@ mod tests {
     #[test]
     fn group_failures_buckets_unmatched_failures_under_a_none_signature() {
         let s = session_of(vec![
-            failure("Read", "File content exceeds maximum allowed tokens"),
-            failure("Write", "File has not been read yet"),
+            failure("Bash", "some unremarkable output\nnothing notable here"),
+            failure("Glob", "another line the markers do not recognise"),
         ]);
 
         let groups = group_failures(&[s]);
 
         assert!(groups.iter().all(|g| g.signature.is_none()), "no marker matched either");
         assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn group_failures_buckets_harness_noise_without_filtering_it() {
+        let s = session_of(vec![
+            failure("Bash", "Exit code 2\nThe tool use was rejected"),
+            failure("PowerShell", "claude is temporarily unavailable"),
+            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type"),
+        ]);
+
+        let groups = group_failures(&[s]);
+
+        // All three remain present (nothing filtered); noise carries clean labels.
+        assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 3, "no Failure is dropped");
+        assert!(groups.iter().any(|g| g.signature == Some("rejected")), "rejection bucketed");
+        assert!(groups.iter().any(|g| g.signature == Some("unavailable")), "unavailability bucketed");
     }
 
     #[test]
