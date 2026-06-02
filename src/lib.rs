@@ -1041,18 +1041,28 @@ fn strip_ansi(text: &str) -> String {
     anstream::adapter::strip_str(text).to_string()
 }
 
+/// The Failure's **signature**: the highest-priority [`FAILURE_MARKERS`] entry
+/// its error text matches, or `None` when none do. This is the grouping key for
+/// `stats` (ADR 0003) and the marker [`salient_line`] keys on, so the per-Failure
+/// list and the aggregate table can never disagree about a Failure's class.
+fn failure_signature(error_text: &str) -> Option<&'static str> {
+    let stripped = strip_ansi(error_text);
+    FAILURE_MARKERS.iter().copied().find(|m| stripped.lines().any(|l| l.contains(m)))
+}
+
 /// The single most informative line of a Failure's error text: the first line
 /// matching the highest-priority [`FAILURE_MARKERS`] entry, falling back to the
 /// last non-empty line when none match. ANSI codes are stripped first.
 fn salient_line(error_text: &str) -> String {
     let stripped = strip_ansi(error_text);
     let lines: Vec<&str> = stripped.lines().collect();
-    for marker in FAILURE_MARKERS {
-        if let Some(line) = lines.iter().find(|l| l.contains(marker)) {
-            return line.trim().to_string();
-        }
+    match failure_signature(error_text) {
+        Some(marker) => lines
+            .iter()
+            .find(|l| l.contains(marker))
+            .map_or_else(String::new, |l| l.trim().to_string()),
+        None => lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string(),
     }
-    lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string()
 }
 
 /// The exit code embedded in a Failure's error text (`Exit code N`, as Bash and
@@ -1226,6 +1236,37 @@ fn failures_in_one_session(
     })
 }
 
+/// One row of the `stats` table (ADR 0003): a count of Failures sharing the
+/// same `(tool, signature)`, where `signature` is the matched [`FAILURE_MARKERS`]
+/// entry (or `None` — one no-marker bucket per tool).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureGroup {
+    pub tool: Option<String>,
+    pub signature: Option<&'static str>,
+    pub count: usize,
+}
+
+/// Fold every Failure in scope into [`FailureGroup`]s keyed by `(tool, signature)`
+/// — the aggregate counterpart to [`format_failures`]'s per-Failure list. Sorted
+/// by count descending, then tool then signature, so output is deterministic
+/// regardless of scan order.
+pub fn group_failures(results: &[SessionFailures]) -> Vec<FailureGroup> {
+    let mut counts: HashMap<(Option<String>, Option<&'static str>), usize> = HashMap::new();
+    for session in results {
+        for f in &session.failures {
+            *counts.entry((f.tool.clone(), failure_signature(&f.error_text))).or_insert(0) += 1;
+        }
+    }
+    let mut groups: Vec<FailureGroup> = counts
+        .into_iter()
+        .map(|((tool, signature), count)| FailureGroup { tool, signature, count })
+        .collect();
+    groups.sort_by(|a, b| {
+        b.count.cmp(&a.count).then_with(|| a.tool.cmp(&b.tool)).then_with(|| a.signature.cmp(&b.signature))
+    });
+    groups
+}
+
 /// Render Failures with the search index shape: each Session as a header, then
 /// each Failure as two lines — `[turn] ✗ <tool>  <command>` and the salient
 /// error line (or the whole error text when `full`). At most `max_per_session`
@@ -1259,6 +1300,36 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
             out.push_str(&format!("  … +{hidden} more  ›  ccsearch show {short}\n"));
         }
         out.push('\n');
+    }
+    out
+}
+
+/// Render the `stats` table (ADR 0003): one right-aligned `<count>  ✗ <tool>
+/// <signature>` row per [`FailureGroup`], biggest first, with `(no marker)` for
+/// the unmatched bucket. Reports cleanly when there are none, like
+/// [`format_failures`].
+pub fn format_stats(groups: &[FailureGroup]) -> String {
+    if groups.is_empty() {
+        return "No failures.\n".to_string();
+    }
+    let count_width = groups.iter().map(|g| g.count.to_string().len()).max().unwrap_or(1);
+    // Cap the tool column so one long name (e.g. a verbose MCP tool) cannot
+    // sparse-out every other row; longer names simply overflow past the pad.
+    const TOOL_WIDTH_CAP: usize = 16;
+    let tool_width = groups
+        .iter()
+        .map(|g| g.tool.as_deref().unwrap_or("tool").chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(TOOL_WIDTH_CAP);
+    let mut out = String::new();
+    for g in groups {
+        let tool = g.tool.as_deref().unwrap_or("tool");
+        let signature = g.signature.unwrap_or("(no marker)");
+        out.push_str(&format!(
+            "{:>count_width$}  ✗ {:<tool_width$}  {}\n",
+            g.count, tool, signature
+        ));
     }
     out
 }
@@ -2195,6 +2266,29 @@ mod tests {
         assert_eq!(exit_code("File does not exist: /x"), None);
     }
 
+    // --- failure signature: the grouping key (ADR 0003) ------------------
+
+    #[test]
+    fn failure_signature_is_the_highest_priority_matched_marker() {
+        // `error[` outranks `error:`/`Error:` regardless of line order.
+        let text = "Exit code 101\nerror: aborting\nerror[E0433]: cannot find type";
+        assert_eq!(failure_signature(text), Some("error["));
+    }
+
+    #[test]
+    fn failure_signature_is_none_when_no_marker_matches() {
+        assert_eq!(failure_signature("File content exceeds maximum allowed tokens"), None);
+    }
+
+    #[test]
+    fn failure_signature_and_salient_line_agree_on_the_marker() {
+        // The list (salient_line) and the table (failure_signature) must never
+        // disagree about a Failure's class — they share the marker lookup.
+        let text = "Exit code 101\nrunning 1 test\nthread 'main' panicked at src/lib.rs:5:9:";
+        assert_eq!(failure_signature(text), Some("panicked at"));
+        assert!(salient_line(text).contains("panicked at"));
+    }
+
     // --- finding Failures by structure -----------------------------------
 
     #[test]
@@ -2261,6 +2355,82 @@ mod tests {
         assert_eq!(cargo[0].failures[0].command.as_deref(), Some("cargo test"));
     }
 
+    // --- aggregating Failures into a stats table (ADR 0003) --------------
+
+    fn failure(tool: &str, error_text: &str) -> Failure {
+        Failure {
+            turn: None,
+            tool: Some(tool.into()),
+            command: None,
+            exit_code: exit_code(error_text),
+            error_text: error_text.into(),
+        }
+    }
+
+    fn session_of(failures: Vec<Failure>) -> SessionFailures {
+        SessionFailures {
+            project: "E--projects-demo".into(),
+            session_id: "abcd1234-rest".into(),
+            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+            title: None,
+            timestamp: None,
+            branch: None,
+            failures,
+        }
+    }
+
+    #[test]
+    fn group_failures_counts_by_tool_and_marker_signature() {
+        let s = session_of(vec![
+            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type `A`"),
+            failure("PowerShell", "Exit code 101\nerror[E0609]: no field `b`"),
+            failure("Bash", "Exit code 2\nunexpected EOF while looking for matching `\"'"),
+        ]);
+
+        let groups = group_failures(std::slice::from_ref(&s));
+
+        // Two PowerShell `error[` failures collapse into one group of 2; the
+        // differing exit-less specifics (E0433 vs E0609) do not split them.
+        let ps = groups
+            .iter()
+            .find(|g| g.tool.as_deref() == Some("PowerShell") && g.signature == Some("error["))
+            .expect("a PowerShell error[ group");
+        assert_eq!(ps.count, 2);
+        let bash = groups
+            .iter()
+            .find(|g| g.tool.as_deref() == Some("Bash") && g.signature == Some("unexpected EOF"))
+            .expect("a Bash unexpected-EOF group");
+        assert_eq!(bash.count, 1);
+    }
+
+    #[test]
+    fn group_failures_buckets_unmatched_failures_under_a_none_signature() {
+        let s = session_of(vec![
+            failure("Read", "File content exceeds maximum allowed tokens"),
+            failure("Write", "File has not been read yet"),
+        ]);
+
+        let groups = group_failures(&[s]);
+
+        assert!(groups.iter().all(|g| g.signature.is_none()), "no marker matched either");
+        assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn group_failures_sorts_by_count_descending() {
+        let s = session_of(vec![
+            failure("Bash", "fatal: not a git repository"),
+            failure("PowerShell", "error[E0433]: x"),
+            failure("PowerShell", "error[E0609]: y"),
+            failure("PowerShell", "error[E0425]: z"),
+        ]);
+
+        let groups = group_failures(&[s]);
+
+        assert_eq!(groups.first().unwrap().count, 3, "the biggest group leads");
+        assert_eq!(groups.first().unwrap().signature, Some("error["));
+    }
+
     // --- rendering Failures ----------------------------------------------
 
     fn one_failure(failure: Failure) -> SessionFailures {
@@ -2312,6 +2482,55 @@ mod tests {
     #[test]
     fn format_failures_reports_cleanly_when_there_are_none() {
         assert!(format_failures(&[], 3, false).to_lowercase().contains("no failures"));
+    }
+
+    #[test]
+    fn format_stats_renders_a_counts_table_of_tool_signature_and_count() {
+        let groups = vec![
+            FailureGroup { tool: Some("PowerShell".into()), signature: Some("error["), count: 12 },
+            FailureGroup { tool: Some("Bash".into()), signature: Some("unexpected EOF"), count: 4 },
+        ];
+
+        let out = format_stats(&groups);
+
+        assert!(out.contains("12"), "the count: {out}");
+        assert!(out.contains("✗ PowerShell"), "tool with the failed glyph: {out}");
+        assert!(out.contains("error["), "the marker signature: {out}");
+        assert!(out.contains("unexpected EOF"));
+        // Counts are right-aligned to a common width, so 4 trails 12.
+        let twelve = out.find("12").unwrap();
+        let four = out.find(" 4").unwrap();
+        assert!(twelve < four, "biggest count first: {out}");
+    }
+
+    #[test]
+    fn format_stats_labels_the_none_signature_bucket() {
+        let groups = vec![FailureGroup { tool: Some("Read".into()), signature: None, count: 5 }];
+        assert!(format_stats(&groups).contains("(no marker)"), "names the unmatched bucket");
+    }
+
+    #[test]
+    fn format_stats_caps_the_tool_column_so_a_long_name_does_not_sparse_out_rows() {
+        let groups = vec![
+            FailureGroup { tool: Some("PowerShell".into()), signature: Some("error["), count: 2 },
+            FailureGroup {
+                tool: Some("mcp__ccd_session_mgmt__search_session_transcripts".into()),
+                signature: None,
+                count: 1,
+            },
+        ];
+
+        let out = format_stats(&groups);
+        let short_row = out.lines().find(|l| l.contains("PowerShell")).unwrap();
+        assert!(
+            short_row.chars().count() < 40,
+            "the long MCP name must not pad the PowerShell row out: {short_row:?}"
+        );
+    }
+
+    #[test]
+    fn format_stats_reports_cleanly_when_there_are_none() {
+        assert!(format_stats(&[]).to_lowercase().contains("no failures"));
     }
 
     // --- --since recency filter ------------------------------------------

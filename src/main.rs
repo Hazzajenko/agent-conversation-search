@@ -7,9 +7,9 @@ use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
     failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_results,
-    format_transcript, format_windowed, parse_transcript, projects_root, resolve_claude_dir,
-    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, since_cutoff,
-    timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
+    format_stats, format_transcript, format_windowed, group_failures, parse_transcript,
+    projects_root, resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
+    search_session_file, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -100,6 +100,12 @@ struct SearchArgs {
     /// single salient line.
     #[arg(long)]
     full: bool,
+
+    /// Aggregate failures into a counts table by tool and error signature
+    /// instead of listing them (the aggregate counterpart to --failed). Implies
+    /// failure analysis and inherits scope, --since, and the optional Query.
+    #[arg(long)]
+    stats: bool,
 
     /// Only Sessions touched since this point: a relative duration (3d, 2w, 1h)
     /// or an absolute ISO date (2026-05-01). Composes with every scope.
@@ -218,7 +224,8 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         None => None,
     };
 
-    if args.failed {
+    // --stats and --failed share one scan; --stats aggregates, --failed lists.
+    if args.failed || args.stats {
         let mut results = match &session_path {
             Some(path) => failed_in_session_file(path, matcher.as_ref()),
             None => failed_in_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), matcher.as_ref()),
@@ -226,7 +233,11 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         if let Some(cutoff) = cutoff {
             results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
         }
-        let rendered = format_failures(&results, args.max_per_session, args.full);
+        let rendered = if args.stats {
+            format_stats(&group_failures(&results))
+        } else {
+            format_failures(&results, args.max_per_session, args.full)
+        };
         let _ = write!(anstream::stdout(), "{rendered}");
         return ExitCode::SUCCESS;
     }
