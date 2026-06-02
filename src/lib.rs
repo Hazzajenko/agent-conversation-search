@@ -1,10 +1,14 @@
 //! `ccsearch` — search your local Claude Code conversation history.
 
+mod session;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use regex::RegexBuilder;
+
+use session::{AssistantBlock, Record, RecordKind, UserBlock};
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
 /// [`regex::Regex`], so the search pipeline has a single match path. Literal
@@ -91,8 +95,8 @@ pub struct Segment {
 }
 
 /// Which kinds of content a search includes beyond the always-on default set
-/// (Prompts, Replies, Titles). [`parse_line`] emits every kind tagged by
-/// [`Role`]; this is the policy the search pipeline applies to decide what to
+/// (Prompts, Replies, Titles). [`segments_from_record`] emits every kind tagged
+/// by [`Role`]; this is the policy the search pipeline applies to decide what to
 /// actually match. The [`Default`] is the default set only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentSet {
@@ -113,95 +117,34 @@ impl ContentSet {
     }
 }
 
-/// Extract **every** searchable [`Segment`] a single JSONL line contributes,
-/// each tagged with its [`Role`] (Prompt, Reply, Title, Thinking, tool call or
-/// tool result). This parser applies no content policy — the search pipeline
-/// decides which roles to actually match via a [`ContentSet`].
-///
-/// Parsing is **lenient**: a line that is not valid JSON, or whose shape we do
-/// not recognise, contributes no Segments instead of failing. This keeps a
-/// single malformed or future-versioned Record from aborting a search.
-pub fn parse_line(line: &str) -> Vec<Segment> {
-    match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(value) => segments_from_value(&value),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// The [`Segment`]s carried by an already-parsed Record. Split out from
-/// [`parse_line`] so the search pipeline can parse each line once and read both
-/// its Segments and its metadata (timestamp, branch) from the same value.
-fn segments_from_value(value: &serde_json::Value) -> Vec<Segment> {
-    match value.get("type").and_then(|t| t.as_str()) {
-        Some("user") => match value.pointer("/message/content") {
-            // A plain string is a Prompt.
-            Some(c) if c.is_string() => {
-                vec![Segment { role: Role::User, text: c.as_str().unwrap().to_string() }]
-            }
-            // An array is tool_result content, not a Prompt.
-            Some(c) if c.is_array() => {
-                c.as_array().unwrap().iter().filter_map(user_block_segment).collect()
-            }
-            _ => Vec::new(),
-        },
-        Some("assistant") => value
-            .pointer("/message/content")
-            .and_then(|c| c.as_array())
-            .map(|blocks| blocks.iter().filter_map(assistant_block_segment).collect())
-            .unwrap_or_default(),
-        Some("ai-title") => match value.get("aiTitle").and_then(|t| t.as_str()) {
-            Some(text) => vec![Segment { role: Role::Title, text: text.to_string() }],
-            None => Vec::new(),
-        },
-        _ => Vec::new(),
-    }
-}
-
-/// Map one block of a user Message's `content` array to the [`Segment`] it
-/// contributes. User array content is tool_result content (a Prompt is a plain
-/// string, handled separately). A tool_result's own `content` may be a string
-/// or an array of text blocks.
-fn user_block_segment(block: &serde_json::Value) -> Option<Segment> {
-    match block.get("type").and_then(|t| t.as_str()) {
-        Some("tool_result") => {
-            let text = match block.get("content") {
-                Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
-                Some(c) if c.is_array() => c
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => return None,
-            };
-            Some(Segment { role: Role::Tool, text })
-        }
-        _ => None,
-    }
-}
-
-/// Map one block of an assistant Message's `content` array to the [`Segment`]
-/// it contributes, or `None` for blocks that carry no searchable text. Every
-/// recognised block is tagged with its [`Role`]; the search pipeline decides
-/// which roles to actually search.
-fn assistant_block_segment(block: &serde_json::Value) -> Option<Segment> {
-    match block.get("type").and_then(|t| t.as_str()) {
-        Some("text") => block
-            .get("text")
-            .and_then(|t| t.as_str())
-            .map(|text| Segment { role: Role::Assistant, text: text.to_string() }),
-        Some("thinking") => block
-            .get("thinking")
-            .and_then(|t| t.as_str())
-            .map(|text| Segment { role: Role::Thinking, text: text.to_string() }),
-        Some("tool_use") => {
-            // Make both the tool name and its input arguments searchable.
-            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let input = block.get("input").map(|i| i.to_string()).unwrap_or_default();
-            Some(Segment { role: Role::Tool, text: format!("{name} {input}").trim().to_string() })
-        }
-        _ => None,
+/// The searchable [`Segment`]s a typed [`Record`] contributes, each tagged with
+/// its [`Role`]. Applies no content policy — the search pipeline decides which
+/// Roles to match via a [`ContentSet`]. A user `text` block is not a Segment
+/// (only Prompts, tool_results, Replies, thinking, tool calls, and Titles are),
+/// matching `show`'s richer rendering being a separate projection.
+fn segments_from_record(record: &Record) -> Vec<Segment> {
+    match &record.kind {
+        RecordKind::Prompt(text) => vec![Segment { role: Role::User, text: text.clone() }],
+        RecordKind::UserBlocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                UserBlock::ToolResult { text, .. } => Some(Segment { role: Role::Tool, text: text.clone() }),
+                UserBlock::Text(_) => None,
+            })
+            .collect(),
+        RecordKind::Assistant(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                AssistantBlock::Text(text) => Segment { role: Role::Assistant, text: text.clone() },
+                AssistantBlock::Thinking(text) => Segment { role: Role::Thinking, text: text.clone() },
+                AssistantBlock::ToolUse { name, input, .. } => {
+                    // Both the tool name and its input arguments are searchable.
+                    let input = if input.is_null() { String::new() } else { input.to_string() };
+                    Segment { role: Role::Tool, text: format!("{name} {input}").trim().to_string() }
+                }
+            })
+            .collect(),
+        RecordKind::Title(text) => vec![Segment { role: Role::Title, text: text.clone() }],
     }
 }
 
@@ -313,8 +256,8 @@ pub struct SessionMatches {
 /// [`SessionMatches`] per Session that contains at least one Match.
 ///
 /// Matching is delegated to `matcher` over the default content set (see
-/// [`parse_line`]). Sessions with no Matches are omitted. Unreadable directories
-/// and files are skipped rather than failing the whole search.
+/// [`segments_from_record`]). Sessions with no Matches are omitted. Unreadable
+/// directories and files are skipped rather than failing the whole search.
 pub fn search_project_dirs(
     project_dirs: &[PathBuf],
     matcher: &Matcher,
@@ -379,44 +322,20 @@ fn search_one_session(
     content: &ContentSet,
 ) -> Option<SessionMatches> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut title = None;
-    let mut timestamp: Option<String> = None;
-    let mut branch: Option<String> = None;
-    let mut matches = Vec::new();
-    // Turn number = position among user/assistant Message Records, in file
-    // order — the same numbering `parse_transcript` assigns, so the turn a
-    // search hit reports lands `show --around <turn>` on the same Message.
-    let mut turn = 0;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
-            // ISO 8601 sorts lexically, so the max string is the newest record.
-            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
-                timestamp = Some(ts.to_string());
-            }
-        }
-        if branch.is_none() {
-            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
-                branch = Some(b.to_string());
-            }
-        }
-        let is_message = matches!(value.get("type").and_then(|t| t.as_str()), Some("user") | Some("assistant"));
-        if is_message {
-            turn += 1;
-        }
-        for seg in segments_from_value(&value) {
-            if seg.role == Role::Title {
-                title = Some(seg.text.clone());
-            }
-            if content.includes(seg.role) && matcher.is_match(&seg.text) {
-                // A Title comes from an `ai-title` Record, not a turn.
-                let turn = if seg.role == Role::Title { None } else { Some(turn) };
-                matches.push(Match { turn, segment: seg });
-            }
-        }
-    }
+    let session = session::read(&text);
+
+    // Each typed Record carries its turn number (None for a Title — metadata, not
+    // a turn), so a hit points straight at `show --around <turn>` (ADR 0002). A
+    // segment is kept when its Role is in scope and the Query matches.
+    let matches: Vec<Match> = session
+        .records
+        .iter()
+        .flat_map(|record| {
+            segments_from_record(record).into_iter().map(move |segment| Match { turn: record.turn, segment })
+        })
+        .filter(|m| content.includes(m.segment.role) && matcher.is_match(&m.segment.text))
+        .collect();
+
     if matches.is_empty() {
         return None;
     }
@@ -425,9 +344,9 @@ fn search_one_session(
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
-        title,
-        timestamp,
-        branch,
+        title: session.meta.title,
+        timestamp: session.meta.timestamp,
+        branch: session.meta.branch,
         matches,
     })
 }
@@ -481,37 +400,18 @@ fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
-    let mut title = None;
-    let mut timestamp: Option<String> = None;
-    let mut branch: Option<String> = None;
-    let mut cwd: Option<String> = None;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
-            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
-                timestamp = Some(ts.to_string());
-            }
-        }
-        if branch.is_none() {
-            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
-                branch = Some(b.to_string());
-            }
-        }
-        // The cwd is constant within a Session, so the first one seen is enough.
-        if cwd.is_none() {
-            if let Some(c) = value.get("cwd").and_then(|c| c.as_str()) {
-                cwd = Some(c.to_string());
-            }
-        }
-        for seg in segments_from_value(&value) {
-            if seg.role == Role::Title {
-                title = Some(seg.text.clone());
-            }
-        }
-    }
-    Some(SessionInfo { project: project.to_string(), session_id, path: path.to_path_buf(), title, timestamp, branch, cwd })
+    // A listing needs only the header metadata — no Query, no Records walked
+    // beyond the single parse `read` already does.
+    let meta = session::read(&text).meta;
+    Some(SessionInfo {
+        project: project.to_string(),
+        session_id,
+        path: path.to_path_buf(),
+        title: meta.title,
+        timestamp: meta.timestamp,
+        branch: meta.branch,
+        cwd: meta.cwd,
+    })
 }
 
 /// A Project's display metadata — the unit the `projects` verb lists (ADR 0004,
@@ -904,161 +804,82 @@ pub struct Turn {
     pub blocks: Vec<TurnBlock>,
 }
 
-/// Keys whose value, if present, is the most informative one-liner argument for
-/// a tool call. Tried in order; the first string value wins. Keeping this list
-/// fixed (rather than dumping raw JSON) is what makes tool calls readable.
-const TOOL_ARG_KEYS: &[&str] = &["command", "file_path", "pattern", "path", "url", "query", "prompt"];
-
-/// The single most informative argument of a `tool_use` input object, or `None`
-/// if it carries none of the known keys.
-fn tool_key_arg(input: &serde_json::Value) -> Option<String> {
-    TOOL_ARG_KEYS
-        .iter()
-        .find_map(|key| input.get(*key).and_then(|v| v.as_str()).map(str::to_string))
+/// Parse a whole Session file into its Transcript turns (Messages only — the
+/// noise Records are dropped), projecting the typed Records from [`session::read`]
+/// (ADR 0006). A failed `tool_result` is labelled with the tool that produced it,
+/// joined through [`session::tool_index`].
+pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
+    let session = session::read(session_text);
+    let tools = session::tool_index(&session.records);
+    session.records.iter().filter_map(|record| turn_from_record(record, &tools)).collect()
 }
 
-/// Parse a whole Session file into its Transcript turns (Messages only — the
-/// noise Records are dropped). Done in two passes: first map every `tool_use`
-/// id to its tool name, then build the turns so a failed `tool_result` can be
-/// labelled with the tool that produced it.
-pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
-    let values: Vec<serde_json::Value> = session_text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .collect();
-
-    // Pass 1: tool_use_id -> tool name, for labelling tool results.
-    let mut tool_names: HashMap<String, String> = HashMap::new();
-    for value in &values {
-        if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
-        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                continue;
+/// Project one typed [`Record`] into a renderable [`Turn`], or `None` when it
+/// contributes none — a Title, or a Message whose blocks all render nothing (an
+/// empty Prompt, a signature-only thinking block). The Record already carries its
+/// turn number, so the find→read handoff coordinate (ADR 0002) is never
+/// recomputed here.
+fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<String>)>) -> Option<Turn> {
+    let (kind, blocks) = match &record.kind {
+        RecordKind::Title(_) => return None,
+        RecordKind::Prompt(text) => {
+            if text.trim().is_empty() {
+                return None;
             }
-            if let (Some(id), Some(name)) = (
-                block.get("id").and_then(|i| i.as_str()),
-                block.get("name").and_then(|n| n.as_str()),
-            ) {
-                tool_names.insert(id.to_string(), name.to_string());
+            (TurnKind::Prompt, vec![TurnBlock::Text(text.clone())])
+        }
+        RecordKind::UserBlocks(blocks) => {
+            let blocks: Vec<TurnBlock> =
+                blocks.iter().filter_map(|b| user_turn_block(b, tools)).collect();
+            if blocks.is_empty() {
+                return None;
             }
-        }
-    }
-
-    // Pass 2: build turns, numbering every Message Record 1-based in Record
-    // order. Contentless Records (e.g. signature-only thinking) still consume a
-    // number but are not pushed — search numbers them identically, so the
-    // numbers stay aligned across the find→read handoff (ADR 0002).
-    let mut turns = Vec::new();
-    let mut number = 0;
-    for value in &values {
-        let ty = value.get("type").and_then(|t| t.as_str());
-        if matches!(ty, Some("user") | Some("assistant")) {
-            number += 1;
-        }
-        let blocks = match ty {
-            Some("user") => match value.pointer("/message/content") {
-                Some(c) if c.is_string() => {
-                    let prompt = c.as_str().unwrap();
-                    if prompt.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![TurnBlock::Text(prompt.to_string())]
-                    }
-                }
-                Some(c) if c.is_array() => {
-                    c.as_array().unwrap().iter().filter_map(|b| user_turn_block(b, &tool_names)).collect()
-                }
-                _ => Vec::new(),
-            },
-            Some("assistant") => value
-                .pointer("/message/content")
-                .and_then(|c| c.as_array())
-                .map(|bs| bs.iter().filter_map(assistant_turn_block).collect())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        if blocks.is_empty() {
-            continue;
-        }
-        let kind = match ty {
-            Some("assistant") => TurnKind::Reply,
             // A user Message that is *only* tool results is mechanical output,
             // not something the person typed.
-            _ if blocks.iter().all(|b| matches!(b, TurnBlock::ToolResult { .. })) => {
+            let kind = if blocks.iter().all(|b| matches!(b, TurnBlock::ToolResult { .. })) {
                 TurnKind::ToolOutput
+            } else {
+                TurnKind::Prompt
+            };
+            (kind, blocks)
+        }
+        RecordKind::Assistant(blocks) => {
+            let blocks: Vec<TurnBlock> = blocks.iter().filter_map(assistant_turn_block).collect();
+            if blocks.is_empty() {
+                return None;
             }
-            _ => TurnKind::Prompt,
-        };
-        turns.push(Turn { number, kind, blocks });
-    }
-    turns
-}
-
-/// The value of `block[key]` as an owned string, but only if it is present and
-/// not blank. Used to drop empty `text`/`thinking` blocks (e.g. signature-only
-/// thinking) so they do not render as phantom turns.
-fn non_empty_text(block: &serde_json::Value, key: &str) -> Option<String> {
-    block
-        .get(key)
-        .and_then(|t| t.as_str())
-        .filter(|t| !t.trim().is_empty())
-        .map(str::to_string)
-}
-
-/// Map one block of a user Message's `content` array to a [`TurnBlock`]. User
-/// array content is tool results (and occasionally text); a `tool_result`'s own
-/// `content` may be a string or an array of text blocks.
-fn user_turn_block(block: &serde_json::Value, tool_names: &HashMap<String, String>) -> Option<TurnBlock> {
-    match block.get("type").and_then(|t| t.as_str()) {
-        Some("text") => non_empty_text(block, "text").map(TurnBlock::Text),
-        Some("tool_result") => {
-            let is_error = block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-            let text = tool_result_text(block);
-            let tool = block
-                .get("tool_use_id")
-                .and_then(|i| i.as_str())
-                .and_then(|id| tool_names.get(id).cloned());
-            Some(TurnBlock::ToolResult { is_error, tool, text })
+            (TurnKind::Reply, blocks)
         }
-        _ => None,
-    }
+    };
+    Some(Turn { number: record.turn.unwrap_or(0), kind, blocks })
 }
 
-/// The text of a `tool_result` block: its `content`, which may be a plain
-/// string or an array of text blocks (joined). Empty when neither is present.
-fn tool_result_text(block: &serde_json::Value) -> String {
-    match block.get("content") {
-        Some(c) if c.is_string() => c.as_str().unwrap().to_string(),
-        Some(c) if c.is_array() => c
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
-    }
-}
-
-/// Map one block of an assistant Message's `content` array to a [`TurnBlock`],
-/// or `None` for blocks that render nothing.
-fn assistant_turn_block(block: &serde_json::Value) -> Option<TurnBlock> {
-    match block.get("type").and_then(|t| t.as_str()) {
-        Some("text") => non_empty_text(block, "text").map(TurnBlock::Text),
-        // Signature-only `thinking` blocks carry no readable text — drop them
-        // rather than render a phantom turn.
-        Some("thinking") => non_empty_text(block, "thinking").map(TurnBlock::Thinking),
-        Some("tool_use") => {
-            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-            let arg = block.get("input").and_then(tool_key_arg);
-            Some(TurnBlock::ToolUse { name, arg })
+/// Project one [`UserBlock`] into a renderable [`TurnBlock`], dropping blank
+/// text. A `tool_result` is labelled with the tool that produced it, joined
+/// through `tools`.
+fn user_turn_block(block: &UserBlock, tools: &HashMap<String, (String, Option<String>)>) -> Option<TurnBlock> {
+    match block {
+        UserBlock::Text(text) if !text.trim().is_empty() => Some(TurnBlock::Text(text.clone())),
+        UserBlock::Text(_) => None,
+        UserBlock::ToolResult { is_error, tool_use_id, text } => {
+            let tool = tool_use_id.as_deref().and_then(|id| tools.get(id)).map(|(name, _)| name.clone());
+            Some(TurnBlock::ToolResult { is_error: *is_error, tool, text: text.clone() })
         }
-        _ => None,
+    }
+}
+
+/// Project one [`AssistantBlock`] into a renderable [`TurnBlock`], or `None` for
+/// blocks that render nothing (blank text, or a signature-only thinking block).
+fn assistant_turn_block(block: &AssistantBlock) -> Option<TurnBlock> {
+    match block {
+        AssistantBlock::Text(text) if !text.trim().is_empty() => Some(TurnBlock::Text(text.clone())),
+        AssistantBlock::Text(_) => None,
+        AssistantBlock::Thinking(text) if !text.trim().is_empty() => Some(TurnBlock::Thinking(text.clone())),
+        AssistantBlock::Thinking(_) => None,
+        AssistantBlock::ToolUse { name, input, .. } => {
+            let name = if name.is_empty() { "tool".to_string() } else { name.clone() };
+            Some(TurnBlock::ToolUse { name, arg: session::tool_key_arg(input) })
+        }
     }
 }
 
@@ -1382,84 +1203,38 @@ fn failures_in_one_session(
     matcher: Option<&Matcher>,
 ) -> Option<SessionFailures> {
     let text = std::fs::read_to_string(path).ok()?;
-    let values: Vec<serde_json::Value> =
-        text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect();
+    let session = session::read(&text);
+    // The join a Failure needs: tool_result id -> the tool_use that produced it.
+    let tools = session::tool_index(&session.records);
 
-    // Pass 1: tool_use_id -> (tool name, command), for the join.
-    let mut tools: HashMap<String, (String, Option<String>)> = HashMap::new();
-    for value in &values {
-        if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
-        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                continue;
+    // An errored tool_result Block becomes a Failure, joined to its tool_use for
+    // the tool name and command. The Record already carries its turn (the
+    // tool_result sits in a user Message), so no renumbering here.
+    let mut failures: Vec<Failure> = session
+        .records
+        .iter()
+        .filter_map(|record| match &record.kind {
+            RecordKind::UserBlocks(blocks) => Some((record.turn, blocks)),
+            _ => None,
+        })
+        .flat_map(|(turn, blocks)| blocks.iter().map(move |block| (turn, block)))
+        .filter_map(|(turn, block)| match block {
+            UserBlock::ToolResult { is_error: true, tool_use_id, text } => {
+                let (tool, command) = tool_use_id
+                    .as_deref()
+                    .and_then(|id| tools.get(id))
+                    .map_or((None, None), |(name, command)| (Some(name.clone()), command.clone()));
+                Some(Failure {
+                    turn,
+                    tool,
+                    command,
+                    exit_code: exit_code(text),
+                    error_text: text.clone(),
+                })
             }
-            if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-                let command = block.get("input").and_then(tool_key_arg);
-                tools.insert(id.to_string(), (name, command));
-            }
-        }
-    }
-
-    // Pass 2: metadata, turn numbering, and the errored tool_results.
-    let mut title = None;
-    let mut timestamp: Option<String> = None;
-    let mut branch: Option<String> = None;
-    let mut failures = Vec::new();
-    let mut turn = 0;
-    for value in &values {
-        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
-            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
-                timestamp = Some(ts.to_string());
-            }
-        }
-        if branch.is_none() {
-            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
-                branch = Some(b.to_string());
-            }
-        }
-        let ty = value.get("type").and_then(|t| t.as_str());
-        if ty == Some("ai-title") {
-            if let Some(t) = value.get("aiTitle").and_then(|t| t.as_str()) {
-                title = Some(t.to_string());
-            }
-        }
-        if matches!(ty, Some("user") | Some("assistant")) {
-            turn += 1;
-        }
-        if ty != Some("user") {
-            continue;
-        }
-        let Some(blocks) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
-                continue;
-            }
-            if block.get("is_error").and_then(|e| e.as_bool()) != Some(true) {
-                continue;
-            }
-            let error_text = tool_result_text(block);
-            let (tool, command) = block
-                .get("tool_use_id")
-                .and_then(|i| i.as_str())
-                .and_then(|id| tools.get(id))
-                .map_or((None, None), |(name, command)| (Some(name.clone()), command.clone()));
-            failures.push(Failure {
-                turn: Some(turn),
-                tool,
-                command,
-                exit_code: exit_code(&error_text),
-                error_text,
-            });
-        }
-    }
+            _ => None,
+        })
+        .collect();
 
     // Query filter (optional under --failed): match command or error text.
     if let Some(matcher) = matcher {
@@ -1476,9 +1251,9 @@ fn failures_in_one_session(
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
-        title,
-        timestamp,
-        branch,
+        title: session.meta.title,
+        timestamp: session.meta.timestamp,
+        branch: session.meta.branch,
         failures,
     })
 }
@@ -1875,9 +1650,11 @@ mod tests {
     #[test]
     fn search_and_show_agree_on_turn_numbers_for_the_same_session() {
         // The handoff invariant (ADR 0002): the turn search prints for a Match
-        // must equal the turn `show` numbers that Message. The tricky case is a
-        // contentless Record (here a signature-only thinking block) — it must
-        // consume a turn number in *both* views or every later turn drifts.
+        // must equal the turn `show` numbers that Message. Since ADR 0006 both
+        // views derive from one `session::read`, this is now a regression guard
+        // on that single numbering rather than a cross-check of two — but the
+        // tricky case still matters: a contentless Record (here a signature-only
+        // thinking block) must consume a turn number, or every later turn drifts.
         let lines = [
             r#"{"type":"queue-operation","operation":"enqueue"}"#,
             r#"{"type":"user","message":{"role":"user","content":"alpha one"}}"#,
@@ -2489,61 +2266,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_an_assistant_thinking_block_into_a_thinking_segment() {
-        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
-            {"type":"thinking","thinking":"the secret password is hunter2"}
-        ]}}"#;
-        assert_eq!(
-            parse_line(line),
-            vec![Segment { role: Role::Thinking, text: "the secret password is hunter2".into() }]
-        );
-    }
-
-    #[test]
-    fn parses_an_assistant_tool_use_block_into_a_tool_segment_with_name_and_input() {
-        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
-        let segs = parse_line(line);
-        assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].role, Role::Tool);
-        assert!(segs[0].text.contains("Bash"), "tool name searchable: {:?}", segs[0].text);
-        assert!(segs[0].text.contains("cargo test"), "tool input searchable: {:?}", segs[0].text);
-    }
-
-    #[test]
-    fn parses_a_user_tool_result_into_a_tool_segment() {
-        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"pasted file contents here"}]}}"#;
-        assert_eq!(
-            parse_line(line),
-            vec![Segment { role: Role::Tool, text: "pasted file contents here".into() }]
-        );
-    }
-
-    #[test]
-    fn parses_a_user_message_into_a_user_segment() {
-        let line = r#"{"type":"user","message":{"role":"user","content":"how do I borrow check"}}"#;
-        assert_eq!(
-            parse_line(line),
-            vec![Segment { role: Role::User, text: "how do I borrow check".into() }]
-        );
-    }
-
-    #[test]
-    fn parses_an_ai_title_into_a_title_segment() {
-        let line = r#"{"type":"ai-title","aiTitle":"Designing the search CLI","sessionId":"x"}"#;
-        assert_eq!(
-            parse_line(line),
-            vec![Segment { role: Role::Title, text: "Designing the search CLI".into() }]
-        );
-    }
-
-    #[test]
-    fn skips_unparseable_and_unrecognised_lines_without_panicking() {
-        assert_eq!(parse_line("this is not json at all"), vec![]);
-        assert_eq!(parse_line(""), vec![]);
-        assert_eq!(parse_line(r#"{"type":"queue-operation","operation":"enqueue"}"#), vec![]);
-    }
-
-    #[test]
     fn tool_calls_and_results_are_excluded_by_default_but_found_with_tools() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
@@ -2568,25 +2290,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matches.len(), 2, "both the tool_use and tool_result match");
         assert!(results[0].matches.iter().all(|m| m.segment.role == Role::Tool));
-    }
-
-    #[test]
-    fn parses_assistant_text_and_thinking_blocks_tagged_by_role_in_order() {
-        // parse_line emits every text-bearing block tagged with its Role; the
-        // search pipeline (not the parser) decides which roles to search.
-        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
-            {"type":"thinking","thinking":"internal reasoning"},
-            {"type":"text","text":"You can use a reference."},
-            {"type":"text","text":"Then run it."}
-        ]}}"#;
-        assert_eq!(
-            parse_line(line),
-            vec![
-                Segment { role: Role::Thinking, text: "internal reasoning".into() },
-                Segment { role: Role::Assistant, text: "You can use a reference.".into() },
-                Segment { role: Role::Assistant, text: "Then run it.".into() },
-            ]
-        );
     }
 
     // --- failure salient-line picker -------------------------------------
