@@ -347,6 +347,31 @@ fn failed_lists_failures_by_structure_with_the_handoff_shape() {
 }
 
 #[test]
+fn stats_aggregates_failures_into_a_counts_table_by_signature() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"PowerShell","input":{"command":"cargo test x"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"Exit code 101\nerror[E0433]: cannot find type"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"PowerShell","input":{"command":"cargo test y"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"Exit code 101\nerror[E0609]: no field"}]}}"#,
+        ]
+        .join("\n"),
+    );
+
+    // The two differing compiler errors collapse into one `error[` group of 2.
+    cmd.arg("--stats")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("✗ PowerShell"))
+        .stdout(predicates::str::contains("error["))
+        .stdout(predicates::str::contains("2"));
+}
+
+#[test]
 fn failed_query_filters_and_full_shows_everything() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

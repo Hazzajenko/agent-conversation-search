@@ -1,17 +1,39 @@
 # (Deferred) `stats`: aggregate failure counts
 
-Status: needs-triage
+Status: ready-for-agent
 
 ## What to build
 
-The aggregate counterpart to `--failed`: instead of listing individual Failures, emit a **counts table** — "Bash: 23 failures; 7× `cargo test` (exit 2), 4× `grep` (exit 1)…" — to answer "what causes *a lot of* failures."
+The aggregate counterpart to `--failed`: instead of listing individual Failures, emit a **counts table** — "PowerShell · error[ : 12; PowerShell · error: : 18; Bash · unexpected EOF : 4…" — to answer "what causes *a lot of* failures."
 
-**Deliberately deferred** (ADR 0002). The hard part is grouping *similar* failures (the "a lot of *like*" in the original ask): exact-command grouping is near-useless because every command differs; error-signature grouping (tool + exit code + salient line) is better but is its own rabbit hole. Don't design this on a whiteboard — ship `--failed` first (issue 11), stare at real Failures, *then* decide what "similar" means and whether this warrants its own ADR.
+## Design decision (the deferred part, now resolved)
+
+Two Failures are "similar" when they share the same **`(tool, signature)`**, where the **signature is the highest-priority `FAILURE_MARKERS` entry the error text matches** (the same marker `salient_line` already uses), or a single per-tool *no-marker* bucket when none match. See [ADR 0003](../../../docs/adr/0003-grouping-failures-by-marker-signature.md).
+
+Grounded in real `--failed` data (gathered before this decision), two parts of the original sketch were **rejected**:
+
+- **`exit_code` is *not* part of the key.** Real data shows it both over-splits (pytest `ImportError`→exit 2 vs `AssertionError`→exit 1 are the same root cause) and under-discriminates (a real `error[E0433]` and a generic "could not compile due to N previous errors" are both exit 101).
+- **Normalising the raw salient line is *not* the rule.** The salient line carries per-run noise (`due to 2 previous errors`, PIDs like `(69076)`, `:line:col`, test names, durations, quoted arg names). Masking all of that is the fuzzy rabbit hole CONTEXT.md / the original ask warned against. The marker — an existing fixed lookup table — is the deterministic signature instead.
 
 ## Acceptance criteria
 
-- [ ] (To be defined after living with `--failed`.)
+- [ ] A pure lib fn `failure_signature(error_text) -> Option<&'static str>` returns the highest-priority matched `FAILURE_MARKERS` entry (or `None`), and `salient_line` is refactored to share it so the list (`--failed`) and the table (`stats`) can never disagree about a Failure's class.
+- [ ] A pure lib fn `group_failures(&[SessionFailures]) -> Vec<FailureGroup>` folds every Failure in scope into groups keyed by `(tool, signature)`, counting occurrences. `None` signature is one bucket per tool.
+- [ ] Groups are sorted by count descending, then by tool then signature, so output is deterministic regardless of scan order.
+- [ ] `format_stats(&[FailureGroup])` renders a right-aligned counts table (`<count>  ✗ <tool>  <signature>`, `(no marker)` for the `None` bucket) and reports cleanly ("No failures.") when empty.
+- [ ] A `--stats` flag on `search` emits the table instead of the per-Failure list. It implies failure analysis (no separate `--failed` needed) and inherits scope (`--all` / `--project` / `--session`), `--since`, and the optional Query filter for free by folding over the same `failed_in_project_dirs` results. `--full` is irrelevant under `--stats`.
+- [ ] e2e (`assert_cmd`) test proving `--stats` aggregates a fixture Store into a counts table.
+
+## Out of scope (resist scope creep)
+
+- `stats` is the aggregate of `--failed` only — not a general analytics command.
+- Filtering harness-noise "failures" (user-rejected tool calls, classifier-unavailable messages) is a *separate* call; they remain visible, like in `--failed`.
+- Stripping `<tool_use_error>…</tool_use_error>` wrappers is noted but not required here.
 
 ## Blocked by
 
 - 11-failed-tool-calls
+
+## Comments
+
+- 2026-06-02: Triaged after living with `--failed`. Ran `--failed --all` against the real Store; the recurring shape is `(tool, exit_code, salient_line)` but exit_code and the raw line proved noisy as keys (see Design decision). Chose marker-signature grouping (reuses the existing fixed `FAILURE_MARKERS` table; predictable over clever). Recorded as ADR 0003. Status → ready-for-agent.
