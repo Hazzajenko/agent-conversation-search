@@ -1,6 +1,6 @@
 # Classify the `(no marker)` failures: grow the signature table, decide on harness noise
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 
 ## Why

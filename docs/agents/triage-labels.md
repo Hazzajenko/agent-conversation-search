@@ -9,7 +9,10 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 | `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
 | `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
+| _(none)_                   | `done`               | Implemented and verified; terminal state |
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
+
+`done` is a local addition — the five mattpocock state roles have no terminal "completed" state, so finished work would otherwise linger as `ready-for-agent` and pollute "what's ready to pick up?" queries. Transition: `ready-for-agent` / `ready-for-human` → `done` once the work is merged and verified. Like `wontfix`, it is terminal. A `done` issue should carry a `### <date> — Done` comment summarising what shipped.
 
 Edit the right-hand column to match whatever vocabulary you actually use.

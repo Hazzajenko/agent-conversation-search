@@ -1,6 +1,6 @@
 # `projects`: list the Projects in the Store
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 
 ## Why

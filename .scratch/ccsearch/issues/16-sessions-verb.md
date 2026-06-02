@@ -1,6 +1,6 @@
 # `sessions`: list Sessions in a scope for the show handoff
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 
 ## Why
