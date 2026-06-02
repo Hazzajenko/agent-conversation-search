@@ -86,17 +86,25 @@ Decisions (authoritative spec in the Agent Brief): identity = on-disk directory;
 - Reuse `since_cutoff` / `timestamp_is_since` and the shared `parse_since` / `build_scope` helpers where they fit (note `projects` is always whole-Store, so it does not need `build_scope`).
 
 **Acceptance criteria:**
-- [ ] `ccsearch projects` lists one row per Project in the Store, newest-touched first, as `name · N sessions · date` (CLI test against a fixture Store with two Projects of different ages).
-- [ ] The row name is the real `cwd` from the newest Session (assert a known path appears); a Project whose Sessions carry no `cwd` falls back to the encoded directory name.
-- [ ] The Session count equals the number of Sessions `ccsearch sessions --project <that>` would list for the Project.
-- [ ] Two directories whose names differ only by case (e.g. `E--proj-x` and `e--proj-x`) are folded into **one** row whose count is the sum and whose last-touched is the newer of the two (unit test on `list_projects`; this is the cross-OS guarantee).
-- [ ] `--since` excludes a Project whose newest Session predates the cutoff; `--project <substr>` filters to matching Projects.
-- [ ] `--all` and `-l` are rejected (clap error, non-zero exit).
-- [ ] A directory with no listable Sessions does not appear; empty Store prints `No projects.` and exits 0; piped output carries no ANSI.
-- [ ] `cargo test` green and `cargo clippy --all-targets -- -D warnings` clean.
+- [x] `ccsearch projects` lists one row per Project in the Store, newest-touched first, as `name · N sessions · date` (CLI test against a fixture Store with two Projects of different ages).
+- [x] The row name is the real `cwd` from the newest Session (assert a known path appears); a Project whose Sessions carry no `cwd` falls back to the encoded directory name.
+- [x] The Session count equals the number of Sessions `ccsearch sessions --project <that>` would list for the Project.
+- [x] Two directories whose names differ only by case (e.g. `E--proj-x` and `e--proj-x`) are folded into **one** row whose count is the sum and whose last-touched is the newer of the two (unit test on `group_projects`; this is the cross-OS guarantee).
+- [x] `--since` excludes a Project whose newest Session predates the cutoff; `--project <substr>` filters to matching Projects.
+- [x] `--all` and `-l` are rejected (clap error, non-zero exit).
+- [x] A directory with no listable Sessions does not appear; empty Store prints `No projects.` and exits 0; piped output carries no ANSI.
+- [x] `cargo test` green and `cargo clippy --all-targets -- -D warnings` clean.
 
 **Out of scope:**
 - Identity by real `cwd` (grouping/splitting Sessions by recorded path) — rejected in ADR 0005; identity is the directory.
 - Un-merging lossy-encoding collisions (one directory holding multiple real paths stays one row).
 - `-l` / piping and an `--all` flag — no consumer / meaningless for a whole-Store verb.
 - Any new domain term — `projects` enumerates the existing **Project**; CONTEXT.md's Project entry was only sharpened to note the multi-directory case (done during triage).
+
+### 2026-06-02 — Done
+
+Implemented the `projects` verb. Added `cwd` to `SessionInfo` (captured in `session_info`'s existing metadata pass), a `ProjectInfo { name, session_count, last_touched }`, and `list_projects(project_dirs)` = `group_projects(list_sessions(dirs))`. The fold logic is split into a pure `group_projects(Vec<SessionInfo>)` that groups by lower-cased directory name, sums counts, and takes the newest Session's timestamp + cwd (fallback: encoded dir name). `format_projects` renders `name · N session(s) · date` (pluralised, date omitted when undateable) with a `No projects.` empty case. CLI: a `projects` subcommand with `ProjectsArgs { since, project }`; `--all`/`-l` are undefined and rejected by clap. `run_projects` resolves whole-Store (or `--project`-filtered) dirs via the existing `Scope`, reusing `parse_since`.
+
+**Why `group_projects` is split out:** the case-variant fold is the one behaviour that *cannot* be staged on a case-insensitive filesystem — `E--x` and `e--x` are the same directory on Windows/macOS, so `create_dir` for the second fails. The pure helper is unit-tested on constructed `SessionInfo` data so the cross-OS guarantee is verified on any OS.
+
+**Verified on the real Store:** lists 12 Projects by real cwd with counts, newest-first; `C:\Users\jenki` and `c:\Users\jenki\.config\powershell` correctly stay separate (different paths, not a case-variant pair); `--project rust` and `--since 7d` filter; `--all`/`-l` rejected. 107 lib + 42 cli tests green, clippy clean.
