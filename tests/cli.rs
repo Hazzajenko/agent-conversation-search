@@ -744,3 +744,189 @@ fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
         .success()
         .stdout(predicates::str::contains("a secret rumination"));
 }
+
+// --- sessions: list Sessions in a scope (issue 16, ADR 0004) -------------
+
+#[test]
+fn sessions_lists_the_current_projects_sessions_newest_first() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let project = store
+        .path()
+        .join("projects")
+        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("aaaa1111-0000-0000-0000-000000000000.jsonl"),
+        [
+            r#"{"type":"ai-title","aiTitle":"Older conversation"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-01-01T10:00:00.000Z"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fs::write(
+        project.join("bbbb2222-1111-1111-1111-111111111111.jsonl"),
+        [
+            r#"{"type":"ai-title","aiTitle":"Newer conversation"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"hey"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        // Both Sessions appear as header lines with their short-ids and Titles.
+        .stdout(predicates::str::contains("bbbb2222 · "))
+        .stdout(predicates::str::contains("Newer conversation"))
+        .stdout(predicates::str::contains("aaaa1111 · "))
+        .stdout(predicates::str::contains("Older conversation"))
+        // Newest first: the newer short-id precedes the older one.
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("bbbb2222").unwrap() < out.find("aaaa1111").unwrap()
+        }));
+}
+
+#[test]
+fn sessions_renders_untitled_and_omits_no_content_filter() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let project = store
+        .path()
+        .join("projects")
+        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+    fs::create_dir_all(&project).unwrap();
+    // A Session with no ai-title Record and no Message at all (only a noise
+    // Record). search would never surface it; `sessions` must still list it.
+    fs::write(
+        project.join("dddd4444-0000-0000-0000-000000000000.jsonl"),
+        r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-04-01T10:00:00.000Z"}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("dddd4444 · "))
+        .stdout(predicates::str::contains("(untitled)"));
+}
+
+#[test]
+fn sessions_reports_cleanly_when_the_scope_is_empty() {
+    let workdir = tempfile::tempdir().unwrap(); // cwd has no Project in the Store
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir_all(store.path().join("projects")).unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .assert()
+        .success() // "nothing here" is not an error (mirrors search's no-match)
+        .stdout(predicates::str::contains("No sessions."));
+}
+
+#[test]
+fn sessions_all_widens_scope_and_since_excludes_older() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Two other Projects, each with one Session of a different age.
+    plant_project(
+        store.path(),
+        "E--projects-recent",
+        r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+    );
+    plant_project(
+        store.path(),
+        "E--projects-ancient",
+        r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-01-01T10:00:00.000Z"}"#,
+    );
+
+    // Without --all, the cwd's (empty) Project yields nothing.
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No sessions."));
+
+    // --all sees both; --since 2026-05-01 keeps only the recent one.
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .arg("--all")
+        .arg("--since")
+        .arg("2026-05-01")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("E--projects-recent"))
+        .stdout(predicates::str::contains("E--projects-ancient").not());
+}
+
+#[test]
+fn sessions_files_prints_paths_for_piping_into_show() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let project = store
+        .path()
+        .join("projects")
+        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("eeee5555-0000-0000-0000-000000000000.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("ccsearch")
+        .unwrap()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .arg("-l")
+        .assert()
+        .success()
+        // Only the path, not a header line (no " · " separators).
+        .stdout(predicates::str::contains("eeee5555-0000-0000-0000-000000000000.jsonl"))
+        .stdout(predicates::str::contains(" · ").not());
+}
+
+#[test]
+fn sessions_rejects_search_only_flags() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir_all(store.path().join("projects")).unwrap();
+
+    for flag in ["--failed", "--thinking", "--tools", "--stats"] {
+        Command::cargo_bin("ccsearch")
+            .unwrap()
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path())
+            .arg("sessions")
+            .arg(flag)
+            .assert()
+            .failure(); // clap rejects an argument `sessions` does not define
+    }
+}

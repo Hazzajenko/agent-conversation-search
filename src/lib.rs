@@ -432,6 +432,78 @@ fn search_one_session(
     })
 }
 
+/// A Session's display metadata, gathered without a Query — the unit the
+/// `sessions` verb lists. Carries exactly the fields [`session_header`] needs,
+/// so a listing row is byte-identical to a search Session header (ADR 0004).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// The Project directory name the Session lives in.
+    pub project: String,
+    /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
+    pub session_id: String,
+    /// Full path to the Session file (for `-l` / piping into `show -`).
+    pub path: PathBuf,
+    /// The Session's AI-generated Title, if it has one.
+    pub title: Option<String>,
+    /// The newest record timestamp (raw ISO 8601), the recency key — `None` if
+    /// no record carried one, in which case the Session sorts last.
+    pub timestamp: Option<String>,
+    /// The git branch the Session was recorded on (`gitBranch`), if any.
+    pub branch: Option<String>,
+}
+
+/// List every Session across the given Project dirs, newest first — the
+/// content-agnostic counterpart to [`search_project_dirs`] (ADR 0004). Every
+/// `.jsonl` with a session-id is included; there is **no content filter**, so a
+/// Session with no Messages still appears (unlike search). Files that cannot be
+/// read are skipped. Sorted by the same recency key as search: newest
+/// `timestamp` first, undateable Sessions last, ties by path for determinism.
+pub fn list_sessions(project_dirs: &[PathBuf]) -> Vec<SessionInfo> {
+    let sessions = enumerate_sessions(project_dirs);
+    let mut results: Vec<SessionInfo> = sessions
+        .par_iter()
+        .filter_map(|(project, path)| session_info(project, path))
+        .collect();
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results
+}
+
+/// Read a Session's header metadata (Title, newest timestamp, branch) without
+/// matching a Query. Mirrors the metadata pass in [`search_one_session`] but
+/// keeps every Session rather than only those with a Match. Returns `None` when
+/// the file cannot be read or its stem is empty (no session-id to `show`).
+fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
+    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    if session_id.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut title = None;
+    let mut timestamp: Option<String> = None;
+    let mut branch: Option<String> = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) {
+            if timestamp.as_deref().is_none_or(|cur| ts > cur) {
+                timestamp = Some(ts.to_string());
+            }
+        }
+        if branch.is_none() {
+            if let Some(b) = value.get("gitBranch").and_then(|b| b.as_str()) {
+                branch = Some(b.to_string());
+            }
+        }
+        for seg in segments_from_value(&value) {
+            if seg.role == Role::Title {
+                title = Some(seg.text.clone());
+            }
+        }
+    }
+    Some(SessionInfo { project: project.to_string(), session_id, path: path.to_path_buf(), title, timestamp, branch })
+}
+
 /// Maximum number of characters shown for a single Match snippet.
 const SNIPPET_MAX_CHARS: usize = 200;
 
@@ -547,6 +619,40 @@ fn session_header(
 pub fn format_paths(results: &[SessionMatches]) -> String {
     let mut out = String::new();
     for s in results {
+        out.push_str(&s.path.to_string_lossy());
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a Session listing (the `sessions` verb): one
+/// `short-id · project · title · date · branch` header per Session — the same
+/// line search prints above its Snippets (ADR 0004) — newest first. An empty
+/// listing renders a clear "no sessions" line. The header carries no colour
+/// (search colours only Snippets), so this output is plain text.
+pub fn format_sessions(sessions: &[SessionInfo]) -> String {
+    if sessions.is_empty() {
+        return "No sessions.\n".to_string();
+    }
+    let mut out = String::new();
+    for s in sessions {
+        out.push_str(&session_header(
+            &short_id(&s.session_id),
+            &s.project,
+            s.title.as_deref(),
+            s.timestamp.as_deref(),
+            s.branch.as_deref(),
+        ));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render just the listed Session file paths, one per line, in listing order —
+/// the `sessions -l` counterpart to [`format_paths`], for piping into `show -`.
+pub fn format_session_paths(sessions: &[SessionInfo]) -> String {
+    let mut out = String::new();
+    for s in sessions {
         out.push_str(&s.path.to_string_lossy());
         out.push('\n');
     }
@@ -1735,6 +1841,69 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn list_sessions_lists_every_session_newest_first_without_a_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("E--projects-demo");
+        fs::create_dir(&proj).unwrap();
+        // An older titled Session, and a newer one — plus a Session with no
+        // Message at all (only a noise Record), which search would never surface.
+        write_session(
+            &proj,
+            "aaaaaaaa-0000-0000-0000-000000000000",
+            &[
+                r#"{"type":"ai-title","aiTitle":"Older chat"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-01-01T10:00:00.000Z","gitBranch":"main"}"#,
+            ],
+        );
+        write_session(
+            &proj,
+            "bbbbbbbb-1111-1111-1111-111111111111",
+            &[r#"{"type":"user","message":{"role":"user","content":"hi again"},"timestamp":"2026-06-01T10:00:00.000Z"}"#],
+        );
+        write_session(
+            &proj,
+            "cccccccc-2222-2222-2222-222222222222",
+            &[r#"{"type":"queue-operation","operation":"x","timestamp":"2026-03-01T10:00:00.000Z"}"#],
+        );
+
+        let sessions = list_sessions(std::slice::from_ref(&proj));
+
+        // Every Session is listed (the contentless one too — no content filter),
+        // newest timestamp first.
+        let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "bbbbbbbb-1111-1111-1111-111111111111", // 2026-06
+                "cccccccc-2222-2222-2222-222222222222", // 2026-03 (no Message)
+                "aaaaaaaa-0000-0000-0000-000000000000", // 2026-01
+            ]
+        );
+        // Metadata is gathered without a Query.
+        assert_eq!(sessions[2].title.as_deref(), Some("Older chat"));
+        assert_eq!(sessions[2].branch.as_deref(), Some("main"));
+        assert_eq!(sessions[0].title, None);
+    }
+
+    #[test]
+    fn format_sessions_reuses_the_search_header_and_falls_back_to_untitled() {
+        let info = SessionInfo {
+            project: "E--projects-demo".into(),
+            session_id: "abcd1234-0000-0000-0000-000000000000".into(),
+            path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
+            title: None,
+            timestamp: Some("2026-06-01T10:00:00.000Z".into()),
+            branch: Some("main".into()),
+        };
+        let out = format_sessions(std::slice::from_ref(&info));
+        // Byte-identical to a search Session header (ADR 0004): short-id leads,
+        // (untitled) fallback, date sliced to its prefix, branch last.
+        assert_eq!(out, "abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
+
+        assert_eq!(format_sessions(&[]), "No sessions.\n");
     }
 
     /// Build a [`SessionMatches`] from bare Segments, assigning each a 1-based

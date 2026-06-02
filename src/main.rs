@@ -7,9 +7,10 @@ use clap::{Args, Parser, Subcommand};
 
 use ccsearch::{
     failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_results,
-    format_stats, format_transcript, format_windowed, group_failures, parse_transcript,
-    projects_root, resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
-    search_session_file, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
+    format_session_paths, format_sessions, format_stats, format_transcript, format_windowed,
+    group_failures, list_sessions, parse_transcript, projects_root, resolve_claude_dir,
+    resolve_scope, resolve_session_prefix, search_project_dirs, search_session_file, since_cutoff,
+    timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
 };
 
 /// Search your local Claude Code conversation history.
@@ -39,6 +40,8 @@ enum Command {
     Search(SearchArgs),
     /// Render a whole Session as a Transcript.
     Show(ShowArgs),
+    /// List the Sessions in a scope, newest first (no Query).
+    Sessions(SessionsArgs),
 }
 
 /// Arguments for the `search` verb. Flattened into [`Cli`] so bare
@@ -134,6 +137,30 @@ struct ShowArgs {
     context: usize,
 }
 
+/// Arguments for the `sessions` verb: scope and recency only — no Query, and
+/// none of search's content / failure flags (clap rejects them). Lists the
+/// Sessions in scope so you can grab a short-id for `show` (ADR 0004).
+#[derive(Args)]
+struct SessionsArgs {
+    /// List Sessions across every Project, not just the current directory's.
+    #[arg(long, conflicts_with = "project")]
+    all: bool,
+
+    /// List Sessions in Projects whose directory name contains this substring
+    /// (case-insensitive).
+    #[arg(long, value_name = "SUBSTR")]
+    project: Option<String>,
+
+    /// Only Sessions touched since this point: a relative duration (3d, 2w, 1h)
+    /// or an absolute ISO date (2026-05-01).
+    #[arg(long, value_name = "WHEN")]
+    since: Option<String>,
+
+    /// Print only the Session file paths (for piping into `show -`).
+    #[arg(long, short = 'l')]
+    files: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -154,8 +181,62 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Show(args)) => run_show(&claude_dir, &args),
         Some(Command::Search(args)) => run_search(&claude_dir, &args),
+        Some(Command::Sessions(args)) => run_sessions(&claude_dir, &args),
         None => run_search(&claude_dir, &cli.search),
     }
+}
+
+/// Parse an optional `--since` value into a Unix cutoff, printing the standard
+/// error and signalling failure when it is unparseable. `Ok(None)` means no
+/// `--since` was given; `Err` means parse failed (caller should exit).
+fn parse_since(value: Option<&str>) -> Result<Option<i64>, ()> {
+    let Some(value) = value else { return Ok(None) };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match since_cutoff(value, now) {
+        Some(cutoff) => Ok(Some(cutoff)),
+        None => {
+            eprintln!(
+                "ccsearch: could not parse --since '{value}' \
+                 (use a duration like 3d/2w/1h, or an ISO date like 2026-05-01)"
+            );
+            Err(())
+        }
+    }
+}
+
+/// Run the `sessions` verb: resolve the scope, list its Sessions newest-first,
+/// apply `--since`, then render the headers (or just paths under `-l`).
+fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!("ccsearch: cannot read the current directory: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let root = projects_root(claude_dir);
+
+    let cutoff = match parse_since(args.since.as_deref()) {
+        Ok(cutoff) => cutoff,
+        Err(()) => return ExitCode::FAILURE,
+    };
+
+    let scope = build_scope(args.all, args.project.as_deref(), &cwd);
+    let mut sessions = list_sessions(&resolve_scope(&root, &scope));
+    if let Some(cutoff) = cutoff {
+        sessions.retain(|s| timestamp_is_since(s.timestamp.as_deref(), cutoff));
+    }
+
+    let rendered = if args.files {
+        format_session_paths(&sessions)
+    } else {
+        format_sessions(&sessions)
+    };
+    let _ = write!(anstream::stdout(), "{rendered}");
+    ExitCode::SUCCESS
 }
 
 /// Run the `search` verb: resolve the scope, then either list Failures by
@@ -204,31 +285,16 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     };
 
     // Optional recency cutoff, applied to whichever result set we produce.
-    let cutoff = match &args.since {
-        Some(value) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            match since_cutoff(value, now) {
-                Some(cutoff) => Some(cutoff),
-                None => {
-                    eprintln!(
-                        "ccsearch: could not parse --since '{value}' \
-                         (use a duration like 3d/2w/1h, or an ISO date like 2026-05-01)"
-                    );
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        None => None,
+    let cutoff = match parse_since(args.since.as_deref()) {
+        Ok(cutoff) => cutoff,
+        Err(()) => return ExitCode::FAILURE,
     };
 
     // --stats and --failed share one scan; --stats aggregates, --failed lists.
     if args.failed || args.stats {
         let mut results = match &session_path {
             Some(path) => failed_in_session_file(path, matcher.as_ref()),
-            None => failed_in_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), matcher.as_ref()),
+            None => failed_in_project_dirs(&resolve_scope(&root, &build_scope(args.all, args.project.as_deref(), &cwd)), matcher.as_ref()),
         };
         if let Some(cutoff) = cutoff {
             results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -253,7 +319,7 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     };
     let mut results = match &session_path {
         Some(path) => search_session_file(path, &matcher, &content),
-        None => search_project_dirs(&resolve_scope(&root, &scope(args, &cwd)), &matcher, &content),
+        None => search_project_dirs(&resolve_scope(&root, &build_scope(args.all, args.project.as_deref(), &cwd)), &matcher, &content),
     };
     if let Some(cutoff) = cutoff {
         results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -271,13 +337,14 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The scope a search covers when not pinned to a single Session: `--all`,
-/// `--project <substr>`, or the current working directory's Project.
-fn scope(args: &SearchArgs, cwd: &Path) -> Scope {
-    if args.all {
+/// The scope a verb covers when not pinned to a single Session: `--all`,
+/// `--project <substr>`, or the current working directory's Project. Shared by
+/// `search` and `sessions` so their scope flags behave identically (ADR 0004).
+fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
+    if all {
         Scope::All
-    } else if let Some(name_substring) = args.project.clone() {
-        Scope::Project { name_substring }
+    } else if let Some(name_substring) = project {
+        Scope::Project { name_substring: name_substring.to_string() }
     } else {
         Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
     }
