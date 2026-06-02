@@ -35,15 +35,15 @@ Verb-naming and the separate-verb-per-unit choice are recorded in **ADR 0004**. 
 - The `timestamp` field (the recency key, sorted at the existing `b.timestamp.cmp(&a.timestamp)` site) is the sort and `--since` basis — no new recency notion.
 
 **Acceptance criteria:**
-- [ ] `ccsearch sessions` with no Query lists current-Project Sessions, newest first, one `short-id · project · title · date · branch` line each (CLI test against a fixture Store).
-- [ ] A listed row's short-id round-trips: `ccsearch sessions` then `ccsearch show <that-id>` resolves the same Session.
-- [ ] `--all`, `--project <substr>`, and `--since <when>` change the listed set exactly as they change `search`'s scope (test at least `--all` widening and `--since` excluding an older Session).
-- [ ] `sessions -l` prints only paths, in the same order, and `ccsearch sessions -l | ccsearch show -` works.
-- [ ] A Session with no `ai-title` Record renders `(untitled)`; an undateable Session sorts last and is excluded by `--since`.
-- [ ] A `.jsonl` with no extractable `sessionId` is silently skipped (not rendered as a broken row).
-- [ ] `--session`, `--thinking`/`--tools`/`--all-content`, and `--failed`/`--stats` are rejected for `sessions` (clap error, non-zero exit).
-- [ ] Empty scope prints `No sessions.` and exits 0; piped output carries no ANSI.
-- [ ] `cargo test` green and `cargo clippy --all-targets -- -D warnings` clean.
+- [x] `ccsearch sessions` with no Query lists current-Project Sessions, newest first, one `short-id · project · title · date · branch` line each (CLI test against a fixture Store).
+- [x] A listed row's short-id round-trips: `ccsearch sessions` then `ccsearch show <that-id>` resolves the same Session.
+- [x] `--all`, `--project <substr>`, and `--since <when>` change the listed set exactly as they change `search`'s scope (test at least `--all` widening and `--since` excluding an older Session).
+- [x] `sessions -l` prints only paths, in the same order, and `ccsearch sessions -l | ccsearch show -` works.
+- [x] A Session with no `ai-title` Record renders `(untitled)`; an undateable Session sorts last and is excluded by `--since`.
+- [x] A `.jsonl` with no extractable `sessionId` is silently skipped (not rendered as a broken row).
+- [x] `--session`, `--thinking`/`--tools`/`--all-content`, and `--failed`/`--stats` are rejected for `sessions` (clap error, non-zero exit).
+- [x] Empty scope prints `No sessions.` and exits 0; piped output carries no ANSI.
+- [x] `cargo test` green and `cargo clippy --all-targets -- -D warnings` clean.
 
 **Out of scope:**
 - The `projects` verb (issue 17) — including any directory de-duplication.
@@ -52,3 +52,11 @@ Verb-naming and the separate-verb-per-unit choice are recorded in **ADR 0004**. 
 - Paging — `sessions` is a pure text emitter (ADR 0002); rely on `--since` and `| more` to bound output.
 
 ## Comments
+
+### 2026-06-02 — Done
+
+Implemented the `sessions` verb. `list_sessions(project_dirs)` is the content-agnostic counterpart to `search_project_dirs`: it enumerates Sessions via the shared `enumerate_sessions`, gathers header metadata (Title/timestamp/branch) per file with no Query, and sorts by the same recency key (`b.timestamp.cmp(&a.timestamp)`, ties by path). A new `SessionInfo` carries exactly the fields `session_header` needs, so `format_sessions` emits rows byte-identical to a search Session header (test asserts the exact string). `format_session_paths` backs `sessions -l`. CLI: a `sessions` subcommand with a `SessionsArgs` that defines only `--all`/`--project`/`--since`/`-l`; the search-only flags it omits are rejected by clap for free. Refactored the scope builder into a shared `build_scope` and the `--since` parse into a shared `parse_since` (search now reuses both).
+
+**Verified on the real Store:** `sessions` lists this project's 7 conversations newest-first; the top row's short-id round-trips through `show`; `--all` widens to 190; `--since` composes; `sessions -l | ccsearch show -` reopens a transcript; `--failed` is rejected with a clap error. 104 lib + 38 cli tests green, clippy clean.
+
+**Known minor duplication:** `session_info` repeats the metadata-folding loop from `search_one_session` (timestamp/branch/title). Not shared, because search does it in the same pass as matching + turn-counting; extracting it would either double-iterate segments in the hot search path or need a wider return. Left as-is deliberately; a candidate for a later `simplify` pass if a third caller appears.
