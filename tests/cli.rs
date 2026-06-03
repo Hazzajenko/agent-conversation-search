@@ -357,17 +357,18 @@ fn stats_aggregates_failures_into_a_counts_table_by_signature() {
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"PowerShell","input":{"command":"cargo test x"}}]}}"#,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"Exit code 101\nerror[E0433]: cannot find type"}]}}"#,
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"PowerShell","input":{"command":"cargo test y"}}]}}"#,
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"Exit code 101\nerror[E0609]: no field"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"Exit code 101\nerror[E0609]: cannot find type"}]}}"#,
         ]
         .join("\n"),
     );
 
-    // The two differing compiler errors collapse into one `error[` group of 2.
+    // Two compile errors of the same *shape* (only the masked code differs)
+    // collapse into one structural group of 2 — not a hard-coded `error[` label.
     cmd.arg("--stats")
         .assert()
         .success()
         .stdout(predicates::str::contains("✗ PowerShell"))
-        .stdout(predicates::str::contains("error["))
+        .stdout(predicates::str::contains("error[EN]: cannot find type"))
         .stdout(predicates::str::contains("2"));
 }
 

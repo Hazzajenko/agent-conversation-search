@@ -1,5 +1,7 @@
 # Grouping failures by marker signature, not exit code or normalised text
 
+> **Superseded by [ADR 0007](0007-structural-signatures-for-non-universal-failures.md).** The marker key proved overfit to one stack, and its largest buckets (`error:`, `(no marker)`) stayed opaque. 0007 keeps the universal markers as stable labels and groups the rest by a bounded structural shape — reversing this ADR's rejection of normalised-line grouping, with reasons.
+
 `--failed` (issue 11) *lists* individual Failures. `stats` (issue 13) *aggregates* them into a counts table to answer "what causes **a lot of** failures." The entire difficulty was always **what makes two Failures similar enough to count together** — ADR 0002 deferred this decision until `--failed` existed and could be pointed at real Failures rather than a whiteboard.
 
 It now has been. Running `--failed --all` against the real Store, the recurring shape is `(tool, exit_code, salient_line)`. But two of those three are noisy as a grouping key, and the third — the marker `salient_line` already matches — is the clean one.
