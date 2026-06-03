@@ -1045,10 +1045,24 @@ fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
 struct FailureMarker {
     needle: &'static str,
     label: &'static str,
+    /// Whether `label` is a stable, **universal** signature — Claude Code's own
+    /// tool/harness vocabulary and OS-level errors, identical for every user —
+    /// or merely a display *hint* for [`salient_line`] (which line to highlight)
+    /// whose Failures are grouped by [`structural_signature`] instead. Keeping a
+    /// language's error syntax (`error[`, `Traceback`, …) out of the universal
+    /// set is what stops the `stats` table being overfit to one stack.
+    universal: bool,
 }
 
+/// A universal marker: its `label` is a stable `stats` signature for everyone.
 const fn fm(needle: &'static str, label: &'static str) -> FailureMarker {
-    FailureMarker { needle, label }
+    FailureMarker { needle, label, universal: true }
+}
+
+/// A display-only hint: used by [`salient_line`] to pick the informative line,
+/// but its Failures group by structural shape, not by this `label`.
+const fn hint(needle: &'static str, label: &'static str) -> FailureMarker {
+    FailureMarker { needle, label, universal: false }
 }
 
 /// Markers that classify a tool Failure, in **priority order**. Applied
@@ -1056,25 +1070,33 @@ const fn fm(needle: &'static str, label: &'static str) -> FailureMarker {
 /// `error[` outranks a generic `Error:` regardless of where each appears. A
 /// fixed, documented lookup table — not a relevance ranker (ADR 0002 / 0003).
 ///
-/// Ordering: specific code errors first, then common tool errors (issue 14),
-/// then harness noise last — a real error always out-ranks an incidental match.
-/// (Real data: the naive "first line" is just `Exit code 101`; the real error is
-/// several lines below it — issue 11.)
+/// Two kinds of entry (see [`FailureMarker::universal`]):
+/// - [`fm`] — **universal** labels: Claude Code's own tool/harness vocabulary
+///   and OS-level shell errors. These are identical for every user, so they make
+///   stable `stats` buckets. Where the identifying phrase sits amid variable text
+///   (a filename, a command name) a fixed label also beats structural grouping.
+/// - [`hint`] — **display hints**: programming-language error syntax. Kept so
+///   [`salient_line`] highlights the right line, but their Failures group by
+///   [`structural_signature`], so the table is never overfit to one stack.
+///
+/// Ordering: specific code errors first (display priority), then universal tool
+/// errors (issue 14), then harness noise last. (Real data: the naive "first
+/// line" is just `Exit code 101`; the real error is several lines down — issue 11.)
 const FAILURE_MARKERS: &[FailureMarker] = &[
-    // Code / command errors.
-    fm("error[", "error["),
-    fm("panicked at", "panicked at"),
-    fm("assertion failed", "assertion failed"),
-    fm("assertion `", "assertion `"),
-    fm("Error:", "Error:"),
+    // Programming-language error syntax: display hints only, grouped structurally.
+    hint("error[", "error["),
+    hint("panicked at", "panicked at"),
+    hint("assertion failed", "assertion failed"),
+    hint("assertion `", "assertion `"),
+    hint("Error:", "Error:"),
     fm("does not exist", "does not exist"),
     fm("No such file", "No such file"),
     fm("unexpected EOF", "unexpected EOF"),
     fm("command not found", "command not found"),
-    fm("fatal:", "fatal:"),
-    fm("Traceback", "Traceback"),
-    fm("error:", "error:"),
-    // Common tool errors that match no code marker (issue 14).
+    hint("fatal:", "fatal:"),
+    hint("Traceback", "Traceback"),
+    hint("error:", "error:"),
+    // Common tool errors that match no code marker (issue 14) — universal.
     fm("String to replace not found", "String to replace not found"),
     fm("has not been read", "has not been read"),
     fm("exceeds maximum allowed tokens", "exceeds maximum allowed tokens"),
@@ -1109,12 +1131,58 @@ fn matched_marker(error_text: &str) -> Option<&'static FailureMarker> {
     FAILURE_MARKERS.iter().find(|m| cleaned.lines().any(|l| l.contains(m.needle)))
 }
 
-/// The Failure's **signature**: the matched marker's display `label`, or `None`
-/// when nothing matches. This is the grouping key for `stats` (ADR 0003); it
-/// shares [`matched_marker`] with [`salient_line`] so the list and the aggregate
-/// table can never disagree about a Failure's class.
-fn failure_signature(error_text: &str) -> Option<&'static str> {
-    matched_marker(error_text).map(|m| m.label)
+/// The Failure's **signature** — the grouping key for `stats` (ADR 0003 / 0007):
+/// the matched marker's `label` when that marker is [universal](FailureMarker::universal),
+/// otherwise the [`structural_signature`] of the same salient line a language
+/// hint (or no marker) would highlight. So the table buckets on Claude Code's own
+/// vocabulary where it can, and on error *shape* — never one stack's syntax —
+/// everywhere else. `(no marker)` survives only for a Failure with no error text.
+fn failure_signature(error_text: &str) -> String {
+    match matched_marker(error_text) {
+        Some(m) if m.universal => m.label.to_string(),
+        _ => {
+            let shape = structural_signature(&salient_line(error_text));
+            if shape.is_empty() { "(no marker)".to_string() } else { shape }
+        }
+    }
+}
+
+/// Reduce an error line to its **shape**: mask the volatile parts — file paths
+/// (any token with a `/` or `\`) become `<path>`, runs of digits collapse to a
+/// single `N` — so two errors of the same form group together without the table
+/// hard-coding any language's syntax. Truncated so one long line can't dominate.
+///
+/// `thread 'main' panicked at src/lib.rs:5:9:` → `thread 'main' panicked at <path>`
+/// `error[E0433]: cannot find type` → `error[EN]: cannot find type`
+fn structural_signature(line: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for tok in line.split_whitespace() {
+        if tok.contains('/') || tok.contains('\\') {
+            parts.push("<path>".to_string());
+            continue;
+        }
+        let mut masked = String::with_capacity(tok.len());
+        let mut in_digits = false;
+        for c in tok.chars() {
+            if c.is_ascii_digit() {
+                if !in_digits {
+                    masked.push('N');
+                }
+                in_digits = true;
+            } else {
+                masked.push(c);
+                in_digits = false;
+            }
+        }
+        parts.push(masked);
+    }
+    let joined = parts.join(" ");
+    const MAX: usize = 60;
+    if joined.chars().count() > MAX {
+        joined.chars().take(MAX).collect::<String>() + "…"
+    } else {
+        joined
+    }
 }
 
 /// The single most informative line of a Failure's error text: the first line
@@ -1264,7 +1332,7 @@ fn failures_in_one_session(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureGroup {
     pub tool: Option<String>,
-    pub signature: Option<&'static str>,
+    pub signature: String,
     pub count: usize,
 }
 
@@ -1273,7 +1341,7 @@ pub struct FailureGroup {
 /// by count descending, then tool then signature, so output is deterministic
 /// regardless of scan order.
 pub fn group_failures(results: &[SessionFailures]) -> Vec<FailureGroup> {
-    let mut counts: HashMap<(Option<String>, Option<&'static str>), usize> = HashMap::new();
+    let mut counts: HashMap<(Option<String>, String), usize> = HashMap::new();
     for session in results {
         for f in &session.failures {
             *counts.entry((f.tool.clone(), failure_signature(&f.error_text))).or_insert(0) += 1;
@@ -1326,9 +1394,10 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
     out
 }
 
-/// Render the `stats` table (ADR 0003): one right-aligned `<count>  ✗ <tool>
-/// <signature>` row per [`FailureGroup`], biggest first, with `(no marker)` for
-/// the unmatched bucket. Reports cleanly when there are none, like
+/// Render the `stats` table (ADR 0003 / 0007): one right-aligned `<count>  ✗
+/// <tool>  <signature>` row per [`FailureGroup`], biggest first. The signature is
+/// a universal marker label or a [`structural_signature`]; `(no marker)` appears
+/// only for empty error text. Reports cleanly when there are none, like
 /// [`format_failures`].
 pub fn format_stats(groups: &[FailureGroup]) -> String {
     if groups.is_empty() {
@@ -1347,10 +1416,9 @@ pub fn format_stats(groups: &[FailureGroup]) -> String {
     let mut out = String::new();
     for g in groups {
         let tool = g.tool.as_deref().unwrap_or("tool");
-        let signature = g.signature.unwrap_or("(no marker)");
         out.push_str(&format!(
             "{:>count_width$}  ✗ {:<tool_width$}  {}\n",
-            g.count, tool, signature
+            g.count, tool, g.signature
         ));
     }
     out
@@ -2345,23 +2413,44 @@ mod tests {
     // --- failure signature: the grouping key (ADR 0003) ------------------
 
     #[test]
-    fn failure_signature_is_the_highest_priority_matched_marker() {
-        // `error[` outranks `error:`/`Error:` regardless of line order.
+    fn failure_signature_of_a_language_error_is_its_structural_shape_not_a_hardcoded_label() {
+        // `error[` is a display hint only: salient_line still picks it over the
+        // earlier `error:` line, but the bucket is the masked shape of that line,
+        // so the table never hard-codes Rust's syntax as a universal signature.
         let text = "Exit code 101\nerror: aborting\nerror[E0433]: cannot find type";
-        assert_eq!(failure_signature(text), Some("error["));
+        assert_eq!(failure_signature(text), "error[EN]: cannot find type");
     }
 
     #[test]
-    fn failure_signature_is_none_when_no_marker_matches() {
-        assert_eq!(failure_signature("just some unremarkable stdout\nwith nothing notable"), None);
+    fn failure_signature_falls_back_to_a_structural_shape_when_no_marker_matches() {
+        // No marker, so the (masked) salient line becomes the bucket — not one
+        // giant `(no marker)` lump. `(no marker)` survives only for empty text.
+        assert_eq!(
+            failure_signature("just some unremarkable stdout\nwith nothing notable"),
+            "with nothing notable",
+        );
+        assert_eq!(failure_signature(""), "(no marker)");
     }
 
     #[test]
-    fn failure_signature_and_salient_line_agree_on_the_marker() {
-        // The list (salient_line) and the table (failure_signature) must never
-        // disagree about a Failure's class — they share the marker lookup.
+    fn structural_signature_masks_paths_and_numbers_so_like_errors_share_a_shape() {
+        assert_eq!(
+            structural_signature("thread 'main' panicked at src/lib.rs:5:9:"),
+            "thread 'main' panicked at <path>",
+        );
+        // Two panics at different sites collapse to one shape.
+        assert_eq!(
+            structural_signature("thread 'main' panicked at src/main.rs:42:1:"),
+            "thread 'main' panicked at <path>",
+        );
+    }
+
+    #[test]
+    fn failure_signature_and_salient_line_agree_on_the_line() {
+        // Display and grouping still look at the *same* line; the table just
+        // masks it. A `panicked at` hint highlights the panic and buckets its shape.
         let text = "Exit code 101\nrunning 1 test\nthread 'main' panicked at src/lib.rs:5:9:";
-        assert_eq!(failure_signature(text), Some("panicked at"));
+        assert_eq!(failure_signature(text), "thread 'main' panicked at <path>");
         assert!(salient_line(text).contains("panicked at"));
     }
 
@@ -2369,26 +2458,26 @@ mod tests {
     fn failure_signature_unwraps_tool_use_error_and_classifies_the_inner_message() {
         // The wrapper must not defeat classification (issue 14).
         let text = "<tool_use_error>String to replace not found in file.</tool_use_error>";
-        assert_eq!(failure_signature(text), Some("String to replace not found"));
+        assert_eq!(failure_signature(text), "String to replace not found");
     }
 
     #[test]
-    fn failure_signature_classifies_the_common_unmarked_tool_errors() {
+    fn failure_signature_classifies_the_common_universal_tool_errors() {
         assert_eq!(
             failure_signature("File has not been read yet. Read it first before writing to it."),
-            Some("has not been read"),
+            "has not been read",
         );
         assert_eq!(
             failure_signature("File content (38631 tokens) exceeds maximum allowed tokens (25000)."),
-            Some("exceeds maximum allowed tokens"),
+            "exceeds maximum allowed tokens",
         );
         assert_eq!(
             failure_signature("foo : The term 'foo' is not recognized as the name of a cmdlet"),
-            Some("is not recognized"),
+            "is not recognized",
         );
         assert_eq!(
             failure_signature("<tool_use_error>Blocked: sleep 90 followed by: cat x</tool_use_error>"),
-            Some("Blocked"),
+            "Blocked",
         );
     }
 
@@ -2397,12 +2486,12 @@ mod tests {
         // Structurally is_error, but the tool did not error — bucketed, not
         // filtered, under a short label distinct from the matched substring.
         let rejected = "The user doesn't want to proceed with this tool use. The tool use was rejected";
-        assert_eq!(failure_signature(rejected), Some("rejected"));
+        assert_eq!(failure_signature(rejected), "rejected");
         let unavailable = "claude-opus-4-8 is temporarily unavailable, so auto mode cannot determine safety";
-        assert_eq!(failure_signature(unavailable), Some("unavailable"));
+        assert_eq!(failure_signature(unavailable), "unavailable");
         // A parallel-batch sibling errored, so this call was cancelled unrun.
         let cancelled = "Cancelled: parallel tool call Bash(cd \"D:\\x\" && git status) errored";
-        assert_eq!(failure_signature(cancelled), Some("cancelled"));
+        assert_eq!(failure_signature(cancelled), "cancelled");
     }
 
     #[test]
@@ -2502,31 +2591,47 @@ mod tests {
     }
 
     #[test]
-    fn group_failures_counts_by_tool_and_marker_signature() {
+    fn group_failures_collapses_same_shape_errors_and_labels_universal_ones() {
         let s = session_of(vec![
-            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type `A`"),
-            failure("PowerShell", "Exit code 101\nerror[E0609]: no field `b`"),
+            // Two compile errors of the *same shape* (only the masked code
+            // differs) collapse into one structural group of 2.
+            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type"),
+            failure("PowerShell", "Exit code 101\nerror[E0609]: cannot find type"),
+            // A universal OS error keeps its stable label.
             failure("Bash", "Exit code 2\nunexpected EOF while looking for matching `\"'"),
         ]);
 
         let groups = group_failures(std::slice::from_ref(&s));
 
-        // Two PowerShell `error[` failures collapse into one group of 2; the
-        // differing exit-less specifics (E0433 vs E0609) do not split them.
         let ps = groups
             .iter()
-            .find(|g| g.tool.as_deref() == Some("PowerShell") && g.signature == Some("error["))
-            .expect("a PowerShell error[ group");
+            .find(|g| g.tool.as_deref() == Some("PowerShell") && g.signature == "error[EN]: cannot find type")
+            .expect("a PowerShell structural group");
         assert_eq!(ps.count, 2);
         let bash = groups
             .iter()
-            .find(|g| g.tool.as_deref() == Some("Bash") && g.signature == Some("unexpected EOF"))
+            .find(|g| g.tool.as_deref() == Some("Bash") && g.signature == "unexpected EOF")
             .expect("a Bash unexpected-EOF group");
         assert_eq!(bash.count, 1);
     }
 
     #[test]
-    fn group_failures_buckets_unmatched_failures_under_a_none_signature() {
+    fn group_failures_splits_differently_shaped_errors() {
+        // The flip side of the contract: two `error[` lines whose *messages*
+        // differ are genuinely different problems, so they no longer share a bucket.
+        let s = session_of(vec![
+            failure("PowerShell", "error[E0433]: cannot find type"),
+            failure("PowerShell", "error[E0382]: borrow of moved value"),
+        ]);
+
+        let groups = group_failures(&[s]);
+
+        assert_eq!(groups.len(), 2, "different messages are different buckets");
+        assert!(groups.iter().all(|g| g.count == 1));
+    }
+
+    #[test]
+    fn group_failures_buckets_unmatched_failures_by_structural_shape() {
         let s = session_of(vec![
             failure("Bash", "some unremarkable output\nnothing notable here"),
             failure("Glob", "another line the markers do not recognise"),
@@ -2534,7 +2639,11 @@ mod tests {
 
         let groups = group_failures(&[s]);
 
-        assert!(groups.iter().all(|g| g.signature.is_none()), "no marker matched either");
+        // No marker matched, yet nothing lands in one `(no marker)` lump — each
+        // gets the masked shape of its salient line.
+        assert!(groups.iter().all(|g| g.signature != "(no marker)"), "no lumping");
+        assert!(groups.iter().any(|g| g.signature == "nothing notable here"));
+        assert!(groups.iter().any(|g| g.signature == "another line the markers do not recognise"));
         assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 2);
     }
 
@@ -2550,23 +2659,24 @@ mod tests {
 
         // All three remain present (nothing filtered); noise carries clean labels.
         assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 3, "no Failure is dropped");
-        assert!(groups.iter().any(|g| g.signature == Some("rejected")), "rejection bucketed");
-        assert!(groups.iter().any(|g| g.signature == Some("unavailable")), "unavailability bucketed");
+        assert!(groups.iter().any(|g| g.signature == "rejected"), "rejection bucketed");
+        assert!(groups.iter().any(|g| g.signature == "unavailable"), "unavailability bucketed");
     }
 
     #[test]
     fn group_failures_sorts_by_count_descending() {
         let s = session_of(vec![
             failure("Bash", "fatal: not a git repository"),
-            failure("PowerShell", "error[E0433]: x"),
-            failure("PowerShell", "error[E0609]: y"),
-            failure("PowerShell", "error[E0425]: z"),
+            failure("PowerShell", "error[E0433]: mismatched types"),
+            failure("PowerShell", "error[E0609]: mismatched types"),
+            failure("PowerShell", "error[E0425]: mismatched types"),
         ]);
 
         let groups = group_failures(&[s]);
 
+        // The three same-shape compile errors are the biggest group.
         assert_eq!(groups.first().unwrap().count, 3, "the biggest group leads");
-        assert_eq!(groups.first().unwrap().signature, Some("error["));
+        assert_eq!(groups.first().unwrap().signature, "error[EN]: mismatched types");
     }
 
     // --- rendering Failures ----------------------------------------------
@@ -2625,15 +2735,15 @@ mod tests {
     #[test]
     fn format_stats_renders_a_counts_table_of_tool_signature_and_count() {
         let groups = vec![
-            FailureGroup { tool: Some("PowerShell".into()), signature: Some("error["), count: 12 },
-            FailureGroup { tool: Some("Bash".into()), signature: Some("unexpected EOF"), count: 4 },
+            FailureGroup { tool: Some("PowerShell".into()), signature: "error[EN]: x".into(), count: 12 },
+            FailureGroup { tool: Some("Bash".into()), signature: "unexpected EOF".into(), count: 4 },
         ];
 
         let out = format_stats(&groups);
 
         assert!(out.contains("12"), "the count: {out}");
         assert!(out.contains("✗ PowerShell"), "tool with the failed glyph: {out}");
-        assert!(out.contains("error["), "the marker signature: {out}");
+        assert!(out.contains("error[EN]: x"), "the structural signature: {out}");
         assert!(out.contains("unexpected EOF"));
         // Counts are right-aligned to a common width, so 4 trails 12.
         let twelve = out.find("12").unwrap();
@@ -2642,18 +2752,18 @@ mod tests {
     }
 
     #[test]
-    fn format_stats_labels_the_none_signature_bucket() {
-        let groups = vec![FailureGroup { tool: Some("Read".into()), signature: None, count: 5 }];
-        assert!(format_stats(&groups).contains("(no marker)"), "names the unmatched bucket");
+    fn format_stats_renders_the_no_marker_bucket() {
+        let groups = vec![FailureGroup { tool: Some("Read".into()), signature: "(no marker)".into(), count: 5 }];
+        assert!(format_stats(&groups).contains("(no marker)"), "names the empty-text bucket");
     }
 
     #[test]
     fn format_stats_caps_the_tool_column_so_a_long_name_does_not_sparse_out_rows() {
         let groups = vec![
-            FailureGroup { tool: Some("PowerShell".into()), signature: Some("error["), count: 2 },
+            FailureGroup { tool: Some("PowerShell".into()), signature: "error[EN]: x".into(), count: 2 },
             FailureGroup {
                 tool: Some("mcp__ccd_session_mgmt__search_session_transcripts".into()),
-                signature: None,
+                signature: "(no marker)".into(),
                 count: 1,
             },
         ];
