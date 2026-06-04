@@ -612,7 +612,9 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
     for s in sessions {
         out.push_str(&session_header(
             &short_id(&s.session_id),
-            &s.project,
+            // Prefer the real cwd over the mangled directory name — the reason
+            // the tool exists — falling back as `projects` does (ADR 0005).
+            s.cwd.as_deref().unwrap_or(&s.project),
             s.title.as_deref(),
             s.timestamp.as_deref(),
             s.branch.as_deref(),
@@ -1845,6 +1847,25 @@ mod tests {
         assert_eq!(out, "abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
 
         assert_eq!(format_sessions(&[]), "No sessions.\n");
+    }
+
+    #[test]
+    fn format_sessions_prefers_the_real_cwd_over_the_encoded_directory_name() {
+        // The whole reason the tool exists is that the on-disk directory name is
+        // mangled (E--projects-demo). When a Session carries its real cwd we show
+        // that instead — matching what `projects` already does (lib.rs:466). The
+        // unit `--project` matches is unaffected; only the display label changes.
+        let info = SessionInfo {
+            project: "E--projects-demo".into(),
+            session_id: "abcd1234-0000-0000-0000-000000000000".into(),
+            path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
+            title: Some("Demo chat".into()),
+            timestamp: Some("2026-06-01T10:00:00.000Z".into()),
+            branch: Some("main".into()),
+            cwd: Some(r"E:\projects\demo".into()),
+        };
+        let out = format_sessions(std::slice::from_ref(&info));
+        assert_eq!(out, "abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
     }
 
     /// A bare [`SessionInfo`] for a directory, dated and with a cwd — for
