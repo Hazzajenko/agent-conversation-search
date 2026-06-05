@@ -248,6 +248,10 @@ pub struct SessionMatches {
     pub timestamp: Option<String>,
     /// The git branch the Session was recorded on (`gitBranch`), if any.
     pub branch: Option<String>,
+    /// The real working directory the Session was recorded in (`cwd`), if any.
+    /// Displayed in place of the mangled directory name (ADR 0005); `None`
+    /// falls back to `project`.
+    pub cwd: Option<String>,
     /// The Matches, in the order they appear in the Session.
     pub matches: Vec<Match>,
 }
@@ -347,6 +351,7 @@ fn search_one_session(
         title: session.meta.title,
         timestamp: session.meta.timestamp,
         branch: session.meta.branch,
+        cwd: session.meta.cwd,
         matches,
     })
 }
@@ -676,7 +681,9 @@ pub fn format_results(
         let short = short_id(&s.session_id);
         out.push_str(&session_header(
             &short,
-            &s.project,
+            // Prefer the real cwd over the mangled directory name (ADR 0005),
+            // as `sessions` and `projects` do.
+            s.cwd.as_deref().unwrap_or(&s.project),
             s.title.as_deref(),
             s.timestamp.as_deref(),
             s.branch.as_deref(),
@@ -1239,6 +1246,9 @@ pub struct SessionFailures {
     pub title: Option<String>,
     pub timestamp: Option<String>,
     pub branch: Option<String>,
+    /// The real working directory the Session was recorded in (`cwd`), if any —
+    /// displayed in place of the mangled directory name (ADR 0005).
+    pub cwd: Option<String>,
     pub failures: Vec<Failure>,
 }
 
@@ -1324,6 +1334,7 @@ fn failures_in_one_session(
         title: session.meta.title,
         timestamp: session.meta.timestamp,
         branch: session.meta.branch,
+        cwd: session.meta.cwd,
         failures,
     })
 }
@@ -1372,7 +1383,8 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
         let short = short_id(&s.session_id);
         out.push_str(&session_header(
             &short,
-            &s.project,
+            // Prefer the real cwd over the mangled directory name (ADR 0005).
+            s.cwd.as_deref().unwrap_or(&s.project),
             s.title.as_deref(),
             s.timestamp.as_deref(),
             s.branch.as_deref(),
@@ -1945,6 +1957,7 @@ mod tests {
             title: title.map(Into::into),
             timestamp: None,
             branch: None,
+            cwd: None,
             matches,
         }
     }
@@ -1969,6 +1982,21 @@ mod tests {
             "match text shown: {out}"
         );
         assert!(out.to_lowercase().contains("user"), "match labelled by role: {out}");
+    }
+
+    #[test]
+    fn search_header_prefers_the_real_cwd_over_the_encoded_directory_name() {
+        // search's default-verb header must recover the real path too — not just
+        // `sessions`/`projects` (issue 18). The encoded name stays the fallback.
+        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
+            Segment { role: Role::User, text: "borrow".into() },
+        ]);
+        s.cwd = Some(r"E:\projects\demo".into());
+
+        let out = format_results(&[s], &lit("borrow"), 0, false);
+
+        assert!(out.contains(r"E:\projects\demo"), "header shows real cwd: {out}");
+        assert!(!out.contains("E--projects-demo"), "not the mangled name: {out}");
     }
 
     #[test]
@@ -2037,6 +2065,7 @@ mod tests {
             title: Some("Borrow chat".into()),
             timestamp: None,
             branch: None,
+            cwd: None,
             matches: vec![Match {
                 turn: None,
                 segment: Segment { role: Role::Title, text: "Borrow chat".into() },
@@ -2607,6 +2636,7 @@ mod tests {
             title: None,
             timestamp: None,
             branch: None,
+            cwd: None,
             failures,
         }
     }
@@ -2710,6 +2740,7 @@ mod tests {
             title: Some("Build chat".into()),
             timestamp: None,
             branch: None,
+            cwd: None,
             failures: vec![failure],
         }
     }
@@ -2730,6 +2761,23 @@ mod tests {
         assert!(out.contains("[3] ✗ Bash"), "turn + failed tool: {out}");
         assert!(out.contains("cargo test"), "command shown: {out}");
         assert!(out.contains("exit 101 · error[E0433]: failed to resolve"), "salient line with exit: {out}");
+    }
+
+    #[test]
+    fn format_failures_header_prefers_the_real_cwd_over_the_encoded_name() {
+        let mut s = one_failure(Failure {
+            turn: Some(3),
+            tool: Some("Bash".into()),
+            command: Some("cargo test".into()),
+            exit_code: Some(101),
+            error_text: "Exit code 101\nerror[E0433]: failed".into(),
+        });
+        s.cwd = Some(r"E:\projects\demo".into());
+
+        let out = format_failures(&[s], 3, false);
+
+        assert!(out.contains(r"E:\projects\demo"), "header shows real cwd: {out}");
+        assert!(!out.contains("E--projects-demo"), "not the mangled name: {out}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Show the real project path (cwd) in every verb, not just `projects`
 
-Status: ready-for-agent
+Status: done
 Category: bug
 
 ## Why
@@ -63,14 +63,14 @@ name when no Session carries a `cwd` — exactly as `projects` already does
   title/timestamp/branch carries `cwd`).
 
 **Acceptance criteria:**
-- [ ] `sessions` shows the real cwd when present, encoded name as fallback (CLI
+- [x] `sessions` shows the real cwd when present, encoded name as fallback (CLI
   test against a fixture Store with and without a `cwd` Record).
-- [ ] `search` and `--failed` headers do the same; `--stats` is unaffected (it
+- [x] `search` and `--failed` headers do the same; `--stats` is unaffected (it
   keys on tool+signature, not project name).
-- [ ] `--project <substr>` still selects by encoded directory name (regression
+- [x] `--project <substr>` still selects by encoded directory name (regression
   test: a substring of the encoded name still matches).
-- [ ] README `search`/`sessions` examples now match real output.
-- [ ] `cargo test` green, `cargo clippy --all-targets -- -D warnings` clean.
+- [x] README `search`/`sessions` examples now match real output.
+- [x] `cargo test` green, `cargo clippy --all-targets -- -D warnings` clean.
 
 **Out of scope:**
 - Changing Project identity to be cwd-keyed (rejected in ADR 0005).
@@ -85,3 +85,20 @@ landed first (see issue, it was a one-liner reusing the existing `cwd` field);
 the `search` / `--failed` half remains because their result structs need a new
 `cwd` field threaded through. This issue tracks the full set; mark done when
 `search` and `--failed` also show real paths.
+
+### 2026-06-05 — Done
+
+Added a `cwd: Option<String>` field to `SessionMatches` and `SessionFailures`,
+populated from the same `session::read(&text).meta` pass that already yields
+title/timestamp/branch (zero extra I/O). `format_results` and `format_failures`
+now feed `s.cwd.as_deref().unwrap_or(&s.project)` to the shared `session_header`,
+matching the `sessions`/`projects` fallback. No formatter was forked.
+
+Scope resolution and `--project` are untouched — they still match the encoded
+directory name (verified: `--project claude-code-conversation` still returns 8
+rows). `-l` still emits the real `.jsonl` file path (a separate concern from the
+display label). Two focused tests added
+(`search_header_prefers_the_real_cwd_…`, `format_failures_header_prefers_…`);
+112 lib + 42 cli green, clippy clean. Verified on the real Store: `search`,
+`sessions`, `--failed`, and `projects` now all show
+`E:\projects\rust\claude-code-conversation-search`.
