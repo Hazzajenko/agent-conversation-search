@@ -1,138 +1,86 @@
 ---
 name: ccsearch
 description: >-
-  Recall or find a PAST Claude Code conversation by searching your local
-  conversation history with the `ccsearch` CLI. Use when the user asks to
-  recall, find, or look up an earlier session, e.g. "did we ever discuss X",
-  "find the conversation where we set up Y", "what did I decide about Z",
-  "which session was that in", "have we talked about this before". NOT for searching
-  the current project's source files (use Grep/Glob for that).
+  Search your local Claude Code conversation history with the `ccsearch` CLI.
+  Use when the user asks to recall, find, or reopen a PAST session ("did we
+  ever discuss X", "find the conversation where we set up Y", "what did I
+  decide about Z last week"), to list past sessions or projects, or to analyse
+  failed tool calls across their history ("what's been failing", "why do my
+  tool calls keep erroring"). NOT for searching the current project's source
+  files (use Grep/Glob for that).
 ---
 
-# ccsearch: recall a past Claude Code conversation
+# ccsearch: search past Claude Code conversations
 
-`ccsearch` is a fast Rust CLI that searches the user's local Claude Code
-conversation history (the `.jsonl` transcripts under `~/.claude/projects/`).
-This skill is thin glue: the binary does the mechanical search, you interpret
-the results, drill in for full context, and summarise.
+`ccsearch` is a Rust CLI that searches the user's local Claude Code transcripts
+(the `.jsonl` files under `~/.claude/projects/`). This skill is thin glue: the
+binary does the mechanical work, you interpret the results, drill in, and
+summarise. Run `ccsearch --help` for the full flag surface — this file only
+records what `--help` cannot tell you.
 
-## When to Use
+If `ccsearch --version` fails, the binary is not installed; tell the user to
+`cargo install --path .` from a clone of this repo rather than guessing at
+answers.
 
-Trigger on requests to recall or locate a **previous conversation**:
+## The core workflow: session-id
 
-- "Did we ever discuss the borrow checker issue?"
-- "Find the session where we set up the CI pipeline."
-- "What did I decide about the auth flow last week?"
-- "Which conversation was that bug in?"
-- "Have we hit this error before?"
+Every verb is welded together by the **short session-id** (a git-style unique
+prefix) printed at the start of each result header. Find → copy the id → open:
 
-**Do not** use this for searching the current project's code or files; that is
-what `Grep`/`Glob` are for. This skill searches conversation transcripts, not
-the working tree.
-
-## Prerequisite: the binary must be on PATH
-
-This skill calls the `ccsearch` executable. Confirm it is installed:
-
-```bash
-ccsearch --version
+```console
+$ ccsearch "diesel migration"        # find — note the id in each header
+$ ccsearch show 4c28878f             # read — the whole transcript
+$ ccsearch show 4c28878f --around 220  # read — just the turns near turn 220
+$ ccsearch "panic" --session 4c28878f  # search within that one conversation
 ```
 
-If that fails, the binary is not installed. Install it from the
-`claude-code-conversation-search` repo:
+Prefer `show` over reading raw `.jsonl` files — it renders the transcript for
+you. Result trailers print the exact `show` command to run next.
 
-```bash
-cargo install --path .          # from a local clone of the repo
-# or
-cargo install --git <repo-url>  # if published to a git remote
-```
+## Verbs
 
-Until the binary is on PATH, this skill cannot run; tell the user to install
-it rather than guessing at answers.
+- `ccsearch "<terms>"` — search (the default verb; case-insensitive literal
+  substring). `-e` for regex, `-s` for case-sensitive.
+- `ccsearch show <id>` — render a session as a transcript; `--around N`
+  windows it.
+- `ccsearch sessions` / `ccsearch projects` — list sessions in scope /
+  projects in the store, newest first. Use these to orient before searching.
+- `ccsearch --failed [query]` — list failed tool calls by structure; the
+  query becomes an optional filter on command/error. `--full` prints whole
+  error texts; `--stats` aggregates into a counts table by tool and error
+  signature.
 
-## How to search
+## Scope
 
-`ccsearch` matches a **case-insensitive literal substring** by default and
-prints human-readable output (there is no JSON mode; the output is meant to be
-read directly by you).
+With no flag, every verb covers the **current working directory's** project —
+when the user asks about a different project, reach for a scope flag:
 
-Pick the scope from what the user asked for:
-
-| User intent | Command |
+| User intent | Flag |
 | --- | --- |
-| "in this project" (the default) | `ccsearch "<terms>"` |
-| "anywhere" / "any project" / "everywhere" | `ccsearch --all "<terms>"` |
-| names another project | `ccsearch --project "<name-substr>" "<terms>"` |
+| "anywhere" / "any project" | `--all` |
+| names another project | `--project <name-substr>` |
+| one known conversation | `--session <id-prefix>` |
+| "last week" / "since May" | `--since 1w` / `--since 2026-05-01` |
 
-`--all` searches every project's history; `--project <SUBSTR>` narrows to
-projects whose directory name contains `SUBSTR` (case-insensitive). `--all` and
-`--project` are mutually exclusive.
+`--since` composes with every scope; `--all` and `--project` conflict.
 
-> Scope note: with no scope flag, `ccsearch` searches the history of the
-> **current working directory's** project. When invoked from a different
-> project than the one the user is asking about, reach for `--all` or
-> `--project`.
+## Gotchas `--help` won't tell you
 
-### Reading the output and drilling in
+- Exit `0` **even with no matches**; `1` only on invalid regex or an
+  unresolvable config dir. Empty output means "searched fine, found nothing" —
+  say that rather than retrying blindly.
+- Default search covers user/assistant text and titles. When a plain search
+  comes up empty, retry with `--thinking`, `--tools`, or `--all-content` — the
+  topic may live in a reasoning block or a tool call.
+- `--tools` matches tool input serialised as raw JSON, so structural tokens
+  match noisily — a fallback, not a first pass.
+- Windows and WSL keep separate histories; `--claude-dir` points at the other
+  one.
+- Output is human-readable only (no JSON mode); read it directly.
+- Too many capped sessions? Raise `-m` (default 3 matches shown per session,
+  `0` = unlimited) or narrow the terms.
 
-1. Run the search and read the printed sessions. Each result is a session
-   header followed by up to N indented `role: snippet` lines centred on the
-   match. Sessions are sorted newest-first.
-2. The snippet is often enough to answer "did we discuss X". When you need the
-   **full** conversation, get the file paths and read around the match:
+## Reporting back
 
-   ```bash
-   ccsearch --all -l "<terms>"   # -l / --files prints only matching .jsonl paths
-   ```
-
-   Then `Read` the relevant `.jsonl` to recover surrounding context (each line
-   is one JSON record: `user` / `assistant` / `tool_use` / `tool_result`).
-3. Summarise what you found in plain language and **point the user at the
-   session**: name the project, the session title/date, and what was decided.
-
-### Output shape (example)
-
-```
-e--projects-myapp · Wiring up the auth flow · 2026-05-20 · main
-  user: …should we use the borrow checker trick here or just clone the…
-  assistant: …the borrow checker will reject that because the mutable borrow…
-  … +2 more matches
-```
-
-A header is `project · title · date · branch` (date/branch omitted when
-absent). `  … +N more matches` appears when a session is capped by
-`--max-per-session`.
-
-## Flag reference
-
-The complete flag surface (verified against the binary):
-
-| Flag | Effect |
-| --- | --- |
-| `<QUERY>` (positional, required) | text to search for (literal substring by default) |
-| `--all` | search every project (conflicts with `--project`) |
-| `--project <SUBSTR>` | projects whose dir name contains SUBSTR (case-insensitive) |
-| `--regex`, `-e` | treat the query as a regular expression |
-| `--case-sensitive`, `-s` | case-sensitive matching (default ignores case) |
-| `--thinking` | also search assistant thinking blocks |
-| `--tools` | also search tool calls (`tool_use`) and tool results (`tool_result`) |
-| `--all-content` | equivalent to `--thinking --tools` |
-| `--max-per-session <N>`, `-m` | cap matches shown per session (default 3; `0` = unlimited) |
-| `--files`, `-l` | print only matching `.jsonl` paths (grep `-l` style) |
-| `--claude-dir <PATH>` | override the Claude config dir (else `$CLAUDE_CONFIG_DIR`, else `~/.claude`) |
-
-Exit codes: `0` on success **even when there are no matches**; `1` only on an
-invalid regex, an unresolvable config dir, or an unreadable working directory.
-A `0` exit with empty output means "searched fine, found nothing", so say that
-rather than retrying blindly.
-
-## Tips
-
-- Default search covers user and assistant message text plus titles. Add
-  `--thinking` to include reasoning blocks, `--tools` for tool calls/results,
-  or `--all-content` for everything. Reach for these when a plain search comes
-  up empty but you suspect the topic lived in a tool call or thinking block.
-- `--tools` serialises tool input as raw JSON, so it can match structural
-  tokens noisily. Prefer it as a fallback, not a first pass.
-- Use `-e`/`--regex` for patterns (e.g. `ccsearch -e "fn \w+_test" --all`).
-- If a query returns too many capped sessions, raise `-m` or narrow the terms.
+Summarise in plain language and point the user at the session: project, title,
+date, and the `ccsearch show <id>` command to reopen it.
