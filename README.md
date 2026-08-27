@@ -136,8 +136,12 @@ $ ccsearch --stats                 # aggregate into a counts table by tool + err
 $ ccsearch --stats
 19  ✗ PowerShell  error:
  3  ✗ Edit        String to replace not found
- 1  ✗ Read        exceeds maximum allowed tokens
+… +2 more singleton signatures
 ```
+
+One-off signatures fold into the trailing `+N more` line so the table stays
+readable at `--all` scale (unless every row is a one-off, in which case they
+are shown). Use `--failed` to see every failure individually.
 
 Add `--full` to a `--failed` listing to print each failure's complete error text
 instead of the single salient line.

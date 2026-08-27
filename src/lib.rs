@@ -1411,29 +1411,42 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
 /// Render the `stats` table (ADR 0003 / 0007): one right-aligned `<count>  ✗
 /// <tool>  <signature>` row per [`FailureGroup`], biggest first. The signature is
 /// a universal marker label or a [`structural_signature`]; `(no marker)` appears
-/// only for empty error text. Reports cleanly when there are none, like
-/// [`format_failures`].
+/// only for empty error text. Count-1 rows fold into a `… +N more singleton
+/// signatures` trailer (ADR 0008) unless every row is a singleton. Reports
+/// cleanly when there are none, like [`format_failures`].
 pub fn format_stats(groups: &[FailureGroup]) -> String {
     if groups.is_empty() {
         return "No failures.\n".to_string();
     }
-    let count_width = groups.iter().map(|g| g.count.to_string().len()).max().unwrap_or(1);
+    // Fold count-1 rows into one trailer so the whole-Store table keeps
+    // aggregating (ADR 0008) — unless *everything* is a singleton, where
+    // folding would hide the entire table behind a bare trailer.
+    let recurring: Vec<&FailureGroup> = groups.iter().filter(|g| g.count > 1).collect();
+    let (shown, folded) = if recurring.is_empty() {
+        (groups.iter().collect::<Vec<_>>(), 0)
+    } else {
+        (recurring, groups.iter().filter(|g| g.count == 1).count())
+    };
+    let count_width = shown.iter().map(|g| g.count.to_string().len()).max().unwrap_or(1);
     // Cap the tool column so one long name (e.g. a verbose MCP tool) cannot
     // sparse-out every other row; longer names simply overflow past the pad.
     const TOOL_WIDTH_CAP: usize = 16;
-    let tool_width = groups
+    let tool_width = shown
         .iter()
         .map(|g| g.tool.as_deref().unwrap_or("tool").chars().count())
         .max()
         .unwrap_or(0)
         .min(TOOL_WIDTH_CAP);
     let mut out = String::new();
-    for g in groups {
+    for g in shown {
         let tool = g.tool.as_deref().unwrap_or("tool");
         out.push_str(&format!(
             "{:>count_width$}  ✗ {:<tool_width$}  {}\n",
             g.count, tool, g.signature
         ));
+    }
+    if folded > 0 {
+        out.push_str(&format!("… +{folded} more singleton signatures\n"));
     }
     out
 }
@@ -2833,7 +2846,8 @@ mod tests {
             FailureGroup {
                 tool: Some("mcp__ccd_session_mgmt__search_session_transcripts".into()),
                 signature: "(no marker)".into(),
-                count: 1,
+                // count 2 so the row is not folded away as a singleton.
+                count: 2,
             },
         ];
 
@@ -2843,6 +2857,40 @@ mod tests {
             short_row.chars().count() < 40,
             "the long MCP name must not pad the PowerShell row out: {short_row:?}"
         );
+    }
+
+    #[test]
+    fn format_stats_folds_singletons_into_a_trailer_when_recurring_rows_exist() {
+        let groups = vec![
+            FailureGroup { tool: Some("Edit".into()), signature: "has not been read".into(), count: 44 },
+            FailureGroup { tool: Some("Bash".into()), signature: "=== user settings ===".into(), count: 1 },
+            FailureGroup { tool: Some("Bash".into()), signature: "---README---".into(), count: 1 },
+        ];
+
+        let out = format_stats(&groups);
+
+        assert!(out.contains("has not been read"), "recurring rows stay: {out}");
+        assert!(!out.contains("=== user settings ==="), "singletons fold away: {out}");
+        assert!(!out.contains("---README---"), "singletons fold away: {out}");
+        assert!(out.contains("+2 more singleton signatures"), "the trailer counts them: {out}");
+    }
+
+    #[test]
+    fn format_stats_has_no_trailer_when_there_are_no_singletons() {
+        let groups =
+            vec![FailureGroup { tool: Some("Edit".into()), signature: "has not been read".into(), count: 2 }];
+        assert!(!format_stats(&groups).contains("more singleton"), "no trailer when N=0");
+    }
+
+    #[test]
+    fn format_stats_shows_singletons_when_every_row_is_one() {
+        // An all-singleton table has no noise burying signal — folding it would
+        // hide everything behind a bare trailer.
+        let groups =
+            vec![FailureGroup { tool: Some("Read".into()), signature: "does not exist".into(), count: 1 }];
+        let out = format_stats(&groups);
+        assert!(out.contains("does not exist"), "shown, not folded: {out}");
+        assert!(!out.contains("more singleton"), "{out}");
     }
 
     #[test]
