@@ -1,6 +1,6 @@
 # `--stats` long tail: stdout mistaken for errors, and no top-N
 
-Status: needs-triage
+Status: ready-for-agent (migrated to GitHub issue #1)
 Category: enhancement
 
 ## Why
@@ -62,3 +62,7 @@ Store. The number/path normalisation and the universal-vs-structural design are
 genuinely good; the failure is purely at `--all` scale + the benign-non-zero
 stdout case. Left `needs-triage` because the output-shape decision (top-N vs
 fold-singletons vs both) wants a maintainer call and an ADR amendment.
+
+### 2026-08-27 — Migrated
+
+Triaged and migrated to GitHub issue #1 (ready-for-agent). Maintainer decision: fold count-1 singletons into a trailer by default; no --top N flag. This file is read-only history.

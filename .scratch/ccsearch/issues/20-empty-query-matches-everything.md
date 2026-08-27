@@ -1,6 +1,6 @@
 # An empty query matches every Record instead of erroring
 
-Status: needs-triage
+Status: ready-for-agent (migrated to GitHub issue #2)
 Category: bug
 
 ## Why
@@ -56,3 +56,7 @@ The empty case is never distinguished from a real query.
 Found during edge-case testing. Minor severity (you have to actively pass an
 empty string) but a classic scripting footgun; cheap to fix. `needs-triage` only
 for the whitespace-only and empty-`--failed`-filter policy calls.
+
+### 2026-08-27 — Migrated
+
+Triaged and migrated to GitHub issue #2 (ready-for-agent). Bug reproduced. Maintainer decisions: reject empty-string query only (whitespace-only stays valid); empty --failed filter keeps meaning "no filter". This file is read-only history.
