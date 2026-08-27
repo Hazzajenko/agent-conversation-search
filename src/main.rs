@@ -50,8 +50,10 @@ enum Command {
 /// `ccsearch <QUERY>` and explicit `ccsearch search <QUERY>` are identical.
 #[derive(Args)]
 struct SearchArgs {
-    /// Text to search for (case-insensitive substring). Required for `search`;
-    /// validated at runtime so it can be omitted when a subcommand is used.
+    /// Text to search for (case-insensitive substring). Required for `search`,
+    /// and must be non-empty ("" would match everything); under --failed it is
+    /// an optional filter, where empty likewise means unfiltered. Validated at
+    /// runtime so it can be omitted when a subcommand is used.
     query: Option<String>,
 
     /// Search across every project, not just the current directory's.
@@ -316,7 +318,11 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     };
 
     // A Query, compiled — required for text search, optional under --failed.
-    let matcher = match &args.query {
+    // An empty string is treated as missing: "" matches every Record, so a
+    // shell variable expanding to empty would otherwise dump the whole scope.
+    // Under --failed the query is an optional filter, so empty = unfiltered.
+    // Whitespace-only stays valid — a user who quotes a space may mean it.
+    let matcher = match args.query.as_deref().filter(|q| !q.is_empty()) {
         Some(query) => match Matcher::new(query, args.regex, args.case_sensitive) {
             Ok(matcher) => Some(matcher),
             Err(err) => {
