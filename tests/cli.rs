@@ -525,6 +525,68 @@ fn session_scope_requires_a_query() {
 }
 
 #[test]
+fn an_empty_query_errors_like_a_missing_one() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"anything"}}"#,
+    );
+
+    // "" is a substring of everything — a shell variable that expands to empty
+    // must fail fast, not dump the whole Project.
+    cmd.arg("").assert().failure().stderr(predicates::str::contains("query is required"));
+}
+
+#[test]
+fn a_one_character_query_still_searches() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"zebra"}}"#,
+    );
+
+    // Only "" is rejected — the shortest real query is untouched.
+    cmd.arg("z").assert().success().stdout(predicates::str::contains("zebra"));
+}
+
+#[test]
+fn a_whitespace_only_query_still_searches() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"one two"}}"#,
+    );
+
+    // A user who quotes a space may mean it; only the truly empty string is
+    // rejected.
+    cmd.arg(" ").assert().success().stdout(predicates::str::contains("one two"));
+}
+
+#[test]
+fn an_empty_failed_filter_means_no_filter() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = ccsearch_in(
+        workdir.path(),
+        store.path(),
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Exit code 101\nerror: boom"}]}}"#,
+        ]
+        .join("\n"),
+    );
+
+    // The --failed query is an optional *filter*; empty filter = unfiltered.
+    cmd.arg("").arg("--failed").assert().success().stdout(predicates::str::contains("✗ Bash"));
+}
+
+#[test]
 fn session_scope_conflicts_with_all() {
     Command::cargo_bin("ccsearch")
         .unwrap()
