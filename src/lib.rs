@@ -1,4 +1,4 @@
-//! `ccsearch` — search your local Claude Code conversation history.
+//! `agsearch` — search your local Claude Code conversation history.
 
 mod session;
 
@@ -665,7 +665,7 @@ pub fn format_session_paths(sessions: &[SessionInfo]) -> String {
 /// `short-id · project · title · date · branch` header followed by one
 /// `[turn] role: snippet` line per Match. At most `max_per_session` Matches are
 /// shown per Session (`0` = unlimited), with an actionable `… +N more  ›
-/// ccsearch show <id>` line when some are hidden. An empty result set renders a
+/// agsearch show <id>` line when some are hidden. An empty result set renders a
 /// clear "no matches" line.
 pub fn format_results(
     results: &[SessionMatches],
@@ -712,7 +712,7 @@ pub fn format_results(
         let hidden = s.matches.len() - shown;
         if hidden > 0 {
             // Turn the overflow into an actionable hint at the rest.
-            out.push_str(&format!("  … +{hidden} more  ›  ccsearch show {short}\n"));
+            out.push_str(&format!("  … +{hidden} more  ›  agsearch show {short}\n"));
         }
         out.push('\n');
     }
@@ -1401,7 +1401,7 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
         }
         let hidden = s.failures.len() - shown;
         if hidden > 0 {
-            out.push_str(&format!("  … +{hidden} more  ›  ccsearch show {short}\n"));
+            out.push_str(&format!("  … +{hidden} more  ›  agsearch show {short}\n"));
         }
         out.push('\n');
     }
@@ -1485,7 +1485,7 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
 // --- --since: filtering Sessions by recency ------------------------------
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
-/// `days_from_civil`). Hand-rolled to keep `ccsearch` free of a date-library
+/// `days_from_civil`). Hand-rolled to keep `agsearch` free of a date-library
 /// dependency — the Store stores ISO 8601, which we otherwise only slice.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
@@ -1608,8 +1608,8 @@ mod tests {
     #[test]
     fn encodes_a_windows_path_the_way_claude_code_stores_it() {
         assert_eq!(
-            encode_project_dir(r"E:\projects\rust\claude-code-conversation-search"),
-            "E--projects-rust-claude-code-conversation-search"
+            encode_project_dir(r"E:\projects\rust\agent-conversation-search"),
+            "E--projects-rust-agent-conversation-search"
         );
     }
 
@@ -1650,7 +1650,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join("E--projects-games-creature-game")).unwrap();
-        fs::create_dir(root.join("E--projects-rust-ccsearch")).unwrap();
+        fs::create_dir(root.join("E--projects-rust-agsearch")).unwrap();
         fs::create_dir(root.join("C--hacking-jplag")).unwrap();
 
         let dirs = resolve_scope(root, &Scope::Project { name_substring: "PROJECTS".into() });
@@ -1659,7 +1659,7 @@ mod tests {
             dirs,
             vec![
                 root.join("E--projects-games-creature-game"),
-                root.join("E--projects-rust-ccsearch"),
+                root.join("E--projects-rust-agsearch"),
             ]
         );
     }
@@ -2151,7 +2151,7 @@ mod tests {
         assert!(!out.contains("match-four") && !out.contains("match-five"), "rest hidden: {out}");
         assert!(out.contains("+2 more"), "notes how many were hidden: {out}");
         assert!(
-            out.contains("ccsearch show 11111111"),
+            out.contains("agsearch show 11111111"),
             "overflow line is an actionable show hint: {out}"
         );
     }

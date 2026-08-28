@@ -17,7 +17,7 @@ Running it against the real Store exposed two problems 0003 named but accepted:
 `structural_signature` is a **pure two-rule normalisation**: a whitespace token containing `/` or `\` becomes `<path>`; each run of ASCII digits becomes a single `N`; the result is truncated to 60 chars. `(no marker)` survives only for a Failure with no error text at all.
 
 ```
-error: could not compile `ccsearch` … due to 2 previous errors  →  error: could not compile `ccsearch` … due to N prev…
+error: could not compile `agsearch` … due to 2 previous errors  →  error: could not compile `agsearch` … due to N prev…
 thread 'main' panicked at src/lib.rs:5:9:                        →  thread 'main' panicked at <path>
 error[E0433]: cannot find type                                  →  error[EN]: cannot find type
 ```

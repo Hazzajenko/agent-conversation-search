@@ -1,8 +1,8 @@
 # Verbs and the session-id handoff: search, show, and analyse as one workflow
 
-`ccsearch` began as a single implicit verb — `ccsearch <QUERY>` searches and prints Snippets. Three distinct jobs then emerged: **find** a Session (search), **read** a whole Session (show), and **analyse** failures (`--failed`). Cramming all three into one output is what made search results hard to read and left no way to open a conversation.
+`agsearch` began as a single implicit verb — `agsearch <QUERY>` searches and prints Snippets. Three distinct jobs then emerged: **find** a Session (search), **read** a whole Session (show), and **analyse** failures (`--failed`). Cramming all three into one output is what made search results hard to read and left no way to open a conversation.
 
-**Decision:** Introduce subcommands with **`search` as the default verb** (bare `ccsearch <QUERY>` still searches — no muscle-memory break) and **`show <session>` as an explicit sibling** that renders a Transcript. All three jobs are welded together by **one identifier — the short session-id** (git-style unique prefix, resolved across the whole Store) — and **one coordinate — the turn number**. `search` and `--failed` emit `id` + `turn`; `show <id> --around <turn>` reads the neighbourhood. `--failed` is a *flag on search*, not its own verb, because a Failure is just "a Match found by structure instead of by a Query."
+**Decision:** Introduce subcommands with **`search` as the default verb** (bare `agsearch <QUERY>` still searches — no muscle-memory break) and **`show <session>` as an explicit sibling** that renders a Transcript. All three jobs are welded together by **one identifier — the short session-id** (git-style unique prefix, resolved across the whole Store) — and **one coordinate — the turn number**. `search` and `--failed` emit `id` + `turn`; `show <id> --around <turn>` reads the neighbourhood. `--failed` is a *flag on search*, not its own verb, because a Failure is just "a Match found by structure instead of by a Query."
 
 ## Considered and rejected
 

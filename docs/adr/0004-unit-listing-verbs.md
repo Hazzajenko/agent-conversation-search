@@ -2,7 +2,7 @@
 
 ADR 0002 established the action-verb model — `search` (find a Session) and `show` (read a Session) — welded together by one identifier, the short session-id. A third job then emerged: *enumerate* what exists, content-agnostically, so you can reach a Session you don't remember the contents of. Today the only path to a `show`-able session-id is to `search` for text you recall being in it; there is no "what conversations do I have here?" listing.
 
-**Decision:** Add listing verbs named after the **unit** they enumerate, not the action: **`ccsearch sessions`** lists Sessions, and a future **`ccsearch projects`** lists Projects. They are **separate verbs**, not one verb with a unit-switching flag. Each `sessions` row is the existing Session header from ADR 0002 (`short-id · project · title · date · branch`) verbatim, so the listing feeds the same stateless session-id → `show` handoff that `search` and `--failed` already feed. `sessions` defaults to the current Project and composes with `--all` / `--project` / `--since` exactly like `search`.
+**Decision:** Add listing verbs named after the **unit** they enumerate, not the action: **`agsearch sessions`** lists Sessions, and a future **`agsearch projects`** lists Projects. They are **separate verbs**, not one verb with a unit-switching flag. Each `sessions` row is the existing Session header from ADR 0002 (`short-id · project · title · date · branch`) verbatim, so the listing feeds the same stateless session-id → `show` handoff that `search` and `--failed` already feed. `sessions` defaults to the current Project and composes with `--all` / `--project` / `--since` exactly like `search`.
 
 ## Considered and rejected
 
