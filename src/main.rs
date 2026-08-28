@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use agsearch::{
-    failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_projects,
+    failed_in_store_session, failed_in_stores, format_failures, format_paths, format_projects,
     format_results, format_session_paths, format_sessions, format_stats, format_transcript,
-    format_windowed, group_failures, list_projects, list_sessions, parse_transcript, projects_root,
-    resolve_claude_dir, resolve_scope, resolve_session_prefix, search_project_dirs,
-    search_session_file, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, SessionRef,
+    format_windowed, group_failures, list_store_projects, list_store_sessions, parse_store_transcript,
+    resolve_claude_dir, resolve_store_session_prefix, search_store_session, search_stores,
+    since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search your local Claude Code conversation history.
@@ -26,12 +26,22 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     claude_dir: Option<PathBuf>,
 
+    /// Search only one Harness. By default every available Store is searched.
+    #[arg(long, value_enum, global = true)]
+    harness: Option<HarnessChoice>,
+
     #[command(subcommand)]
     command: Option<Command>,
 
     /// The default verb: bare `agsearch <QUERY>` searches.
     #[command(flatten)]
     search: SearchArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HarnessChoice {
+    Claude,
+    Codex,
 }
 
 #[derive(Subcommand)]
@@ -198,12 +208,17 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let stores = match cli.harness {
+        Some(HarnessChoice::Codex) => Stores::empty(),
+        Some(HarnessChoice::Claude) | None => Stores::with_claude(&claude_dir),
+    };
+
     match cli.command {
-        Some(Command::Show(args)) => run_show(&claude_dir, &args),
-        Some(Command::Search(args)) => run_search(&claude_dir, &args),
-        Some(Command::Sessions(args)) => run_sessions(&claude_dir, &args),
-        Some(Command::Projects(args)) => run_projects(&claude_dir, &args),
-        None => run_search(&claude_dir, &cli.search),
+        Some(Command::Show(args)) => run_show(&stores, &args),
+        Some(Command::Search(args)) => run_search(&stores, &args),
+        Some(Command::Sessions(args)) => run_sessions(&stores, &args),
+        Some(Command::Projects(args)) => run_projects(&stores, &args),
+        None => run_search(&stores, &cli.search),
     }
 }
 
@@ -230,7 +245,7 @@ fn parse_since(value: Option<&str>) -> Result<Option<i64>, ()> {
 
 /// Run the `sessions` verb: resolve the scope, list its Sessions newest-first,
 /// apply `--since`, then render the headers (or just paths under `-l`).
-fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
+fn run_sessions(stores: &Stores, args: &SessionsArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
@@ -238,15 +253,13 @@ fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = projects_root(claude_dir);
-
     let cutoff = match parse_since(args.since.as_deref()) {
         Ok(cutoff) => cutoff,
         Err(()) => return ExitCode::FAILURE,
     };
 
     let scope = build_scope(args.all, args.project.as_deref(), &cwd);
-    let mut sessions = list_sessions(&resolve_scope(&root, &scope));
+    let mut sessions = list_store_sessions(stores, &scope);
     if let Some(cutoff) = cutoff {
         sessions.retain(|s| timestamp_is_since(s.timestamp.as_deref(), cutoff));
     }
@@ -263,9 +276,7 @@ fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
 /// Run the `projects` verb: list the Store's Projects (optionally narrowed to
 /// directories whose name matches `--project`), newest-touched first, applying
 /// `--since`. Always whole-Store, so it needs no cwd or `build_scope`.
-fn run_projects(claude_dir: &Path, args: &ProjectsArgs) -> ExitCode {
-    let root = projects_root(claude_dir);
-
+fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
     let cutoff = match parse_since(args.since.as_deref()) {
         Ok(cutoff) => cutoff,
         Err(()) => return ExitCode::FAILURE,
@@ -275,7 +286,7 @@ fn run_projects(claude_dir: &Path, args: &ProjectsArgs) -> ExitCode {
         Some(name_substring) => Scope::Project { name_substring: name_substring.to_string() },
         None => Scope::All,
     };
-    let mut projects = list_projects(&resolve_scope(&root, &scope));
+    let mut projects = list_store_projects(stores, &scope);
     if let Some(cutoff) = cutoff {
         projects.retain(|p| timestamp_is_since(p.last_touched.as_deref(), cutoff));
     }
@@ -286,7 +297,7 @@ fn run_projects(claude_dir: &Path, args: &ProjectsArgs) -> ExitCode {
 
 /// Run the `search` verb: resolve the scope, then either list Failures by
 /// structure (`--failed`, Query optional) or search text (Query required).
-fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
+fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
@@ -295,18 +306,16 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         }
     };
 
-    let root = projects_root(claude_dir);
-
     // --session resolves to one Session file; otherwise we operate over the
     // scope's Project dirs. (--session conflicts with --all / --project.)
     let session_path = match &args.session {
-        Some(prefix) => match resolve_session_prefix(&root, prefix) {
-            SessionRef::Unique(path) => Some(path),
-            SessionRef::NotFound => {
+        Some(prefix) => match resolve_store_session_prefix(stores, prefix) {
+            StoreSessionRef::Unique(session) => Some(session),
+            StoreSessionRef::NotFound => {
                 eprintln!("agsearch: no session matches '{prefix}'");
                 return ExitCode::FAILURE;
             }
-            SessionRef::Ambiguous(ids) => {
+            StoreSessionRef::Ambiguous(ids) => {
                 eprintln!("agsearch: '{prefix}' is ambiguous — {} sessions match:", ids.len());
                 for id in ids.iter().take(10) {
                     eprintln!("  {id}");
@@ -342,8 +351,8 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     // --stats and --failed share one scan; --stats aggregates, --failed lists.
     if args.failed || args.stats {
         let mut results = match &session_path {
-            Some(path) => failed_in_session_file(path, matcher.as_ref()),
-            None => failed_in_project_dirs(&resolve_scope(&root, &build_scope(args.all, args.project.as_deref(), &cwd)), matcher.as_ref()),
+            Some(session) => failed_in_store_session(stores, session, matcher.as_ref()),
+            None => failed_in_stores(stores, &build_scope(args.all, args.project.as_deref(), &cwd), matcher.as_ref()),
         };
         if let Some(cutoff) = cutoff {
             results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -367,8 +376,8 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         tools: args.tools || args.all_content,
     };
     let mut results = match &session_path {
-        Some(path) => search_session_file(path, &matcher, &content),
-        None => search_project_dirs(&resolve_scope(&root, &build_scope(args.all, args.project.as_deref(), &cwd)), &matcher, &content),
+        Some(session) => search_store_session(stores, session, &matcher, &content),
+        None => search_stores(stores, &build_scope(args.all, args.project.as_deref(), &cwd), &matcher, &content),
     };
     if let Some(cutoff) = cutoff {
         results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -401,24 +410,29 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
 
 /// Run the `show` verb: resolve the Session (by prefix, or a path from stdin),
 /// then render it as a Transcript.
-fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
-    let path = if args.session == "-" {
+fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
+    let session = if args.session == "-" {
         match read_path_from_stdin() {
-            Some(path) => path,
+            Some(path) => match stores.session_for_path(&path, false) {
+                Some(session) => session,
+                None => {
+                    eprintln!("agsearch: cannot find {} in the configured Stores", path.display());
+                    return ExitCode::FAILURE;
+                }
+            },
             None => {
                 eprintln!("agsearch: no session path on stdin");
                 return ExitCode::FAILURE;
             }
         }
     } else {
-        let root = projects_root(claude_dir);
-        match resolve_session_prefix(&root, &args.session) {
-            SessionRef::Unique(path) => path,
-            SessionRef::NotFound => {
+        match resolve_store_session_prefix(stores, &args.session) {
+            StoreSessionRef::Unique(session) => session,
+            StoreSessionRef::NotFound => {
                 eprintln!("agsearch: no session matches '{}'", args.session);
                 return ExitCode::FAILURE;
             }
-            SessionRef::Ambiguous(ids) => {
+            StoreSessionRef::Ambiguous(ids) => {
                 eprintln!(
                     "agsearch: '{}' is ambiguous — {} sessions match:",
                     args.session,
@@ -435,15 +449,10 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
         }
     };
 
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("agsearch: cannot read {}: {err}", path.display());
-            return ExitCode::FAILURE;
-        }
+    let Some(turns) = parse_store_transcript(stores, &session) else {
+        eprintln!("agsearch: cannot read {}", session.info.path.display());
+        return ExitCode::FAILURE;
     };
-
-    let turns = parse_transcript(&text);
     // --around windows the Transcript on a turn (from a search hit); without it
     // the whole Transcript is rendered. --context only applies inside a window.
     let rendered = match args.around {

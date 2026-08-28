@@ -1,5 +1,6 @@
 //! `agsearch` — search your local Claude Code conversation history.
 
+mod harness;
 mod session;
 
 use std::collections::HashMap;
@@ -9,6 +10,8 @@ use rayon::prelude::*;
 use regex::RegexBuilder;
 
 use session::{AssistantBlock, Record, RecordKind, UserBlock};
+
+pub use harness::{Harness, SessionHandle, Stores};
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
 /// [`regex::Regex`], so the search pipeline has a single match path. Literal
@@ -281,6 +284,68 @@ pub fn search_project_dirs(
     results
 }
 
+/// Search Sessions enumerated by every configured Harness adapter.
+pub fn search_stores(
+    stores: &Stores,
+    scope: &Scope,
+    matcher: &Matcher,
+    content: &ContentSet,
+) -> Vec<SessionMatches> {
+    let sessions = stores.sessions(scope, false);
+    let mut results: Vec<SessionMatches> = sessions
+        .par_iter()
+        .filter_map(|handle| {
+            let parsed = stores.parse(handle)?;
+            search_parsed_session(&handle.info, parsed, matcher, content)
+        })
+        .collect();
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results
+}
+
+/// Search one Session already resolved across the configured Stores.
+pub fn search_store_session(
+    stores: &Stores,
+    handle: &SessionHandle,
+    matcher: &Matcher,
+    content: &ContentSet,
+) -> Vec<SessionMatches> {
+    stores
+        .parse(handle)
+        .and_then(|parsed| search_parsed_session(&handle.info, parsed, matcher, content))
+        .into_iter()
+        .collect()
+}
+
+fn search_parsed_session(
+    info: &SessionInfo,
+    parsed: session::Session,
+    matcher: &Matcher,
+    content: &ContentSet,
+) -> Option<SessionMatches> {
+    let matches: Vec<Match> = parsed
+        .records
+        .iter()
+        .flat_map(|record| {
+            segments_from_record(record).into_iter().map(move |segment| Match { turn: record.turn, segment })
+        })
+        .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    Some(SessionMatches {
+        project: info.project.clone(),
+        session_id: info.session_id.clone(),
+        path: info.path.clone(),
+        title: info.title.clone(),
+        timestamp: info.timestamp.clone(),
+        branch: info.branch.clone(),
+        cwd: info.cwd.clone(),
+        matches,
+    })
+}
+
 /// Every Session file as `(project name, path)` across the given Project dirs,
 /// each distinct dir scanned once. Shared by the search and failure scans.
 fn enumerate_sessions(project_dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
@@ -395,6 +460,11 @@ pub fn list_sessions(project_dirs: &[PathBuf]) -> Vec<SessionInfo> {
     results
 }
 
+/// List Sessions enumerated by every configured Harness adapter.
+pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionInfo> {
+    stores.sessions(scope, false).into_iter().map(|session| session.info).collect()
+}
+
 /// Read a Session's header metadata (Title, newest timestamp, branch) without
 /// matching a Query. Mirrors the metadata pass in [`search_one_session`] but
 /// keeps every Session rather than only those with a Match. Returns `None` when
@@ -446,6 +516,11 @@ pub fn list_projects(project_dirs: &[PathBuf]) -> Vec<ProjectInfo> {
     // name, newest timestamp, and cwd — everything a Project row needs. The
     // fold itself is a pure step over that data (see [`group_projects`]).
     group_projects(list_sessions(project_dirs))
+}
+
+/// List Projects derived from Sessions across every configured Store.
+pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
+    group_projects(list_store_sessions(stores, scope))
 }
 
 /// Fold a flat list of Sessions into Projects: group by the lower-cased
@@ -736,6 +811,30 @@ pub enum SessionRef {
     NotFound,
 }
 
+/// Result of resolving a Session id across every configured Store.
+pub enum StoreSessionRef {
+    Unique(SessionHandle),
+    Ambiguous(Vec<String>),
+    NotFound,
+}
+
+pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessionRef {
+    let sessions = stores.all_sessions(false);
+    if let Some(exact) = sessions.iter().find(|session| session.info.session_id == prefix) {
+        return StoreSessionRef::Unique(exact.clone());
+    }
+    let mut matches: Vec<SessionHandle> = sessions
+        .into_iter()
+        .filter(|session| session.info.session_id.starts_with(prefix))
+        .collect();
+    matches.sort_by(|a, b| a.info.session_id.cmp(&b.info.session_id));
+    match matches.len() {
+        0 => StoreSessionRef::NotFound,
+        1 => StoreSessionRef::Unique(matches.remove(0)),
+        _ => StoreSessionRef::Ambiguous(matches.into_iter().map(|session| session.info.session_id).collect()),
+    }
+}
+
 /// Resolve `prefix` to a single Session file across the whole Store, git-style.
 ///
 /// A full session-id that exactly equals an existing stem wins outright (so a
@@ -819,6 +918,15 @@ pub struct Turn {
 /// joined through [`session::tool_index`].
 pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
     let session = session::read(session_text);
+    turns_from_session(&session)
+}
+
+/// Parse a resolved Session through its Harness adapter and project it as a Transcript.
+pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option<Vec<Turn>> {
+    stores.parse(handle).map(|session| turns_from_session(&session))
+}
+
+fn turns_from_session(session: &session::Session) -> Vec<Turn> {
     let tools = session::tool_index(&session.records);
     session.records.iter().filter_map(|record| turn_from_record(record, &tools)).collect()
 }
@@ -1269,6 +1377,36 @@ pub fn failed_in_project_dirs(
     results
 }
 
+/// Scan Sessions enumerated by every configured Harness adapter for Failures.
+pub fn failed_in_stores(
+    stores: &Stores,
+    scope: &Scope,
+    matcher: Option<&Matcher>,
+) -> Vec<SessionFailures> {
+    let sessions = stores.sessions(scope, false);
+    let mut results: Vec<SessionFailures> = sessions
+        .par_iter()
+        .filter_map(|handle| {
+            let parsed = stores.parse(handle)?;
+            failures_in_parsed_session(&handle.info, parsed, matcher)
+        })
+        .collect();
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results
+}
+
+pub fn failed_in_store_session(
+    stores: &Stores,
+    handle: &SessionHandle,
+    matcher: Option<&Matcher>,
+) -> Vec<SessionFailures> {
+    stores
+        .parse(handle)
+        .and_then(|parsed| failures_in_parsed_session(&handle.info, parsed, matcher))
+        .into_iter()
+        .collect()
+}
+
 /// List Failures within a single Session file by path, so `--failed` composes
 /// with the `--session` scope. Returns 0 or 1 [`SessionFailures`].
 pub fn failed_in_session_file(path: &Path, matcher: Option<&Matcher>) -> Vec<SessionFailures> {
@@ -1284,6 +1422,23 @@ fn failures_in_one_session(
 ) -> Option<SessionFailures> {
     let text = std::fs::read_to_string(path).ok()?;
     let session = session::read(&text);
+    let info = SessionInfo {
+        project: project.to_string(),
+        session_id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+        path: path.to_path_buf(),
+        title: session.meta.title.clone(),
+        timestamp: session.meta.timestamp.clone(),
+        branch: session.meta.branch.clone(),
+        cwd: session.meta.cwd.clone(),
+    };
+    failures_in_parsed_session(&info, session, matcher)
+}
+
+fn failures_in_parsed_session(
+    info: &SessionInfo,
+    session: session::Session,
+    matcher: Option<&Matcher>,
+) -> Option<SessionFailures> {
     // The join a Failure needs: tool_result id -> the tool_use that produced it.
     let tools = session::tool_index(&session.records);
 
@@ -1326,15 +1481,14 @@ fn failures_in_one_session(
     if failures.is_empty() {
         return None;
     }
-    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     Some(SessionFailures {
-        project: project.to_string(),
-        session_id,
-        path: path.to_path_buf(),
-        title: session.meta.title,
-        timestamp: session.meta.timestamp,
-        branch: session.meta.branch,
-        cwd: session.meta.cwd,
+        project: info.project.clone(),
+        session_id: info.session_id.clone(),
+        path: info.path.clone(),
+        title: info.title.clone(),
+        timestamp: info.timestamp.clone(),
+        branch: info.branch.clone(),
+        cwd: info.cwd.clone(),
         failures,
     })
 }
