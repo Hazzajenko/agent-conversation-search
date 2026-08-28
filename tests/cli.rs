@@ -1114,3 +1114,39 @@ fn projects_rejects_all_and_files_flags() {
             .failure(); // clap rejects an argument `projects` does not define
     }
 }
+
+#[test]
+fn harness_flag_can_select_the_only_functional_claude_adapter() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = agsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"adapter seam"}}"#,
+    );
+
+    cmd.arg("adapter")
+        .arg("--harness")
+        .arg("claude")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("adapter seam"));
+}
+
+#[test]
+fn harness_flag_accepts_codex_while_its_adapter_is_not_yet_functional() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = agsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"claude only"}}"#,
+    );
+
+    cmd.arg("anything")
+        .arg("--harness")
+        .arg("codex")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}
