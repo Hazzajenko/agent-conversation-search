@@ -14,7 +14,7 @@ use agsearch::{
     StoreSessionRef, Stores,
 };
 
-/// Search your local Claude Code conversation history.
+/// Search local coding conversation history across Harnesses.
 ///
 /// By default `agsearch <QUERY>` searches the conversations recorded for the
 /// current working directory's Project, matching a case-insensitive substring.
