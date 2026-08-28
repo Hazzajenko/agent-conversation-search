@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::session::Session;
 use crate::{Scope, SessionInfo};
 
@@ -81,6 +83,128 @@ impl HarnessAdapter for ClaudeAdapter {
     }
 }
 
+pub(crate) struct CodexAdapter {
+    codex_dir: PathBuf,
+}
+
+impl CodexAdapter {
+    pub(crate) fn discover(codex_dir: &Path) -> Self {
+        Self { codex_dir: codex_dir.to_path_buf() }
+    }
+
+    fn rollout_paths(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        visit_jsonl(&self.codex_dir.join("sessions"), &mut files);
+        files.sort();
+        files
+    }
+}
+
+impl HarnessAdapter for CodexAdapter {
+    fn harness(&self) -> Harness {
+        Harness::Codex
+    }
+
+    fn enumerate(&self, include_subagents: bool) -> Vec<SessionInfo> {
+        self.rollout_paths()
+            .into_iter()
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(&path).ok()?;
+                let first = text.lines().next()?;
+                let meta: Value = serde_json::from_str(first).ok()?;
+                if meta.get("type").and_then(Value::as_str) != Some("session_meta") {
+                    return None;
+                }
+                let thread_source = meta.pointer("/payload/thread_source").and_then(Value::as_str);
+                if thread_source == Some("subagent") && !include_subagents {
+                    return None;
+                }
+                let session_id = meta
+                    .pointer("/payload/id")
+                    .or_else(|| meta.pointer("/payload/session_id"))
+                    .and_then(Value::as_str)?
+                    .to_string();
+                let cwd = meta.pointer("/payload/cwd").and_then(Value::as_str).map(str::to_string);
+                let parsed = codex_read(&text);
+                Some(SessionInfo {
+                    project: cwd.as_deref().map(crate::encode_project_dir).unwrap_or_default(),
+                    session_id,
+                    path,
+                    title: None,
+                    timestamp: parsed.meta.timestamp,
+                    branch: parsed.meta.branch,
+                    cwd,
+                })
+            })
+            .collect()
+    }
+
+    fn parse(&self, path: &Path) -> Option<Session> {
+        std::fs::read_to_string(path).ok().map(|text| codex_read(&text))
+    }
+}
+
+fn visit_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|ty| ty.is_dir()) {
+            visit_jsonl(&path, files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            files.push(path);
+        }
+    }
+}
+
+fn codex_read(text: &str) -> Session {
+    let mut meta = crate::session::SessionMeta::default();
+    let mut records = Vec::new();
+    let mut turn = 0;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(timestamp) = value.get("timestamp").and_then(Value::as_str) {
+            if meta.timestamp.as_deref().is_none_or(|current| timestamp > current) {
+                meta.timestamp = Some(timestamp.to_string());
+            }
+        }
+        if meta.cwd.is_none() {
+            meta.cwd = value.pointer("/payload/cwd").and_then(Value::as_str).map(str::to_string);
+        }
+        if meta.branch.is_none() {
+            meta.branch = value.pointer("/payload/git/branch").and_then(Value::as_str).map(str::to_string);
+        }
+        if value.get("type").and_then(Value::as_str) != Some("response_item")
+            || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+        {
+            continue;
+        }
+        let role = value.pointer("/payload/role").and_then(Value::as_str);
+        if !matches!(role, Some("user") | Some("assistant")) {
+            continue;
+        }
+        turn += 1;
+        let content = value
+            .pointer("/payload/content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("text").and_then(Value::as_str));
+        let kind = match role {
+            Some("user") => crate::session::RecordKind::Prompt(content.collect::<Vec<_>>().join("\n")),
+            Some("assistant") => crate::session::RecordKind::Assistant(
+                content.map(|text| crate::session::AssistantBlock::Text(text.to_string())).collect(),
+            ),
+            _ => unreachable!(),
+        };
+        records.push(crate::session::Record { turn: Some(turn), kind });
+    }
+    Session { meta, records }
+}
+
 #[derive(Clone)]
 pub struct SessionHandle {
     pub info: SessionInfo,
@@ -98,6 +222,19 @@ impl Stores {
 
     pub fn with_claude(claude_dir: &Path) -> Self {
         Self { adapters: vec![Box::new(ClaudeAdapter::discover(claude_dir))] }
+    }
+
+    pub fn with_codex(codex_dir: &Path) -> Self {
+        Self { adapters: vec![Box::new(CodexAdapter::discover(codex_dir))] }
+    }
+
+    pub fn with_claude_and_codex(claude_dir: &Path, codex_dir: &Path) -> Self {
+        Self {
+            adapters: vec![
+                Box::new(ClaudeAdapter::discover(claude_dir)),
+                Box::new(CodexAdapter::discover(codex_dir)),
+            ],
+        }
     }
 
     pub(crate) fn sessions(&self, scope: &Scope, include_subagents: bool) -> Vec<SessionHandle> {
@@ -173,5 +310,38 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].project, "E--projects-demo");
         assert_eq!(parsed.records.len(), 1);
+    }
+
+    #[test]
+    fn codex_adapter_enumerates_rollouts_and_parses_messages() {
+        let store = tempfile::tempdir().unwrap();
+        let dir = store.path().join("sessions/2026/08/28");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout-example.jsonl");
+        std::fs::write(
+            &path,
+            [
+                r#"{"timestamp":"2026-08-28T10:00:00Z","type":"session_meta","payload":{"id":"c0de0001-0000-0000-0000-000000000000","cwd":"E:\\projects\\demo","thread_source":"user"}}"#,
+                r#"{"timestamp":"2026-08-28T10:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt"}]}}"#,
+                r#"{"timestamp":"2026-08-28T10:02:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let adapter = CodexAdapter::discover(store.path());
+
+        let sessions = adapter.enumerate(false);
+        let parsed = adapter.parse(&path).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "c0de0001-0000-0000-0000-000000000000");
+        assert_eq!(sessions[0].project, "E--projects-demo");
+        assert_eq!(parsed.records.len(), 2);
+        assert_eq!(parsed.records[0].kind, crate::session::RecordKind::Prompt("prompt".into()));
+        assert!(matches!(
+            &parsed.records[1].kind,
+            crate::session::RecordKind::Assistant(blocks)
+                if blocks == &vec![crate::session::AssistantBlock::Text("reply".into())]
+        ));
     }
 }
