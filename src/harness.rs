@@ -65,6 +65,7 @@ impl HarnessAdapter for ClaudeAdapter {
                     continue;
                 };
                 sessions.push(SessionInfo {
+                    harness: Harness::Claude,
                     project: project_name.clone(),
                     session_id,
                     path,
@@ -106,6 +107,7 @@ impl HarnessAdapter for CodexAdapter {
     }
 
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionInfo> {
+        let titles = codex_titles(&self.codex_dir.join("session_index.jsonl"));
         self.rollout_paths()
             .into_iter()
             .filter_map(|path| {
@@ -124,13 +126,15 @@ impl HarnessAdapter for CodexAdapter {
                     .or_else(|| meta.pointer("/payload/session_id"))
                     .and_then(Value::as_str)?
                     .to_string();
+                let title = titles.get(&session_id).cloned();
                 let cwd = meta.pointer("/payload/cwd").and_then(Value::as_str).map(str::to_string);
                 let parsed = codex_read(&text);
                 Some(SessionInfo {
+                    harness: Harness::Codex,
                     project: cwd.as_deref().map(crate::encode_project_dir).unwrap_or_default(),
                     session_id,
                     path,
-                    title: None,
+                    title,
                     timestamp: parsed.meta.timestamp,
                     branch: parsed.meta.branch,
                     cwd,
@@ -142,6 +146,21 @@ impl HarnessAdapter for CodexAdapter {
     fn parse(&self, path: &Path) -> Option<Session> {
         std::fs::read_to_string(path).ok().map(|text| codex_read(&text))
     }
+}
+
+fn codex_titles(path: &Path) -> std::collections::HashMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| {
+            Some((
+                value.get("id")?.as_str()?.to_string(),
+                value.get("thread_name")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn visit_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -380,6 +399,11 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
+        std::fs::write(
+            store.path().join("session_index.jsonl"),
+            r#"{"id":"c0de0001-0000-0000-0000-000000000000","thread_name":"Indexed title"}"#,
+        )
+        .unwrap();
         let adapter = CodexAdapter::discover(store.path());
 
         let sessions = adapter.enumerate(false);
@@ -388,6 +412,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "c0de0001-0000-0000-0000-000000000000");
         assert_eq!(sessions[0].project, "E--projects-demo");
+        assert_eq!(sessions[0].title.as_deref(), Some("Indexed title"));
         assert_eq!(parsed.records.len(), 2);
         assert_eq!(parsed.records[0].kind, crate::session::RecordKind::Prompt("prompt".into()));
         assert!(matches!(

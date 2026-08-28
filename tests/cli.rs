@@ -333,6 +333,74 @@ fn codex_search_content_flags_match_claude_semantics() {
 }
 
 #[test]
+fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let titled = "c0de0012-0000-0000-0000-000000000000";
+    let untitled = "c0de0013-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        titled,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-28T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"new"}]}}"#],
+    );
+    let old_path = plant_codex_session(
+        codex.path(),
+        untitled,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-01-01T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]}}"#],
+    );
+    let old_text = fs::read_to_string(&old_path)
+        .unwrap()
+        .replacen("2026-08-28T10:00:00.000Z", "2026-01-01T09:00:00.000Z", 1);
+    fs::write(old_path, old_text).unwrap();
+    plant_codex_session(
+        codex.path(),
+        "c0de0014-0000-0000-0000-000000000000",
+        workdir.path(),
+        "subagent",
+        &[r#"{"timestamp":"2026-08-28T11:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker"}]}}"#],
+    );
+    fs::write(
+        codex.path().join("session_index.jsonl"),
+        serde_json::json!({"id": titled, "thread_name": "Indexed Codex title", "updated_at": "2026-08-28T10:00:00Z"}).to_string(),
+    )
+    .unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(workdir.path().join("missing-claude"))
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("sessions")
+        .arg("--all")
+        .arg("--since")
+        .arg("2026-08-01")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("codex · c0de0012 · "))
+        .stdout(predicates::str::contains("Indexed Codex title"))
+        .stdout(predicates::str::contains("c0de0013").not())
+        .stdout(predicates::str::contains("c0de0014").not());
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(workdir.path().join("missing-claude"))
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("sessions")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0013"))
+        .stdout(predicates::str::contains("(untitled)"));
+}
+
+#[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
     let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
     let store = tempfile::tempdir().unwrap();

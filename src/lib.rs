@@ -445,6 +445,7 @@ fn search_one_session(
 /// so a listing row is byte-identical to a search Session header (ADR 0004).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
+    pub harness: Harness,
     /// The Project directory name the Session lives in.
     pub project: String,
     /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
@@ -498,6 +499,7 @@ fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
     // beyond the single parse `read` already does.
     let meta = session::read(&text).meta;
     Some(SessionInfo {
+        harness: Harness::Claude,
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
@@ -709,6 +711,8 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
     }
     let mut out = String::new();
     for s in sessions {
+        out.push_str(s.harness.as_str());
+        out.push_str(" · ");
         out.push_str(&session_header(
             &short_id(&s.session_id),
             // Prefer the real cwd over the mangled directory name — the reason
@@ -1444,6 +1448,7 @@ fn failures_in_one_session(
     let text = std::fs::read_to_string(path).ok()?;
     let session = session::read(&text);
     let info = SessionInfo {
+        harness: Harness::Claude,
         project: project.to_string(),
         session_id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
         path: path.to_path_buf(),
@@ -2033,6 +2038,7 @@ mod tests {
     #[test]
     fn format_sessions_reuses_the_search_header_and_falls_back_to_untitled() {
         let info = SessionInfo {
+            harness: Harness::Claude,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
@@ -2056,6 +2062,7 @@ mod tests {
         // that instead — matching what `projects` already does (lib.rs:466). The
         // unit `--project` matches is unaffected; only the display label changes.
         let info = SessionInfo {
+            harness: Harness::Claude,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
@@ -2072,6 +2079,7 @@ mod tests {
     /// exercising the Project fold without touching the filesystem.
     fn sess(dir: &str, id: &str, timestamp: Option<&str>, cwd: Option<&str>) -> SessionInfo {
         SessionInfo {
+            harness: Harness::Claude,
             project: dir.into(),
             session_id: id.into(),
             path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
