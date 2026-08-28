@@ -66,6 +66,7 @@ impl HarnessAdapter for ClaudeAdapter {
                 };
                 sessions.push(SessionInfo {
                     harness: Harness::Claude,
+                    subagent: None,
                     project: project_name.clone(),
                     session_id,
                     path,
@@ -127,10 +128,21 @@ impl HarnessAdapter for CodexAdapter {
                     .and_then(Value::as_str)?
                     .to_string();
                 let title = titles.get(&session_id).cloned();
+                let subagent = if thread_source == Some("subagent") {
+                    Some(
+                        meta.pointer("/payload/source/subagent/other")
+                            .and_then(Value::as_str)
+                            .unwrap_or("worker")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
                 let cwd = meta.pointer("/payload/cwd").and_then(Value::as_str).map(str::to_string);
                 let parsed = codex_read(&text);
                 Some(SessionInfo {
                     harness: Harness::Codex,
+                    subagent,
                     project: cwd.as_deref().map(crate::encode_project_dir).unwrap_or_default(),
                     session_id,
                     path,
@@ -284,19 +296,20 @@ pub struct SessionHandle {
 
 pub struct Stores {
     adapters: Vec<Box<dyn HarnessAdapter>>,
+    include_subagents: bool,
 }
 
 impl Stores {
     pub fn empty() -> Self {
-        Self { adapters: Vec::new() }
+        Self { adapters: Vec::new(), include_subagents: false }
     }
 
     pub fn with_claude(claude_dir: &Path) -> Self {
-        Self { adapters: vec![Box::new(ClaudeAdapter::discover(claude_dir))] }
+        Self { adapters: vec![Box::new(ClaudeAdapter::discover(claude_dir))], include_subagents: false }
     }
 
     pub fn with_codex(codex_dir: &Path) -> Self {
-        Self { adapters: vec![Box::new(CodexAdapter::discover(codex_dir))] }
+        Self { adapters: vec![Box::new(CodexAdapter::discover(codex_dir))], include_subagents: false }
     }
 
     pub fn with_claude_and_codex(claude_dir: &Path, codex_dir: &Path) -> Self {
@@ -305,15 +318,21 @@ impl Stores {
                 Box::new(ClaudeAdapter::discover(claude_dir)),
                 Box::new(CodexAdapter::discover(codex_dir)),
             ],
+            include_subagents: false,
         }
     }
 
-    pub(crate) fn sessions(&self, scope: &Scope, include_subagents: bool) -> Vec<SessionHandle> {
+    pub fn including_subagents(mut self, include: bool) -> Self {
+        self.include_subagents = include;
+        self
+    }
+
+    pub(crate) fn sessions(&self, scope: &Scope) -> Vec<SessionHandle> {
         let mut sessions = Vec::new();
         for (adapter, source) in self.adapters.iter().enumerate() {
             sessions.extend(
                 source
-                    .enumerate(include_subagents)
+                    .enumerate(self.include_subagents)
                     .into_iter()
                     .filter(|info| in_scope(info, scope))
                     .map(|info| SessionHandle { info, adapter }),
@@ -328,8 +347,8 @@ impl Stores {
         sessions
     }
 
-    pub(crate) fn all_sessions(&self, include_subagents: bool) -> Vec<SessionHandle> {
-        self.sessions(&Scope::All, include_subagents)
+    pub(crate) fn all_sessions(&self) -> Vec<SessionHandle> {
+        self.sessions(&Scope::All)
     }
 
     pub(crate) fn parse(&self, session: &SessionHandle) -> Option<Session> {
@@ -340,8 +359,8 @@ impl Stores {
         self.adapters[session.adapter].harness()
     }
 
-    pub fn session_for_path(&self, path: &Path, include_subagents: bool) -> Option<SessionHandle> {
-        self.all_sessions(include_subagents)
+    pub fn session_for_path(&self, path: &Path) -> Option<SessionHandle> {
+        self.all_sessions()
             .into_iter()
             .find(|session| session.info.path == path)
     }

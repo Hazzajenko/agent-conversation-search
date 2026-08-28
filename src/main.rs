@@ -35,6 +35,10 @@ struct Cli {
     #[arg(long, value_enum, global = true)]
     harness: Option<HarnessChoice>,
 
+    /// Include Codex subagent threads in search, listing, and id resolution.
+    #[arg(long, global = true)]
+    include_subagents: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -229,7 +233,8 @@ fn main() -> ExitCode {
         Some(HarnessChoice::Codex) => Stores::with_codex(&codex_dir),
         Some(HarnessChoice::Claude) => Stores::with_claude(&claude_dir),
         None => Stores::with_claude_and_codex(&claude_dir, &codex_dir),
-    };
+    }
+    .including_subagents(cli.include_subagents);
 
     match cli.command {
         Some(Command::Show(args)) => run_show(&stores, &args),
@@ -431,7 +436,7 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
 fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
     let session = if args.session == "-" {
         match read_path_from_stdin() {
-            Some(path) => match stores.session_for_path(&path, false) {
+            Some(path) => match stores.session_for_path(&path) {
                 Some(session) => session,
                 None => {
                     eprintln!("agsearch: cannot find {} in the configured Stores", path.display());
