@@ -528,6 +528,49 @@ fn projects_merge_harnesses_and_cwdless_codex_sessions_stay_unscoped() {
 }
 
 #[test]
+fn codex_failed_and_stats_infer_failures_from_tool_outputs() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    plant_codex_session(
+        codex.path(),
+        "c0de0018-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"ok","name":"exec","input":"{\"cmd\":\"cargo check\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"ok","output":"{\"exit_code\":0,\"output\":\"Finished\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"bad","name":"exec","input":"{\"cmd\":\"cargo test\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"bad","output":"{\"exit_code\":101,\"output\":\"error[E0433]: failed to resolve\"}"}}"#,
+        ],
+    );
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(workdir.path().join("missing-claude"))
+            .arg("--codex-dir")
+            .arg(codex.path());
+        command
+    };
+
+    command()
+        .arg("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("cargo test"))
+        .stdout(predicates::str::contains("exit 101"))
+        .stdout(predicates::str::contains("error[E0433]: failed to resolve"))
+        .stdout(predicates::str::contains("cargo check").not());
+    command()
+        .arg("--stats")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1  ✗ exec"))
+        .stdout(predicates::str::contains("error[EN]: failed to resolve"));
+}
+
+#[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
     let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
     let store = tempfile::tempdir().unwrap();

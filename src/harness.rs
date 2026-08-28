@@ -253,11 +253,12 @@ fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
                 crate::session::AssistantBlock::Thinking(text),
             ]))
         }
-        Some("custom_tool_call") => {
+        Some("custom_tool_call") | Some("function_call") => {
             let id = payload.get("call_id").and_then(Value::as_str).map(str::to_string);
             let name = payload.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
             let input = payload
                 .get("input")
+                .or_else(|| payload.get("arguments"))
                 .and_then(Value::as_str)
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .unwrap_or(Value::Null);
@@ -265,19 +266,19 @@ fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
                 crate::session::AssistantBlock::ToolUse { id, name, input },
             ]))
         }
-        Some("custom_tool_call_output") => {
+        Some("custom_tool_call_output") | Some("function_call_output") => {
             let tool_use_id = payload.get("call_id").and_then(Value::as_str).map(str::to_string);
-            let text = codex_output_text(payload.get("output"));
+            let (text, is_error, exit_code) = codex_tool_output(payload.get("output"));
             Some(crate::session::RecordKind::UserBlocks(vec![
-                crate::session::UserBlock::ToolResult { is_error: false, tool_use_id, text },
+                crate::session::UserBlock::ToolResult { is_error, exit_code, tool_use_id, text },
             ]))
         }
         _ => None,
     }
 }
 
-fn codex_output_text(output: Option<&Value>) -> String {
-    match output {
+fn codex_tool_output(output: Option<&Value>) -> (String, bool, Option<i64>) {
+    let raw = match output {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Array(items)) => items
             .iter()
@@ -285,7 +286,45 @@ fn codex_output_text(output: Option<&Value>) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
-    }
+    };
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+    let exit_code = parsed
+        .as_ref()
+        .and_then(|value| value.get("exit_code"))
+        .and_then(Value::as_i64)
+        .or_else(|| codex_text_exit_code(&raw));
+    let structural_error = parsed.as_ref().is_some_and(|value| {
+        value
+            .get("isError")
+            .or_else(|| value.get("is_error"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    });
+    let is_error = structural_error
+        || exit_code.is_some_and(|code| code != 0)
+        || raw.contains("<tool_use_error>");
+    let text = parsed
+        .as_ref()
+        .and_then(|value| value.get("output"))
+        .and_then(Value::as_str)
+        .unwrap_or(&raw)
+        .to_string();
+    (text, is_error, exit_code)
+}
+
+fn codex_text_exit_code(text: &str) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    ["process exited with code ", "exit code ", "exit code: "]
+        .iter()
+        .find_map(|marker| {
+            let start = lower.find(marker)? + marker.len();
+            let digits: String = lower[start..]
+                .chars()
+                .skip_while(|character| character.is_ascii_whitespace())
+                .take_while(|character| character.is_ascii_digit() || *character == '-')
+                .collect();
+            digits.parse().ok()
+        })
 }
 
 #[derive(Clone)]
@@ -414,6 +453,8 @@ mod tests {
                 r#"{"timestamp":"2026-08-28T10:00:00Z","type":"session_meta","payload":{"id":"c0de0001-0000-0000-0000-000000000000","cwd":"E:\\projects\\demo","thread_source":"user"}}"#,
                 r#"{"timestamp":"2026-08-28T10:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt"}]}}"#,
                 r#"{"timestamp":"2026-08-28T10:02:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}}"#,
+                r#"{"timestamp":"2026-08-28T10:03:00Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"bad","name":"exec","input":"{\"cmd\":\"cargo test\"}"}}"#,
+                r#"{"timestamp":"2026-08-28T10:04:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"bad","output":"{\"exit_code\":101,\"output\":\"compile failed\"}"}}"#,
             ]
             .join("\n"),
         )
@@ -432,12 +473,25 @@ mod tests {
         assert_eq!(sessions[0].session_id, "c0de0001-0000-0000-0000-000000000000");
         assert_eq!(sessions[0].project, "E--projects-demo");
         assert_eq!(sessions[0].title.as_deref(), Some("Indexed title"));
-        assert_eq!(parsed.records.len(), 2);
+        assert_eq!(parsed.records.len(), 4);
         assert_eq!(parsed.records[0].kind, crate::session::RecordKind::Prompt("prompt".into()));
         assert!(matches!(
             &parsed.records[1].kind,
             crate::session::RecordKind::Assistant(blocks)
                 if blocks == &vec![crate::session::AssistantBlock::Text("reply".into())]
+        ));
+        assert!(matches!(
+            &parsed.records[3].kind,
+            crate::session::RecordKind::UserBlocks(blocks)
+                if matches!(
+                    &blocks[0],
+                    crate::session::UserBlock::ToolResult {
+                        is_error: true,
+                        exit_code: Some(101),
+                        text,
+                        ..
+                    } if text == "compile failed"
+                )
         ));
     }
 }
