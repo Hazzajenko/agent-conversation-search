@@ -10,7 +10,8 @@ use agsearch::{
     format_results, format_session_paths, format_sessions, format_stats, format_transcript,
     format_windowed, group_failures, list_store_projects, list_store_sessions, parse_store_transcript,
     resolve_claude_dir, resolve_store_session_prefix, search_store_session, search_stores,
-    since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
+    resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
+    StoreSessionRef, Stores,
 };
 
 /// Search your local Claude Code conversation history.
@@ -25,6 +26,10 @@ struct Cli {
     /// then ~/.claude.
     #[arg(long, value_name = "PATH", global = true)]
     claude_dir: Option<PathBuf>,
+
+    /// Override the Codex config directory. Defaults to $CODEX_HOME, then ~/.codex.
+    #[arg(long, value_name = "PATH", global = true)]
+    codex_dir: Option<PathBuf>,
 
     /// Search only one Harness. By default every available Store is searched.
     #[arg(long, value_enum, global = true)]
@@ -195,6 +200,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let env_codex_home = std::env::var("CODEX_HOME").ok();
     let home = dirs::home_dir();
     let Some(claude_dir) = resolve_claude_dir(
         cli.claude_dir.as_deref(),
@@ -207,10 +213,22 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     };
+    let Some(codex_dir) = resolve_codex_dir(
+        cli.codex_dir.as_deref(),
+        env_codex_home.as_deref(),
+        home.as_deref(),
+    ) else {
+        eprintln!(
+            "agsearch: could not determine the Codex config directory; \
+             pass --codex-dir or set $CODEX_HOME"
+        );
+        return ExitCode::FAILURE;
+    };
 
     let stores = match cli.harness {
-        Some(HarnessChoice::Codex) => Stores::empty(),
-        Some(HarnessChoice::Claude) | None => Stores::with_claude(&claude_dir),
+        Some(HarnessChoice::Codex) => Stores::with_codex(&codex_dir),
+        Some(HarnessChoice::Claude) => Stores::with_claude(&claude_dir),
+        None => Stores::with_claude_and_codex(&claude_dir, &codex_dir),
     };
 
     match cli.command {

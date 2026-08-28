@@ -172,6 +172,19 @@ pub fn resolve_claude_dir(
     home.map(|h| h.join(".claude"))
 }
 
+/// Resolve the Codex config directory from `--codex-dir`, `$CODEX_HOME`, then
+/// `<home>/.codex`, in that precedence order.
+pub fn resolve_codex_dir(
+    cli_override: Option<&Path>,
+    env_codex_home: Option<&str>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    cli_override
+        .map(Path::to_path_buf)
+        .or_else(|| env_codex_home.map(PathBuf::from))
+        .or_else(|| home.map(|directory| directory.join(".codex")))
+}
+
 /// The Store (Projects root) under a resolved Claude config directory.
 pub fn projects_root(claude_dir: &Path) -> PathBuf {
     claude_dir.join("projects")
@@ -237,6 +250,7 @@ pub struct Match {
 /// to display and reopen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMatches {
+    pub harness: Harness,
     /// The Project directory name the Session lives in.
     pub project: String,
     /// The Session id (the `.jsonl` file stem).
@@ -296,7 +310,7 @@ pub fn search_stores(
         .par_iter()
         .filter_map(|handle| {
             let parsed = stores.parse(handle)?;
-            search_parsed_session(&handle.info, parsed, matcher, content)
+            search_parsed_session(&handle.info, parsed, stores.harness(handle), matcher, content)
         })
         .collect();
     results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
@@ -312,7 +326,9 @@ pub fn search_store_session(
 ) -> Vec<SessionMatches> {
     stores
         .parse(handle)
-        .and_then(|parsed| search_parsed_session(&handle.info, parsed, matcher, content))
+        .and_then(|parsed| {
+            search_parsed_session(&handle.info, parsed, stores.harness(handle), matcher, content)
+        })
         .into_iter()
         .collect()
 }
@@ -320,6 +336,7 @@ pub fn search_store_session(
 fn search_parsed_session(
     info: &SessionInfo,
     parsed: session::Session,
+    harness: Harness,
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Option<SessionMatches> {
@@ -335,6 +352,7 @@ fn search_parsed_session(
         return None;
     }
     Some(SessionMatches {
+        harness,
         project: info.project.clone(),
         session_id: info.session_id.clone(),
         path: info.path.clone(),
@@ -410,6 +428,7 @@ fn search_one_session(
     }
     let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     Some(SessionMatches {
+        harness: Harness::Claude,
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
@@ -754,6 +773,8 @@ pub fn format_results(
     let mut out = String::new();
     for s in results {
         let short = short_id(&s.session_id);
+        out.push_str(s.harness.as_str());
+        out.push_str(" · ");
         out.push_str(&session_header(
             &short,
             // Prefer the real cwd over the mangled directory name (ADR 0005),
@@ -2118,6 +2139,7 @@ mod tests {
             .map(|(i, segment)| Match { turn: Some(i + 1), segment })
             .collect();
         SessionMatches {
+            harness: Harness::Claude,
             project: project.into(),
             session_id: "11111111-2222-3333-4444-555555555555".into(),
             path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
@@ -2226,6 +2248,7 @@ mod tests {
     #[test]
     fn a_title_match_shows_no_turn_bracket() {
         let s = SessionMatches {
+            harness: Harness::Claude,
             project: "p".into(),
             session_id: "abcd1234-rest".into(),
             path: PathBuf::from("/x/abcd1234-rest.jsonl"),
