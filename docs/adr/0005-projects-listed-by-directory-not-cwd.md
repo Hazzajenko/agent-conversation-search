@@ -2,7 +2,7 @@
 
 The `projects` verb (issue 17, ADR 0004) lists the Projects in the Store. Each
 Session Record carries the real working directory it was recorded in — e.g.
-`"cwd":"E:\\projects\\rust\\claude-code-conversation-search"` — so the lister
+`"cwd":"E:\\projects\\rust\\agent-conversation-search"` — so the lister
 *could* identify a Project by that real path instead of by the on-disk directory
 name. ADR 0001 even sanctions reading the `cwd` field ("we never reverse a
 directory name back into a path; when we need the real path we read the `cwd`

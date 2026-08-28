@@ -1,20 +1,20 @@
-# ccsearch
+# agsearch
 
 Search your local Claude Code conversation history from the command line.
 
 Claude Code records every conversation as a `.jsonl` transcript under
-`~/.claude/projects/`. `ccsearch` searches those transcripts — so you can find
+`~/.claude/projects/`. `agsearch` searches those transcripts — so you can find
 the session where you figured something out, reopen a past conversation, or see
 what tool calls have been failing — without leaving the terminal.
 
 ```console
-$ ccsearch "borrow checker"
+$ agsearch "borrow checker"
 d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
   [14] user: how do I satisfy the borrow checker here without cloning
   [16] assistant: …the borrow checker is complaining because the reference outlives…
-  … +3 more  ›  ccsearch show d712581e
+  … +3 more  ›  agsearch show d712581e
 
-$ ccsearch show d712581e        # reopen the whole conversation
+$ agsearch show d712581e        # reopen the whole conversation
 ```
 
 ## Why
@@ -22,11 +22,11 @@ $ ccsearch show d712581e        # reopen the whole conversation
 Claude Code has no built-in way to look back over your own history. The
 transcripts are on disk, but the directory names are mangled
 (`E:\projects\rust` → `E--projects-rust`) and each file is a stream of JSON
-records, not something you can skim. `ccsearch` turns that pile into three jobs:
+records, not something you can skim. `agsearch` turns that pile into three jobs:
 
-- **find** a conversation — `ccsearch <query>`
-- **read** a conversation — `ccsearch show <id>`
-- **analyse** what went wrong — `ccsearch --failed` / `--stats`
+- **find** a conversation — `agsearch <query>`
+- **read** a conversation — `agsearch show <id>`
+- **analyse** what went wrong — `agsearch --failed` / `--stats`
 
 ## Install
 
@@ -34,14 +34,14 @@ Requires a [Rust toolchain](https://rustup.rs/).
 
 ```console
 # from a clone of this repo
-cargo install --path .          # installs the `ccsearch` binary onto your PATH
+cargo install --path .          # installs the `agsearch` binary onto your PATH
 # or just build it
-cargo build --release           # ./target/release/ccsearch
+cargo build --release           # ./target/release/agsearch
 ```
 
-`ccsearch` reads `$CLAUDE_CONFIG_DIR` (falling back to `~/.claude`) to find your
+`agsearch` reads `$CLAUDE_CONFIG_DIR` (falling back to `~/.claude`) to find your
 history. Override it per-run with `--claude-dir <PATH>`. Note that Windows and
-WSL keep **separate** histories — run `ccsearch` from the environment whose
+WSL keep **separate** histories — run `agsearch` from the environment whose
 sessions you want to search, or point `--claude-dir` at the other one.
 
 ## The core workflow
@@ -51,24 +51,24 @@ git-style unique prefix). `search` and `--failed` print it; `show` resolves it.
 That is the whole loop — find something, copy its id, open it:
 
 ```console
-$ ccsearch "diesel migration"      # find — note the id in each header
-$ ccsearch show 4c28878f           # read — the full transcript
-$ ccsearch show 4c28878f --around 220   # read — just the turns around turn 220
+$ agsearch "diesel migration"      # find — note the id in each header
+$ agsearch show 4c28878f           # read — the full transcript
+$ agsearch show 4c28878f --around 220   # read — just the turns around turn 220
 ```
 
 You can also pipe by path instead of copying ids:
 
 ```console
-$ ccsearch -l "diesel migration" | ccsearch show -   # open the first match
+$ agsearch -l "diesel migration" | agsearch show -   # open the first match
 ```
 
 ## Verbs
 
 ### `search` (the default)
 
-`ccsearch <query>` searches the **current directory's** Project for a
+`agsearch <query>` searches the **current directory's** Project for a
 case-insensitive substring, grouped by Session, newest first. It is the default
-verb, so the word `search` is optional (`ccsearch foo` ≡ `ccsearch search foo`).
+verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`).
 
 | Flag | Effect |
 |------|--------|
@@ -85,7 +85,7 @@ content are opt-in.
 
 ### `show` — read a whole conversation
 
-`ccsearch show <id>` renders a Session as a readable transcript (tool calls
+`agsearch show <id>` renders a Session as a readable transcript (tool calls
 collapse to one-liners; failed tool calls are flagged; thinking is hidden).
 
 | Flag | Effect |
@@ -99,25 +99,25 @@ file path from stdin.
 
 ### `sessions` — list conversations
 
-`ccsearch sessions` lists the Sessions in scope, newest first, one per line —
+`agsearch sessions` lists the Sessions in scope, newest first, one per line —
 for when you want to reopen a recent conversation but don't remember anything to
 search for. Each row is paste-able into `show`.
 
 ```console
-$ ccsearch sessions
+$ agsearch sessions
 de151981 · E:\projects\rust\demo · Test app runtime and functionality · 2026-06-02 · main
 d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
 ```
 
 ### `projects` — list projects
 
-`ccsearch projects` lists every Project in your history (whole-Store), newest
+`agsearch projects` lists every Project in your history (whole-Store), newest
 first, with how many Sessions each holds and when it was last touched. The name
 is the real path, recovered from the transcripts.
 
 ```console
-$ ccsearch projects
-E:\projects\rust\claude-code-conversation-search · 7 sessions · 2026-06-02
+$ agsearch projects
+E:\projects\rust\agent-conversation-search · 7 sessions · 2026-06-02
 E:\projects\games\creature-game · 43 sessions · 2026-06-01
 ```
 
@@ -127,13 +127,13 @@ Find and aggregate **failed tool calls** by structure — independent of any
 query — to see what's been breaking.
 
 ```console
-$ ccsearch --failed                # list failed tool calls, joined to the command
-$ ccsearch --failed cargo          # filter failures by command / error text
-$ ccsearch --stats                 # aggregate into a counts table by tool + error
+$ agsearch --failed                # list failed tool calls, joined to the command
+$ agsearch --failed cargo          # filter failures by command / error text
+$ agsearch --stats                 # aggregate into a counts table by tool + error
 ```
 
 ```console
-$ ccsearch --stats
+$ agsearch --stats
 19  ✗ PowerShell  error:
  3  ✗ Edit        String to replace not found
 … +2 more singleton signatures
@@ -169,10 +169,10 @@ listing verbs:
 
 ## As a Claude Code plugin
 
-This repo also ships a Claude Code skill (`skills/ccsearch`, declared in
+This repo also ships a Claude Code skill (`skills/agsearch`, declared in
 `.claude-plugin/plugin.json`) that lets Claude recall past conversations for you
 — "did we ever discuss X?", "find the session where we set up Y". The skill is
-thin glue over the same binary, so install `ccsearch` on your PATH first.
+thin glue over the same binary, so install `agsearch` on your PATH first.
 
 ## Concepts
 

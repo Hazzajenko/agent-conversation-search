@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 
-use ccsearch::{
+use agsearch::{
     failed_in_project_dirs, failed_in_session_file, format_failures, format_paths, format_projects,
     format_results, format_session_paths, format_sessions, format_stats, format_transcript,
     format_windowed, group_failures, list_projects, list_sessions, parse_transcript, projects_root,
@@ -15,11 +15,11 @@ use ccsearch::{
 
 /// Search your local Claude Code conversation history.
 ///
-/// By default `ccsearch <QUERY>` searches the conversations recorded for the
+/// By default `agsearch <QUERY>` searches the conversations recorded for the
 /// current working directory's Project, matching a case-insensitive substring.
-/// `ccsearch show <SESSION>` renders a whole conversation as a Transcript.
+/// `agsearch show <SESSION>` renders a whole conversation as a Transcript.
 #[derive(Parser)]
-#[command(name = "ccsearch", version, about)]
+#[command(name = "agsearch", version, about)]
 struct Cli {
     /// Override the Claude config directory. Defaults to $CLAUDE_CONFIG_DIR,
     /// then ~/.claude.
@@ -29,7 +29,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// The default verb: bare `ccsearch <QUERY>` searches.
+    /// The default verb: bare `agsearch <QUERY>` searches.
     #[command(flatten)]
     search: SearchArgs,
 }
@@ -47,7 +47,7 @@ enum Command {
 }
 
 /// Arguments for the `search` verb. Flattened into [`Cli`] so bare
-/// `ccsearch <QUERY>` and explicit `ccsearch search <QUERY>` are identical.
+/// `agsearch <QUERY>` and explicit `agsearch search <QUERY>` are identical.
 #[derive(Args)]
 struct SearchArgs {
     /// Text to search for (case-insensitive substring). Required for `search`,
@@ -192,7 +192,7 @@ fn main() -> ExitCode {
         home.as_deref(),
     ) else {
         eprintln!(
-            "ccsearch: could not determine the Claude config directory; \
+            "agsearch: could not determine the Claude config directory; \
              pass --claude-dir or set $CLAUDE_CONFIG_DIR"
         );
         return ExitCode::FAILURE;
@@ -220,7 +220,7 @@ fn parse_since(value: Option<&str>) -> Result<Option<i64>, ()> {
         Some(cutoff) => Ok(Some(cutoff)),
         None => {
             eprintln!(
-                "ccsearch: could not parse --since '{value}' \
+                "agsearch: could not parse --since '{value}' \
                  (use a duration like 3d/2w/1h, or an ISO date like 2026-05-01)"
             );
             Err(())
@@ -234,7 +234,7 @@ fn run_sessions(claude_dir: &Path, args: &SessionsArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
-            eprintln!("ccsearch: cannot read the current directory: {err}");
+            eprintln!("agsearch: cannot read the current directory: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -290,7 +290,7 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
-            eprintln!("ccsearch: cannot read the current directory: {err}");
+            eprintln!("agsearch: cannot read the current directory: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -303,11 +303,11 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         Some(prefix) => match resolve_session_prefix(&root, prefix) {
             SessionRef::Unique(path) => Some(path),
             SessionRef::NotFound => {
-                eprintln!("ccsearch: no session matches '{prefix}'");
+                eprintln!("agsearch: no session matches '{prefix}'");
                 return ExitCode::FAILURE;
             }
             SessionRef::Ambiguous(ids) => {
-                eprintln!("ccsearch: '{prefix}' is ambiguous — {} sessions match:", ids.len());
+                eprintln!("agsearch: '{prefix}' is ambiguous — {} sessions match:", ids.len());
                 for id in ids.iter().take(10) {
                     eprintln!("  {id}");
                 }
@@ -326,7 +326,7 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
         Some(query) => match Matcher::new(query, args.regex, args.case_sensitive) {
             Ok(matcher) => Some(matcher),
             Err(err) => {
-                eprintln!("ccsearch: {err}");
+                eprintln!("agsearch: {err}");
                 return ExitCode::FAILURE;
             }
         },
@@ -358,7 +358,7 @@ fn run_search(claude_dir: &Path, args: &SearchArgs) -> ExitCode {
     }
 
     let Some(matcher) = matcher else {
-        eprintln!("ccsearch: a query is required (or use `ccsearch show <session>`, or `--failed`)");
+        eprintln!("agsearch: a query is required (or use `agsearch show <session>`, or `--failed`)");
         return ExitCode::FAILURE;
     };
 
@@ -406,7 +406,7 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
         match read_path_from_stdin() {
             Some(path) => path,
             None => {
-                eprintln!("ccsearch: no session path on stdin");
+                eprintln!("agsearch: no session path on stdin");
                 return ExitCode::FAILURE;
             }
         }
@@ -415,12 +415,12 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
         match resolve_session_prefix(&root, &args.session) {
             SessionRef::Unique(path) => path,
             SessionRef::NotFound => {
-                eprintln!("ccsearch: no session matches '{}'", args.session);
+                eprintln!("agsearch: no session matches '{}'", args.session);
                 return ExitCode::FAILURE;
             }
             SessionRef::Ambiguous(ids) => {
                 eprintln!(
-                    "ccsearch: '{}' is ambiguous — {} sessions match:",
+                    "agsearch: '{}' is ambiguous — {} sessions match:",
                     args.session,
                     ids.len()
                 );
@@ -438,7 +438,7 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("ccsearch: cannot read {}: {err}", path.display());
+            eprintln!("agsearch: cannot read {}: {err}", path.display());
             return ExitCode::FAILURE;
         }
     };
@@ -455,7 +455,7 @@ fn run_show(claude_dir: &Path, args: &ShowArgs) -> ExitCode {
 }
 
 /// Read the first non-empty line of stdin as a Session file path (for
-/// `ccsearch -l … | … | ccsearch show -`).
+/// `agsearch -l … | … | agsearch show -`).
 fn read_path_from_stdin() -> Option<PathBuf> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok()?;

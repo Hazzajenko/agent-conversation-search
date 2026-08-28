@@ -1,7 +1,7 @@
 ---
-name: ccsearch
+name: agsearch
 description: >-
-  Search your local Claude Code conversation history with the `ccsearch` CLI.
+  Search your local Claude Code conversation history with the `agsearch` CLI.
   Use when the user asks to recall, find, or reopen a PAST session ("did we
   ever discuss X", "find the conversation where we set up Y", "what did I
   decide about Z last week"), to list past sessions or projects, or to analyse
@@ -10,15 +10,15 @@ description: >-
   files (use Grep/Glob for that).
 ---
 
-# ccsearch: search past Claude Code conversations
+# agsearch: search past Claude Code conversations
 
-`ccsearch` is a Rust CLI that searches the user's local Claude Code transcripts
+`agsearch` is a Rust CLI that searches the user's local Claude Code transcripts
 (the `.jsonl` files under `~/.claude/projects/`). This skill is thin glue: the
 binary does the mechanical work, you interpret the results, drill in, and
-summarise. Run `ccsearch --help` for the full flag surface — this file only
+summarise. Run `agsearch --help` for the full flag surface — this file only
 records what `--help` cannot tell you.
 
-If `ccsearch --version` fails, the binary is not installed; tell the user to
+If `agsearch --version` fails, the binary is not installed; tell the user to
 `cargo install --path .` from a clone of this repo rather than guessing at
 answers.
 
@@ -28,10 +28,10 @@ Every verb is welded together by the **short session-id** (a git-style unique
 prefix) printed at the start of each result header. Find → copy the id → open:
 
 ```console
-$ ccsearch "diesel migration"        # find — note the id in each header
-$ ccsearch show 4c28878f             # read — the whole transcript
-$ ccsearch show 4c28878f --around 220  # read — just the turns near turn 220
-$ ccsearch "panic" --session 4c28878f  # search within that one conversation
+$ agsearch "diesel migration"        # find — note the id in each header
+$ agsearch show 4c28878f             # read — the whole transcript
+$ agsearch show 4c28878f --around 220  # read — just the turns near turn 220
+$ agsearch "panic" --session 4c28878f  # search within that one conversation
 ```
 
 Prefer `show` over reading raw `.jsonl` files — it renders the transcript for
@@ -39,13 +39,13 @@ you. Result trailers print the exact `show` command to run next.
 
 ## Verbs
 
-- `ccsearch "<terms>"` — search (the default verb; case-insensitive literal
+- `agsearch "<terms>"` — search (the default verb; case-insensitive literal
   substring). `-e` for regex, `-s` for case-sensitive.
-- `ccsearch show <id>` — render a session as a transcript; `--around N`
+- `agsearch show <id>` — render a session as a transcript; `--around N`
   windows it.
-- `ccsearch sessions` / `ccsearch projects` — list sessions in scope /
+- `agsearch sessions` / `agsearch projects` — list sessions in scope /
   projects in the store, newest first. Use these to orient before searching.
-- `ccsearch --failed [query]` — list failed tool calls by structure; the
+- `agsearch --failed [query]` — list failed tool calls by structure; the
   query becomes an optional filter on command/error. `--full` prints whole
   error texts; `--stats` aggregates into a counts table by tool and error
   signature.
@@ -83,4 +83,4 @@ when the user asks about a different project, reach for a scope flag:
 ## Reporting back
 
 Summarise in plain language and point the user at the session: project, title,
-date, and the `ccsearch show <id>` command to reopen it.
+date, and the `agsearch show <id>` command to reopen it.

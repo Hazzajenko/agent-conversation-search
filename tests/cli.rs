@@ -1,4 +1,4 @@
-//! End-to-end tests driving the `ccsearch` binary as a user would.
+//! End-to-end tests driving the `agsearch` binary as a user would.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -7,14 +7,14 @@ use std::fs;
 /// Build a fixture Store under `store_root` containing one Session for the given
 /// working directory, then return a `Command` ready to run from that cwd with
 /// `--claude-dir` pointed at the fixture.
-fn ccsearch_in(cwd: &std::path::Path, store_root: &std::path::Path, session_lines: &str) -> Command {
+fn agsearch_in(cwd: &std::path::Path, store_root: &std::path::Path, session_lines: &str) -> Command {
     let projects = store_root.join("projects");
-    let encoded = ccsearch::encode_project_dir(&cwd.to_string_lossy());
+    let encoded = agsearch::encode_project_dir(&cwd.to_string_lossy());
     let project_dir = projects.join(encoded);
     fs::create_dir_all(&project_dir).unwrap();
     fs::write(project_dir.join("session.jsonl"), session_lines).unwrap();
 
-    let mut cmd = Command::cargo_bin("ccsearch").unwrap();
+    let mut cmd = Command::cargo_bin("agsearch").unwrap();
     cmd.current_dir(cwd).arg("--claude-dir").arg(store_root);
     cmd
 }
@@ -23,7 +23,7 @@ fn ccsearch_in(cwd: &std::path::Path, store_root: &std::path::Path, session_line
 fn finds_a_match_in_the_current_projects_conversations() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"how to use tokio select"}}"#,
@@ -52,7 +52,7 @@ fn all_flag_searches_projects_other_than_the_current_one() {
         r#"{"type":"user","message":{"role":"user","content":"run the diesel migration"}}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -79,7 +79,7 @@ fn project_flag_targets_a_named_project_by_substring() {
         r#"{"type":"user","message":{"role":"user","content":"bean counter unrelated"}}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -97,7 +97,7 @@ fn project_flag_targets_a_named_project_by_substring() {
 fn regex_flag_matches_the_query_as_a_pattern() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"reading the borrow checker docs"}}"#,
@@ -114,7 +114,7 @@ fn regex_flag_matches_the_query_as_a_pattern() {
 fn case_sensitive_flag_excludes_a_wrong_case_match() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"the BORROW checker"}}"#,
@@ -131,7 +131,7 @@ fn case_sensitive_flag_excludes_a_wrong_case_match() {
 fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"anything"}}"#,
@@ -141,7 +141,7 @@ fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
         .arg("foo(bar")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("ccsearch:"))
+        .stderr(predicates::str::contains("agsearch:"))
         .stderr(predicates::str::contains("regex"));
 }
 
@@ -149,7 +149,7 @@ fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
 fn thinking_flag_includes_thinking_blocks() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering the zylophone problem"}]}}"#,
@@ -167,7 +167,7 @@ fn thinking_flag_includes_thinking_blocks() {
 fn tools_flag_includes_tool_results() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"the zylophone build log"}]}}"#,
@@ -185,7 +185,7 @@ fn tools_flag_includes_tool_results() {
 fn all_content_flag_includes_tool_calls() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"zylophone --tune"}}]}}"#,
@@ -209,7 +209,7 @@ fn max_per_session_flag_caps_matches_and_notes_the_rest() {
         r#"{"type":"user","message":{"role":"user","content":"zebra three"}}"#,
     ]
     .join("\n");
-    let mut cmd = ccsearch_in(workdir.path(), store.path(), &lines);
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
 
     cmd.arg("-m")
         .arg("1")
@@ -223,7 +223,7 @@ fn max_per_session_flag_caps_matches_and_notes_the_rest() {
 fn files_flag_prints_only_the_matching_path() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"how to use tokio select"}}"#,
@@ -241,7 +241,7 @@ fn files_flag_prints_only_the_matching_path() {
 fn no_color_or_piped_output_has_no_ansi_codes() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"please highlight this"}}"#,
@@ -260,7 +260,7 @@ fn no_color_or_piped_output_has_no_ansi_codes() {
 fn color_is_emitted_when_forced() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"please highlight this"}}"#,
@@ -278,7 +278,7 @@ fn color_is_emitted_when_forced() {
 fn reports_cleanly_when_there_are_no_matches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"nothing relevant here"}}"#,
@@ -295,7 +295,7 @@ fn search_output_carries_the_session_id_and_turn_handoff() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let projects = store.path().join("projects");
-    let encoded = ccsearch::encode_project_dir(&workdir.path().to_string_lossy());
+    let encoded = agsearch::encode_project_dir(&workdir.path().to_string_lossy());
     let project_dir = projects.join(encoded);
     fs::create_dir_all(&project_dir).unwrap();
     // A two-Message Session whose id has a recognisable short prefix.
@@ -309,7 +309,7 @@ fn search_output_carries_the_session_id_and_turn_handoff() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -327,7 +327,7 @@ fn search_output_carries_the_session_id_and_turn_handoff() {
 fn failed_lists_failures_by_structure_with_the_handoff_shape() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         &[
@@ -350,7 +350,7 @@ fn failed_lists_failures_by_structure_with_the_handoff_shape() {
 fn stats_aggregates_failures_into_a_counts_table_by_signature() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         &[
@@ -376,7 +376,7 @@ fn stats_aggregates_failures_into_a_counts_table_by_signature() {
 fn failed_query_filters_and_full_shows_everything() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         &[
@@ -402,7 +402,7 @@ fn since_excludes_sessions_older_than_an_absolute_date() {
     let project = store
         .path()
         .join("projects")
-        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("newish.jsonl"),
@@ -415,7 +415,7 @@ fn since_excludes_sessions_older_than_an_absolute_date() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -433,7 +433,7 @@ fn since_excludes_sessions_older_than_an_absolute_date() {
 fn since_rejects_an_unparseable_value() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
@@ -465,7 +465,7 @@ fn session_scope_searches_only_the_named_session() {
         r#"{"type":"user","message":{"role":"user","content":"tokio in session B"}}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -487,7 +487,7 @@ fn session_scope_errors_on_an_ambiguous_prefix() {
     plant_session(store.path(), "E--projects-demo", "dupe1111-aaaa", line);
     plant_session(store.path(), "E--projects-demo", "dupe2222-bbbb", line);
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -512,7 +512,7 @@ fn session_scope_requires_a_query() {
     );
 
     // --session without a Query is not "dump the session" — that is show's job.
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -528,7 +528,7 @@ fn session_scope_requires_a_query() {
 fn an_empty_query_errors_like_a_missing_one() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"anything"}}"#,
@@ -543,7 +543,7 @@ fn an_empty_query_errors_like_a_missing_one() {
 fn a_one_character_query_still_searches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"zebra"}}"#,
@@ -557,7 +557,7 @@ fn a_one_character_query_still_searches() {
 fn a_whitespace_only_query_still_searches() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"one two"}}"#,
@@ -572,7 +572,7 @@ fn a_whitespace_only_query_still_searches() {
 fn an_empty_failed_filter_means_no_filter() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         &[
@@ -588,7 +588,7 @@ fn an_empty_failed_filter_means_no_filter() {
 
 #[test]
 fn session_scope_conflicts_with_all() {
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--session")
         .arg("abc")
@@ -603,7 +603,7 @@ fn session_scope_conflicts_with_all() {
 fn explicit_search_verb_behaves_like_a_bare_query() {
     let workdir = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    let mut cmd = ccsearch_in(
+    let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
         r#"{"type":"user","message":{"role":"user","content":"how to use tokio select"}}"#,
@@ -639,7 +639,7 @@ fn show_renders_a_transcript_resolved_from_a_session_id_prefix() {
         .join("\n"),
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -662,7 +662,7 @@ fn show_errors_cleanly_on_an_ambiguous_prefix() {
     plant_session(store.path(), "E--projects-demo", "abc111-aaaa", line);
     plant_session(store.path(), "E--projects-demo", "abc222-bbbb", line);
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -685,7 +685,7 @@ fn show_errors_cleanly_when_no_session_matches() {
         r#"{"type":"user","message":{"role":"user","content":"x"}}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -708,7 +708,7 @@ fn show_dash_reads_a_session_path_from_stdin() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -730,7 +730,7 @@ fn show_around_windows_the_transcript_on_a_turn() {
         .join("\n");
     let id = plant_session(store.path(), "E--projects-demo", "feed0001-0000-0000-0000-000000000000", &lines);
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -761,7 +761,7 @@ fn bare_show_is_unaffected_by_the_default_context() {
         .join("\n");
     let id = plant_session(store.path(), "E--projects-demo", "feed0002-0000-0000-0000-000000000000", &lines);
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -785,7 +785,7 @@ fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
         r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"a secret rumination"},{"type":"text","text":"here is my reply"}]}}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -796,7 +796,7 @@ fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
         .stdout(predicates::str::contains("[thinking:"))
         .stdout(predicates::str::contains("a secret rumination").not());
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .arg("--claude-dir")
         .arg(store.path())
@@ -817,7 +817,7 @@ fn sessions_lists_the_current_projects_sessions_newest_first() {
     let project = store
         .path()
         .join("projects")
-        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("aaaa1111-0000-0000-0000-000000000000.jsonl"),
@@ -838,7 +838,7 @@ fn sessions_lists_the_current_projects_sessions_newest_first() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -864,7 +864,7 @@ fn sessions_renders_untitled_and_omits_no_content_filter() {
     let project = store
         .path()
         .join("projects")
-        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
     fs::create_dir_all(&project).unwrap();
     // A Session with no ai-title Record and no Message at all (only a noise
     // Record). search would never surface it; `sessions` must still list it.
@@ -874,7 +874,7 @@ fn sessions_renders_untitled_and_omits_no_content_filter() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -892,7 +892,7 @@ fn sessions_reports_cleanly_when_the_scope_is_empty() {
     let store = tempfile::tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -920,7 +920,7 @@ fn sessions_all_widens_scope_and_since_excludes_older() {
     );
 
     // Without --all, the cwd's (empty) Project yields nothing.
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -931,7 +931,7 @@ fn sessions_all_widens_scope_and_since_excludes_older() {
         .stdout(predicates::str::contains("No sessions."));
 
     // --all sees both; --since 2026-05-01 keeps only the recent one.
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -953,7 +953,7 @@ fn sessions_files_prints_paths_for_piping_into_show() {
     let project = store
         .path()
         .join("projects")
-        .join(ccsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("eeee5555-0000-0000-0000-000000000000.jsonl"),
@@ -961,7 +961,7 @@ fn sessions_files_prints_paths_for_piping_into_show() {
     )
     .unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -982,7 +982,7 @@ fn sessions_rejects_search_only_flags() {
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     for flag in ["--failed", "--thinking", "--tools", "--stats"] {
-        Command::cargo_bin("ccsearch")
+        Command::cargo_bin("agsearch")
             .unwrap()
             .current_dir(workdir.path())
             .arg("--claude-dir")
@@ -1018,7 +1018,7 @@ fn projects_lists_projects_by_real_cwd_with_counts_newest_first() {
         r#"{"type":"user","message":{"role":"user","content":"c"},"timestamp":"2026-01-01T10:00:00.000Z","cwd":"E:\\projects\\ancient"}"#,
     );
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -1051,7 +1051,7 @@ fn projects_since_and_project_filter_compose() {
     );
 
     // --since drops the ancient Project.
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -1065,7 +1065,7 @@ fn projects_since_and_project_filter_compose() {
         .stdout(predicates::str::contains("ancient").not());
 
     // --project filters by directory-name substring.
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -1085,7 +1085,7 @@ fn projects_reports_cleanly_when_the_store_is_empty() {
     let store = tempfile::tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
-    Command::cargo_bin("ccsearch")
+    Command::cargo_bin("agsearch")
         .unwrap()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -1103,7 +1103,7 @@ fn projects_rejects_all_and_files_flags() {
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     for flag in ["--all", "-l"] {
-        Command::cargo_bin("ccsearch")
+        Command::cargo_bin("agsearch")
             .unwrap()
             .current_dir(workdir.path())
             .arg("--claude-dir")
