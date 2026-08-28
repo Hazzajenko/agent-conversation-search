@@ -215,6 +215,76 @@ fn codex_home_override_and_missing_stores_are_silent() {
 }
 
 #[test]
+fn codex_show_and_session_search_use_the_transparent_id_handoff() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let id = "c0de0010-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect the build"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"check the compiler output"}],"encrypted_content":"opaque"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"exec_command","input":"{\"cmd\":\"cargo check\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"checking complete"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"handoff reply marker"}]}}"#,
+        ],
+    );
+
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(workdir.path().join("missing-claude"))
+            .arg("--codex-dir")
+            .arg(codex.path());
+        command
+    };
+
+    command()
+        .arg("show")
+        .arg("c0de0010")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("inspect the build"))
+        .stdout(predicates::str::contains("→ exec_command cargo check"))
+        .stdout(predicates::str::contains("← checking complete"))
+        .stdout(predicates::str::contains("thinking: 1 line hidden"))
+        .stdout(predicates::str::contains("check the compiler output").not());
+
+    command()
+        .arg("show")
+        .arg("c0de0010")
+        .arg("--thinking")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("check the compiler output"));
+
+    command()
+        .arg("handoff reply")
+        .arg("--session")
+        .arg("c0de0010")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[5] assistant: handoff reply marker"));
+
+    command()
+        .arg("show")
+        .arg("c0de0010")
+        .arg("--around")
+        .arg("5")
+        .arg("--context")
+        .arg("0")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("handoff reply marker"))
+        .stdout(predicates::str::contains("inspect the build").not());
+}
+
+#[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
     let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
     let store = tempfile::tempdir().unwrap();
