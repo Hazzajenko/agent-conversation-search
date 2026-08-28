@@ -22,7 +22,7 @@ use serde_json::Value;
 /// Keys whose value, if present, is the most informative one-liner argument for a
 /// tool call. Tried in order; the first string value wins. A fixed list (rather
 /// than dumping raw JSON) is what makes a tool call readable.
-const TOOL_ARG_KEYS: &[&str] = &["command", "file_path", "pattern", "path", "url", "query", "prompt"];
+const TOOL_ARG_KEYS: &[&str] = &["command", "cmd", "file_path", "pattern", "path", "url", "query", "prompt"];
 
 /// The single most informative argument of a `tool_use` input object, or `None`
 /// if it carries none of the known keys. Tool-format knowledge, so it lives with

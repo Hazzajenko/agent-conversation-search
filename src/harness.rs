@@ -177,32 +177,84 @@ fn codex_read(text: &str) -> Session {
         if meta.branch.is_none() {
             meta.branch = value.pointer("/payload/git/branch").and_then(Value::as_str).map(str::to_string);
         }
-        if value.get("type").and_then(Value::as_str) != Some("response_item")
-            || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
-        {
+        if value.get("type").and_then(Value::as_str) != Some("response_item") {
             continue;
         }
-        let role = value.pointer("/payload/role").and_then(Value::as_str);
-        if !matches!(role, Some("user") | Some("assistant")) {
+        let Some(payload) = value.get("payload") else {
             continue;
-        }
-        turn += 1;
-        let content = value
-            .pointer("/payload/content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("text").and_then(Value::as_str));
-        let kind = match role {
-            Some("user") => crate::session::RecordKind::Prompt(content.collect::<Vec<_>>().join("\n")),
-            Some("assistant") => crate::session::RecordKind::Assistant(
-                content.map(|text| crate::session::AssistantBlock::Text(text.to_string())).collect(),
-            ),
-            _ => unreachable!(),
         };
+        let Some(kind) = codex_record_kind(payload) else {
+            continue;
+        };
+        turn += 1;
         records.push(crate::session::Record { turn: Some(turn), kind });
     }
     Session { meta, records }
+}
+
+fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
+    match payload.get("type").and_then(Value::as_str) {
+        Some("message") => {
+            let texts = payload
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("text").and_then(Value::as_str));
+            match payload.get("role").and_then(Value::as_str) {
+                Some("user") => Some(crate::session::RecordKind::Prompt(texts.collect::<Vec<_>>().join("\n"))),
+                Some("assistant") => Some(crate::session::RecordKind::Assistant(
+                    texts.map(|text| crate::session::AssistantBlock::Text(text.to_string())).collect(),
+                )),
+                _ => None,
+            }
+        }
+        Some("reasoning") => {
+            let text = payload
+                .get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(crate::session::RecordKind::Assistant(vec![
+                crate::session::AssistantBlock::Thinking(text),
+            ]))
+        }
+        Some("custom_tool_call") => {
+            let id = payload.get("call_id").and_then(Value::as_str).map(str::to_string);
+            let name = payload.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
+            let input = payload
+                .get("input")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or(Value::Null);
+            Some(crate::session::RecordKind::Assistant(vec![
+                crate::session::AssistantBlock::ToolUse { id, name, input },
+            ]))
+        }
+        Some("custom_tool_call_output") => {
+            let tool_use_id = payload.get("call_id").and_then(Value::as_str).map(str::to_string);
+            let text = codex_output_text(payload.get("output"));
+            Some(crate::session::RecordKind::UserBlocks(vec![
+                crate::session::UserBlock::ToolResult { is_error: false, tool_use_id, text },
+            ]))
+        }
+        _ => None,
+    }
+}
+
+fn codex_output_text(output: Option<&Value>) -> String {
+    match output {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 #[derive(Clone)]
