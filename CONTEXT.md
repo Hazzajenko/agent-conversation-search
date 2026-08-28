@@ -1,19 +1,23 @@
-# Claude Code Conversation Search
+# Agent Conversation Search (agsearch)
 
-A CLI tool that searches the local conversation history Claude Code writes to disk. The domain is the on-disk transcript format and the act of searching it — not the Claude Code product itself.
+A CLI tool that searches the local conversation history coding harnesses write to disk. The domain is the on-disk transcript formats and the act of searching them — not the harness products themselves.
 
 ## Language
 
+**Harness**:
+A coding tool that writes conversations to disk: Claude Code (`claude`) or Codex (`codex`). Each Harness has its own Store layout and Record format; a machine may have any subset of Harnesses installed. Selected with `--harness`.
+_Avoid_: agent (collides with subagent threads), tool, source, model.
+
 **Project**:
-A working directory in which Claude Code was used. On disk it is normally one directory under `~/.claude/projects/`, named by replacing every path separator in the working directory with `-`; on a case-sensitive Store one logical Project can span several directories that differ only by case (see ADR 0001).
+A working directory in which a Harness was used — a logical concept shared across Harnesses, so the same repo used with Claude Code and Codex is one Project. Derived per Harness: for Claude Code, from the directory name under `~/.claude/projects/` (path separators replaced with `-`; case-variant directories fold together, see ADR 0001); for Codex, from the `cwd` recorded in the Session (see ADR 0009).
 _Avoid_: folder, workspace, repo.
 
 **Session**:
-A single conversation, stored as exactly one `.jsonl` file inside a Project directory. Identified by a `sessionId`.
+A single conversation, stored as exactly one `.jsonl` file. Identified by a `sessionId`, looked up transparently across all Stores. Codex subagent threads (rollout files whose meta marks them as spawned workers) are not Sessions by default — they are excluded from listing and search unless opted in. A forked Codex thread is its own Session.
 _Avoid_: chat, thread. (User-facing surfaces may say "conversation" as a synonym for Session.)
 
 **Record**:
-One line of a Session file — a single JSON object. Every line is a Record, but not every Record is a Message (e.g. `queue-operation`, `mode`, `attachment`).
+One line of a Session file — a single JSON object, in the Harness's own envelope (Claude Code: typed lines like `user` / `assistant` / `ai-title`; Codex: `{timestamp, type, payload}` envelopes such as `session_meta` and `response_item`). Every line is a Record, but not every Record is a Message.
 _Avoid_: line, entry, event.
 
 **Message**:
@@ -37,7 +41,7 @@ The text content of an assistant `text` block — what Claude said back. Exclude
 _Avoid_: response, answer, completion.
 
 **Title**:
-The one-line AI-generated summary of a Session, carried in an `ai-title` Record.
+The one-line AI-generated summary of a Session. Derived per Harness: Claude Code carries it in an `ai-title` Record inside the Session file; Codex keeps it as `thread_name` in the central `session_index.jsonl`. A Session with no entry is untitled.
 _Avoid_: name, subject, summary.
 
 **Query**:
@@ -45,7 +49,7 @@ The search string a user passes to *this tool*. Never confuse with Prompt — a 
 _Avoid_: search term (in code), prompt.
 
 **Store**:
-The root directory that holds all Projects (`~/.claude/projects/`, or wherever `--claude-dir` / `$CLAUDE_CONFIG_DIR` points). One machine/environment has one active Store; Windows and WSL have separate Stores.
+The root directory where one Harness keeps its Sessions: `~/.claude/projects/` for Claude Code (`--claude-dir` / `$CLAUDE_CONFIG_DIR`), `~/.codex/sessions/` for Codex (`--codex-dir` / `$CODEX_HOME`). A machine has one Store per installed Harness; searches span all Stores that exist, and a missing Store is silently skipped. Windows and WSL have separate Stores.
 _Avoid_: database, index, cache.
 
 **Match**:
@@ -61,7 +65,7 @@ The full, human-readable rendering of a single Session in turn order, produced b
 _Avoid_: dump, log, printout, history.
 
 **Failure**:
-A tool call that errored — a `tool_result` Record carrying `is_error: true`, joined via its `tool_use_id` back to the `tool_use` block that triggered it (which supplies the tool name and command). The unit that failure-analysis lists and counts; distinct from a Match (a Failure is found by structure, not by a Query).
+A tool call that errored. Detected per Harness: Claude Code marks it structurally (`tool_result` with `is_error: true`, joined via `tool_use_id` to the `tool_use` that names the tool and command); Codex has no such flag, so failure is inferred from the tool-output payload. The unit that failure-analysis lists and counts; distinct from a Match (a Failure is found by structure, not by a Query).
 _Avoid_: error, crash, exception, bug.
 
 ## Example dialogue
