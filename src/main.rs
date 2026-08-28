@@ -7,10 +7,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use agsearch::{
     failed_in_store_session, failed_in_stores, format_failures, format_paths, format_projects,
-    format_results, format_session_paths, format_sessions, format_stats, format_transcript,
-    format_windowed, group_failures, list_store_projects, list_store_sessions, parse_store_transcript,
-    resolve_claude_dir, resolve_store_session_prefix, search_store_session, search_stores,
-    resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
+    format_results, format_session_paths, format_sessions, format_stats, format_transcript_for_harness,
+    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
+    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_store_session_prefix,
+    search_store_session, search_stores, resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
     StoreSessionRef, Stores,
 };
 
@@ -434,12 +434,12 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
 /// Run the `show` verb: resolve the Session (by prefix, or a path from stdin),
 /// then render it as a Transcript.
 fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
-    let session = if args.session == "-" {
+    let (turns, harness) = if args.session == "-" {
         match read_path_from_stdin() {
-            Some(path) => match stores.session_for_path(&path) {
-                Some(session) => session,
+            Some(path) => match parse_transcript_path(&path) {
+                Some((harness, turns)) => (turns, harness),
                 None => {
-                    eprintln!("agsearch: cannot find {} in the configured Stores", path.display());
+                    eprintln!("agsearch: cannot read {}", path.display());
                     return ExitCode::FAILURE;
                 }
             },
@@ -449,7 +449,7 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
             }
         }
     } else {
-        match resolve_store_session_prefix(stores, &args.session) {
+        let session = match resolve_store_session_prefix(stores, &args.session) {
             StoreSessionRef::Unique(session) => session,
             StoreSessionRef::NotFound => {
                 eprintln!("agsearch: no session matches '{}'", args.session);
@@ -469,18 +469,24 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
                 }
                 return ExitCode::FAILURE;
             }
-        }
-    };
-
-    let Some(turns) = parse_store_transcript(stores, &session) else {
-        eprintln!("agsearch: cannot read {}", session.info.path.display());
-        return ExitCode::FAILURE;
+        };
+        let Some(turns) = parse_store_transcript(stores, &session) else {
+            eprintln!("agsearch: cannot read {}", session.info.path.display());
+            return ExitCode::FAILURE;
+        };
+        (turns, session.info.harness)
     };
     // --around windows the Transcript on a turn (from a search hit); without it
     // the whole Transcript is rendered. --context only applies inside a window.
     let rendered = match args.around {
-        Some(around) => format_windowed(&turns, around, args.context, args.thinking),
-        None => format_transcript(&turns, args.thinking),
+        Some(around) => format_windowed_for_harness(
+            &turns,
+            around,
+            args.context,
+            args.thinking,
+            harness,
+        ),
+        None => format_transcript_for_harness(&turns, args.thinking, harness),
     };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS

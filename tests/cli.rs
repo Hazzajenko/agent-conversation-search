@@ -301,6 +301,8 @@ fn codex_show_and_session_search_use_the_transparent_id_handoff() {
         .stdout(predicates::str::contains("inspect the build"))
         .stdout(predicates::str::contains("→ exec_command cargo check"))
         .stdout(predicates::str::contains("← checking complete"))
+        .stdout(predicates::str::contains("codex\n"))
+        .stdout(predicates::str::contains("claude\n").not())
         .stdout(predicates::str::contains("thinking: 1 line hidden"))
         .stdout(predicates::str::contains("check the compiler output").not());
 
@@ -447,6 +449,17 @@ fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
         .success()
         .stdout(predicates::str::contains("c0de0013"))
         .stdout(predicates::str::contains("(untitled)"));
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(workdir.path().join("missing-claude"))
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("Indexed Codex title")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("codex · c0de0012"));
 }
 
 #[test]
@@ -558,6 +571,7 @@ fn codex_failed_and_stats_infer_failures_from_tool_outputs() {
         .arg("--failed")
         .assert()
         .success()
+        .stdout(predicates::str::contains("codex · c0de0018"))
         .stdout(predicates::str::contains("cargo test"))
         .stdout(predicates::str::contains("exit 101"))
         .stdout(predicates::str::contains("error[E0433]: failed to resolve"))
@@ -1234,6 +1248,27 @@ fn show_dash_reads_a_session_path_from_stdin() {
         .assert()
         .success()
         .stdout(predicates::str::contains("piped in from a path"));
+}
+
+#[test]
+fn show_dash_reads_a_relative_path_outside_configured_stores() {
+    let workdir = tempfile::tempdir().unwrap();
+    fs::write(
+        workdir.path().join("relative.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":"relative path session"}}"#,
+    )
+    .unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(workdir.path().join("missing-claude"))
+        .arg("show")
+        .arg("-")
+        .write_stdin("relative.jsonl\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("relative path session"));
 }
 
 #[test]

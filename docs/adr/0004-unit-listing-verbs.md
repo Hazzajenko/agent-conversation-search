@@ -4,6 +4,8 @@ ADR 0002 established the action-verb model — `search` (find a Session) and `sh
 
 **Decision:** Add listing verbs named after the **unit** they enumerate, not the action: **`agsearch sessions`** lists Sessions, and a future **`agsearch projects`** lists Projects. They are **separate verbs**, not one verb with a unit-switching flag. Each `sessions` row is the existing Session header from ADR 0002 (`short-id · project · title · date · branch`) verbatim, so the listing feeds the same stateless session-id → `show` handoff that `search` and `--failed` already feed. `sessions` defaults to the current Project and composes with `--all` / `--project` / `--since` exactly like `search`.
 
+**Amendment (ADR 0010):** With more than one Harness, every Session header begins with its Harness: `harness · short-id · project · title · date · branch`. The short id remains adjacent and pasteable, preserving the stateless handoff while making merged results attributable.
+
 ## Considered and rejected
 
 - **A generic `list` verb** (lists Sessions by default). Reads cleanly as an action-verb (consistent with `search`/`show`), but `list` alone is ambiguous — *list what?* — and it forces the future Projects lister into a lopsided sibling (`list` for Sessions, `projects` for Projects). Rejected: naming the verb after the unit is self-documenting and scales symmetrically (`sessions`, `projects`).

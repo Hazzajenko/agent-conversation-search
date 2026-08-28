@@ -311,7 +311,7 @@ pub fn search_stores(
         .par_iter()
         .filter_map(|handle| {
             let parsed = stores.parse(handle)?;
-            search_parsed_session(&handle.info, parsed, stores.harness(handle), matcher, content)
+            search_parsed_session(&handle.info, parsed, matcher, content)
         })
         .collect();
     results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
@@ -328,7 +328,7 @@ pub fn search_store_session(
     stores
         .parse(handle)
         .and_then(|parsed| {
-            search_parsed_session(&handle.info, parsed, stores.harness(handle), matcher, content)
+            search_parsed_session(&handle.info, parsed, matcher, content)
         })
         .into_iter()
         .collect()
@@ -337,11 +337,10 @@ pub fn search_store_session(
 fn search_parsed_session(
     info: &SessionInfo,
     parsed: session::Session,
-    harness: Harness,
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Option<SessionMatches> {
-    let matches: Vec<Match> = parsed
+    let mut matches: Vec<Match> = parsed
         .records
         .iter()
         .flat_map(|record| {
@@ -349,11 +348,26 @@ fn search_parsed_session(
         })
         .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text))
         .collect();
+    let title_is_a_record = parsed
+        .records
+        .iter()
+        .any(|record| matches!(&record.kind, RecordKind::Title(_)));
+    if !title_is_a_record {
+        if let Some(title) = info.title.as_ref().filter(|title| matcher.is_match(title)) {
+            matches.insert(
+                0,
+                Match {
+                    turn: None,
+                    segment: Segment { role: Role::Title, text: title.clone() },
+                },
+            );
+        }
+    }
     if matches.is_empty() {
         return None;
     }
     Some(SessionMatches {
-        harness,
+        harness: info.harness,
         subagent: info.subagent.clone(),
         project: info.project.clone(),
         session_id: info.session_id.clone(),
@@ -681,20 +695,31 @@ fn short_id(session_id: &str) -> String {
 /// short session-id (paste-able into `show`), then `project · title · date ·
 /// branch`, omitting date/branch when absent.
 fn session_header(
+    harness: Harness,
+    subagent: Option<&str>,
     short: &str,
     project: &str,
     title: Option<&str>,
     timestamp: Option<&str>,
     branch: Option<&str>,
 ) -> String {
-    let mut header = vec![short.to_string(), project.to_string(), title.unwrap_or("(untitled)").to_string()];
+    let mut header = vec![
+        harness.as_str().to_string(),
+        short.to_string(),
+        project.to_string(),
+        title.unwrap_or("(untitled)").to_string(),
+    ];
     if let Some(date) = timestamp.and_then(date_prefix) {
         header.push(date.to_string());
     }
     if let Some(branch) = branch {
         header.push(branch.to_string());
     }
-    header.join(" · ")
+    let mut rendered = header.join(" · ");
+    if let Some(name) = subagent {
+        rendered.push_str(&format!(" [subagent: {name}]"));
+    }
+    rendered
 }
 
 /// Render just the matching Session file paths, one per line (grep `-l` style),
@@ -720,9 +745,9 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
     }
     let mut out = String::new();
     for s in sessions {
-        out.push_str(s.harness.as_str());
-        out.push_str(" · ");
         out.push_str(&session_header(
+            s.harness,
+            s.subagent.as_deref(),
             &short_id(&s.session_id),
             // Prefer the real cwd over the mangled directory name — the reason
             // the tool exists — falling back as `projects` does (ADR 0005).
@@ -731,9 +756,6 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
             s.timestamp.as_deref(),
             s.branch.as_deref(),
         ));
-        if let Some(name) = &s.subagent {
-            out.push_str(&format!(" [subagent: {name}]"));
-        }
         out.push('\n');
     }
     out
@@ -789,9 +811,9 @@ pub fn format_results(
     let mut out = String::new();
     for s in results {
         let short = short_id(&s.session_id);
-        out.push_str(s.harness.as_str());
-        out.push_str(" · ");
         out.push_str(&session_header(
+            s.harness,
+            s.subagent.as_deref(),
             &short,
             // Prefer the real cwd over the mangled directory name (ADR 0005),
             // as `sessions` and `projects` do.
@@ -800,9 +822,6 @@ pub fn format_results(
             s.timestamp.as_deref(),
             s.branch.as_deref(),
         ));
-        if let Some(name) = &s.subagent {
-            out.push_str(&format!(" [subagent: {name}]"));
-        }
         out.push('\n');
 
         // A cap of 0 means show every Match.
@@ -966,6 +985,24 @@ pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option
     stores.parse(handle).map(|session| turns_from_session(&session))
 }
 
+/// Parse a Session directly from a readable path, inferring its Harness from
+/// the JSONL envelope. This keeps the path-pipe form of `show -` independent of
+/// configured Store discovery.
+pub fn parse_transcript_path(path: &Path) -> Option<(Harness, Vec<Turn>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let harness = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|record| record.get("type").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .filter(|record_type| record_type == "session_meta")
+        .map_or(Harness::Claude, |_| Harness::Codex);
+    let parsed = match harness {
+        Harness::Claude => session::read(&text),
+        Harness::Codex => harness::codex_read(&text),
+    };
+    Some((harness, turns_from_session(&parsed)))
+}
+
 fn turns_from_session(session: &session::Session) -> Vec<Turn> {
     let tools = session::tool_index(&session.records);
     session.records.iter().filter_map(|record| turn_from_record(record, &tools)).collect()
@@ -1095,27 +1132,38 @@ fn push_wrapped(out: &mut String, text: &str) {
 }
 
 /// Render parsed [`Turn`]s as a human-readable Transcript (see CONTEXT.md):
-/// `you` / `claude` speaker headers, prose wrapped readably, tool calls as
+/// `you` / Harness speaker headers, prose wrapped readably, tool calls as
 /// compact one-liners, Failures flagged loudly with `✗ … FAILED`. Thinking is
 /// collapsed to a one-line count unless `show_thinking` is set. A Session with
 /// no Messages renders a clear placeholder.
 pub fn format_transcript(turns: &[Turn], show_thinking: bool) -> String {
+    format_transcript_for_harness(turns, show_thinking, Harness::Claude)
+}
+
+pub fn format_transcript_for_harness(
+    turns: &[Turn],
+    show_thinking: bool,
+    harness: Harness,
+) -> String {
     if turns.is_empty() {
         return "(no messages)\n".to_string();
     }
     let mut out = String::new();
     for turn in turns {
-        render_turn(&mut out, turn, show_thinking);
+        render_turn(&mut out, turn, show_thinking, harness);
     }
     out
 }
 
 /// Render one [`Turn`]: its speaker header (tool output has none) followed by
 /// its blocks, then a trailing blank line.
-fn render_turn(out: &mut String, turn: &Turn, show_thinking: bool) {
+fn render_turn(out: &mut String, turn: &Turn, show_thinking: bool, harness: Harness) {
     match turn.kind {
         TurnKind::Prompt => out.push_str("you\n"),
-        TurnKind::Reply => out.push_str("claude\n"),
+        TurnKind::Reply => {
+            out.push_str(harness.as_str());
+            out.push('\n');
+        }
         TurnKind::ToolOutput => {} // mechanical tool output: no speaker header
     }
     for block in &turn.blocks {
@@ -1141,6 +1189,16 @@ pub fn window_turns(turns: &[Turn], around: usize, context: usize) -> (&[Turn], 
 /// [`window_turns`]), bracketed by indicators of how many turns are hidden
 /// above and below so the reader knows where they are in the Session.
 pub fn format_windowed(turns: &[Turn], around: usize, context: usize, show_thinking: bool) -> String {
+    format_windowed_for_harness(turns, around, context, show_thinking, Harness::Claude)
+}
+
+pub fn format_windowed_for_harness(
+    turns: &[Turn],
+    around: usize,
+    context: usize,
+    show_thinking: bool,
+    harness: Harness,
+) -> String {
     let (window, above, below) = window_turns(turns, around, context);
     let mut out = String::new();
     if above > 0 {
@@ -1153,7 +1211,7 @@ pub fn format_windowed(turns: &[Turn], around: usize, context: usize, show_think
         out.push_str("(no turns in this window)\n");
     } else {
         for turn in window {
-            render_turn(&mut out, turn, show_thinking);
+            render_turn(&mut out, turn, show_thinking, harness);
         }
     }
     if below > 0 {
@@ -1388,6 +1446,8 @@ pub struct Failure {
 /// to display and reopen it — the failure-analysis analogue of [`SessionMatches`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFailures {
+    pub harness: Harness,
+    pub subagent: Option<String>,
     pub project: String,
     pub session_id: String,
     pub path: PathBuf,
@@ -1524,6 +1584,8 @@ fn failures_in_parsed_session(
         return None;
     }
     Some(SessionFailures {
+        harness: info.harness,
+        subagent: info.subagent.clone(),
         project: info.project.clone(),
         session_id: info.session_id.clone(),
         path: info.path.clone(),
@@ -1578,6 +1640,8 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
     for s in results {
         let short = short_id(&s.session_id);
         out.push_str(&session_header(
+            s.harness,
+            s.subagent.as_deref(),
             &short,
             // Prefer the real cwd over the mangled directory name (ADR 0005).
             s.cwd.as_deref().unwrap_or(&s.project),
@@ -2852,6 +2916,8 @@ mod tests {
 
     fn session_of(failures: Vec<Failure>) -> SessionFailures {
         SessionFailures {
+            harness: Harness::Claude,
+            subagent: None,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-rest".into(),
             path: PathBuf::from("/x/abcd1234-rest.jsonl"),
@@ -2956,6 +3022,8 @@ mod tests {
 
     fn one_failure(failure: Failure) -> SessionFailures {
         SessionFailures {
+            harness: Harness::Claude,
+            subagent: None,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-rest".into(),
             path: PathBuf::from("/x/abcd1234-rest.jsonl"),
@@ -2979,7 +3047,10 @@ mod tests {
 
         let out = format_failures(&[s], 3, false);
 
-        assert!(out.starts_with("abcd1234"), "header leads with the short id: {out}");
+        assert!(
+            out.starts_with("claude · abcd1234"),
+            "header leads with the Harness and short id: {out}"
+        );
         assert!(out.contains("[3] ✗ Bash"), "turn + failed tool: {out}");
         assert!(out.contains("cargo test"), "command shown: {out}");
         assert!(out.contains("exit 101 · error[E0433]: failed to resolve"), "salient line with exit: {out}");
