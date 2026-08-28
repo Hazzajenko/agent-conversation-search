@@ -450,6 +450,84 @@ fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
 }
 
 #[test]
+fn projects_merge_harnesses_and_cwdless_codex_sessions_stay_unscoped() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let encoded = agsearch::encode_project_dir(&workdir.path().to_string_lossy());
+    plant_project(
+        claude.path(),
+        &encoded.to_uppercase(),
+        &format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"claude project marker"}},"timestamp":"2026-01-01T10:00:00.000Z","cwd":{}}}"#,
+            serde_json::to_string(&workdir.path().to_string_lossy()).unwrap()
+        ),
+    );
+    plant_codex_session(
+        codex.path(),
+        "c0de0016-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-28T12:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex project marker"}]}}"#],
+    );
+    let cwdless_dir = codex.path().join("sessions/2026/08/28");
+    let cwdless_path = cwdless_dir.join("rollout-cwdless.jsonl");
+    fs::write(
+        &cwdless_path,
+        [
+            r#"{"timestamp":"2026-08-28T13:00:00.000Z","type":"session_meta","payload":{"id":"c0de0017-0000-0000-0000-000000000000","thread_source":"user"}}"#,
+            r#"{"timestamp":"2026-08-28T13:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"cwdless marker"}]}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--codex-dir")
+            .arg(codex.path());
+        command
+    };
+
+    command()
+        .arg("projects")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "{} · 2 sessions · 2026-08-28",
+            workdir.path().display()
+        )))
+        .stdout(predicates::str::contains(" · 1 session · 2026-08-28").not());
+    command()
+        .arg("codex project")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0016"));
+    command()
+        .arg("codex project")
+        .arg("--project")
+        .arg("tmp")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0016"));
+    command()
+        .arg("cwdless")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0017"));
+    command()
+        .arg("show")
+        .arg("c0de0017")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("cwdless marker"));
+}
+
+#[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
     let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
     let store = tempfile::tempdir().unwrap();

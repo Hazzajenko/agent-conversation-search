@@ -546,7 +546,11 @@ pub fn list_projects(project_dirs: &[PathBuf]) -> Vec<ProjectInfo> {
 
 /// List Projects derived from Sessions across every configured Store.
 pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
-    group_projects(list_store_sessions(stores, scope))
+    let sessions = list_store_sessions(stores, scope)
+        .into_iter()
+        .filter(|session| !session.project.is_empty())
+        .collect();
+    group_projects(sessions)
 }
 
 /// Fold a flat list of Sessions into Projects: group by the lower-cased
