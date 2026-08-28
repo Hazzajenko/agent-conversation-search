@@ -1018,7 +1018,7 @@ fn user_turn_block(block: &UserBlock, tools: &HashMap<String, (String, Option<St
     match block {
         UserBlock::Text(text) if !text.trim().is_empty() => Some(TurnBlock::Text(text.clone())),
         UserBlock::Text(_) => None,
-        UserBlock::ToolResult { is_error, tool_use_id, text } => {
+        UserBlock::ToolResult { is_error, tool_use_id, text, .. } => {
             let tool = tool_use_id.as_deref().and_then(|id| tools.get(id)).map(|(name, _)| name.clone());
             Some(TurnBlock::ToolResult { is_error: *is_error, tool, text: text.clone() })
         }
@@ -1496,7 +1496,7 @@ fn failures_in_parsed_session(
         })
         .flat_map(|(turn, blocks)| blocks.iter().map(move |block| (turn, block)))
         .filter_map(|(turn, block)| match block {
-            UserBlock::ToolResult { is_error: true, tool_use_id, text } => {
+            UserBlock::ToolResult { is_error: true, exit_code: inferred_exit_code, tool_use_id, text } => {
                 let (tool, command) = tool_use_id
                     .as_deref()
                     .and_then(|id| tools.get(id))
@@ -1505,7 +1505,7 @@ fn failures_in_parsed_session(
                     turn,
                     tool,
                     command,
-                    exit_code: exit_code(text),
+                    exit_code: (*inferred_exit_code).or_else(|| exit_code(text)),
                     error_text: text.clone(),
                 })
             }

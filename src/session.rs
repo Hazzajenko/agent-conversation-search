@@ -51,7 +51,12 @@ pub(crate) struct SessionMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UserBlock {
     Text(String),
-    ToolResult { is_error: bool, tool_use_id: Option<String>, text: String },
+    ToolResult {
+        is_error: bool,
+        exit_code: Option<i64>,
+        tool_use_id: Option<String>,
+        text: String,
+    },
 }
 
 /// One Block of an assistant Message's `content` array. An assistant Block can
@@ -194,6 +199,7 @@ fn user_block(block: &Value) -> Option<UserBlock> {
         Some("text") => block.get("text").and_then(|t| t.as_str()).map(|t| UserBlock::Text(t.to_string())),
         Some("tool_result") => Some(UserBlock::ToolResult {
             is_error: block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false),
+            exit_code: None,
             tool_use_id: block.get("tool_use_id").and_then(|i| i.as_str()).map(str::to_string),
             text: tool_result_text(block),
         }),
@@ -281,6 +287,7 @@ mod tests {
             records[1].kind,
             RecordKind::UserBlocks(vec![UserBlock::ToolResult {
                 is_error: true,
+                exit_code: None,
                 tool_use_id: Some("t1".into()),
                 text: "boom".into(),
             }])
