@@ -285,6 +285,54 @@ fn codex_show_and_session_search_use_the_transparent_id_handoff() {
 }
 
 #[test]
+fn codex_search_content_flags_match_claude_semantics() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    plant_codex_session(
+        codex.path(),
+        "c0de0011-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[
+            r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"reasoning-only-needle"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"exec_command","input":"{\"cmd\":\"tool-call-needle\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"tool-output-needle"}}"#,
+        ],
+    );
+    let command = |query: &str| {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(workdir.path().join("missing-claude"))
+            .arg("--codex-dir")
+            .arg(codex.path())
+            .arg(query);
+        command
+    };
+
+    command("needle")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+    command("reasoning-only")
+        .arg("--thinking")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("reasoning-only-needle"));
+    command("tool-output")
+        .arg("--tools")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("tool-output-needle"));
+    command("tool-call")
+        .arg("--all-content")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("tool-call-needle"));
+}
+
+#[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
     let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
     let store = tempfile::tempdir().unwrap();
