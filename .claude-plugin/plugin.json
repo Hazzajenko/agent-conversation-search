@@ -1,12 +1,12 @@
 {
-  "name": "ccsearch",
-  "description": "Search your local Claude Code conversation history from any project, to recall past sessions.",
+  "name": "agsearch",
+  "description": "Search local Claude Code and Codex conversation history from any project.",
   "version": "0.1.0",
   "author": {
     "name": "Harry Jenkins",
     "email": "jenkinsh1@outlook.com"
   },
   "license": "MIT",
-  "keywords": ["search", "conversation-history", "claude-code", "recall"],
-  "skills": ["./skills/ccsearch"]
+  "keywords": ["search", "conversation-history", "claude-code", "codex", "recall"],
+  "skills": ["./skills/agsearch"]
 }

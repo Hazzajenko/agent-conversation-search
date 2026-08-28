@@ -1,7 +1,7 @@
 ---
 name: agsearch
 description: >-
-  Search your local Claude Code conversation history with the `agsearch` CLI.
+  Search local Claude Code and Codex conversation history with the `agsearch` CLI.
   Use when the user asks to recall, find, or reopen a PAST session ("did we
   ever discuss X", "find the conversation where we set up Y", "what did I
   decide about Z last week"), to list past sessions or projects, or to analyse
@@ -10,13 +10,11 @@ description: >-
   files (use Grep/Glob for that).
 ---
 
-# agsearch: search past Claude Code conversations
+# agsearch: search past coding conversations
 
-`agsearch` is a Rust CLI that searches the user's local Claude Code transcripts
-(the `.jsonl` files under `~/.claude/projects/`). This skill is thin glue: the
-binary does the mechanical work, you interpret the results, drill in, and
-summarise. Run `agsearch --help` for the full flag surface — this file only
-records what `--help` cannot tell you.
+`agsearch` searches local Claude Code and Codex transcripts. It searches both
+Stores by default. Use the binary to find and render Sessions, then interpret
+and summarise the output. Run `agsearch --help` for the full flag list.
 
 If `agsearch --version` fails, the binary is not installed; tell the user to
 `cargo install --path .` from a clone of this repo rather than guessing at
@@ -75,7 +73,11 @@ when the user asks about a different project, reach for a scope flag:
 - `--tools` matches tool input serialised as raw JSON, so structural tokens
   match noisily — a fallback, not a first pass.
 - Windows and WSL keep separate histories; `--claude-dir` points at the other
-  one.
+  Claude Store and `--codex-dir` points at the other Codex Store.
+- Use `--harness claude` or `--harness codex` only when the user names a
+  Harness. The default cross-Store search is better when the Harness is unknown.
+- Codex subagent Sessions are excluded by default. Use `--include-subagents`
+  when the user asks about worker activity. The output marks those Sessions.
 - Output is human-readable only (no JSON mode); read it directly.
 - Too many capped sessions? Raise `-m` (default 3 matches shown per session,
   `0` = unlimited) or narrow the terms.

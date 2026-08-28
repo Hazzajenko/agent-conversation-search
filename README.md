@@ -1,15 +1,14 @@
 # agsearch
 
-Search your local Claude Code conversation history from the command line.
+Search your local coding conversation history from the command line.
 
-Claude Code records every conversation as a `.jsonl` transcript under
-`~/.claude/projects/`. `agsearch` searches those transcripts — so you can find
-the session where you figured something out, reopen a past conversation, or see
-what tool calls have been failing — without leaving the terminal.
+Claude Code and Codex record conversations as `.jsonl` transcripts. `agsearch`
+searches both Stores by default, so you do not need to remember which Harness
+you used.
 
 ```console
 $ agsearch "borrow checker"
-d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
+claude · d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
   [14] user: how do I satisfy the borrow checker here without cloning
   [16] assistant: …the borrow checker is complaining because the reference outlives…
   … +3 more  ›  agsearch show d712581e
@@ -19,10 +18,8 @@ $ agsearch show d712581e        # reopen the whole conversation
 
 ## Why
 
-Claude Code has no built-in way to look back over your own history. The
-transcripts are on disk, but the directory names are mangled
-(`E:\projects\rust` → `E--projects-rust`) and each file is a stream of JSON
-records, not something you can skim. `agsearch` turns that pile into three jobs:
+The transcripts use Harness-specific layouts and JSON formats. `agsearch`
+turns them into three jobs:
 
 - **find** a conversation — `agsearch <query>`
 - **read** a conversation — `agsearch show <id>`
@@ -39,10 +36,12 @@ cargo install --path .          # installs the `agsearch` binary onto your PATH
 cargo build --release           # ./target/release/agsearch
 ```
 
-`agsearch` reads `$CLAUDE_CONFIG_DIR` (falling back to `~/.claude`) to find your
-history. Override it per-run with `--claude-dir <PATH>`. Note that Windows and
-WSL keep **separate** histories — run `agsearch` from the environment whose
-sessions you want to search, or point `--claude-dir` at the other one.
+`agsearch` reads `$CLAUDE_CONFIG_DIR` or `~/.claude` for Claude Code and
+`$CODEX_HOME` or `~/.codex` for Codex. Use `--claude-dir <PATH>` or
+`--codex-dir <PATH>` to override a Store. A missing Store is skipped.
+
+Windows and WSL keep separate histories. Run `agsearch` in the environment that
+has the Sessions, or point the Store flags at the other environment.
 
 ## The core workflow
 
@@ -79,6 +78,8 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `--all-content` | search everything (`--thinking --tools`) |
 | `-m`, `--max-per-session <N>` | cap matches shown per Session (`0` = unlimited; default 3) |
 | `-l`, `--files` | print only matching file paths, for piping |
+| `--harness <claude\|codex>` | search only one Harness |
+| `--include-subagents` | include Codex subagent Sessions and mark them in output |
 
 By default only Prompts, Replies, and Titles are searched — thinking and tool
 content are opt-in.
@@ -105,8 +106,8 @@ search for. Each row is paste-able into `show`.
 
 ```console
 $ agsearch sessions
-de151981 · E:\projects\rust\demo · Test app runtime and functionality · 2026-06-02 · main
-d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
+codex · de151981 · E:\projects\rust\demo · Test app runtime and functionality · 2026-06-02
+claude · d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
 ```
 
 ### `projects` — list projects
@@ -159,6 +160,10 @@ listing verbs:
 | `--session <prefix>` | a single Session, by id-prefix | search |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 
+The default scope merges Sessions from both Harnesses by their encoded working
+directory. `projects` shows one row when both Harnesses used the same directory.
+Codex subagent Sessions stay excluded unless you pass `--include-subagents`.
+
 ## Output and exit codes
 
 - Output is colorized on a TTY and plain when piped or under `NO_COLOR`.
@@ -176,8 +181,8 @@ thin glue over the same binary, so install `agsearch` on your PATH first.
 
 ## Concepts
 
-The precise vocabulary this tool is built around — **Project, Session, Record,
-Message, Query, Match, Failure, Store** — lives in [`CONTEXT.md`](CONTEXT.md).
+The precise vocabulary this tool is built around — **Harness, Project, Session,
+Record, Message, Query, Match, Failure, Store** — lives in [`CONTEXT.md`](CONTEXT.md).
 The reasoning behind the bigger design decisions is in
 [`docs/adr/`](docs/adr/) (locating Projects, the verb/handoff model, failure
 grouping, the listing verbs).

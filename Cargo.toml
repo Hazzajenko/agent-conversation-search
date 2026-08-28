@@ -2,7 +2,7 @@
 name = "agsearch"
 version = "0.1.0"
 edition = "2021"
-description = "Search your local Claude Code conversation history"
+description = "Search local coding conversation history across Harnesses"
 license = "MIT"
 
 [[bin]]

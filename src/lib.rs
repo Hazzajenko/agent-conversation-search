@@ -1,4 +1,4 @@
-//! `agsearch` — search your local Claude Code conversation history.
+//! `agsearch` searches local coding conversation history across Harnesses.
 
 mod harness;
 mod session;
@@ -2243,7 +2243,7 @@ mod tests {
     }
 
     #[test]
-    fn header_leads_with_the_short_session_id() {
+    fn header_leads_with_the_harness_and_short_session_id() {
         let s = session(
             "E--projects-demo",
             Some("Borrow chat"),
@@ -2253,7 +2253,10 @@ mod tests {
         let out = format_results(&[s], &lit("borrow"), 0, false);
 
         // The helper's session_id is 11111111-2222-… so the short id is 11111111.
-        assert!(out.lines().next().unwrap().starts_with("11111111"), "header leads with short id: {out}");
+        assert!(
+            out.lines().next().unwrap().starts_with("claude · 11111111"),
+            "header leads with Harness and short id: {out}"
+        );
     }
 
     #[test]
