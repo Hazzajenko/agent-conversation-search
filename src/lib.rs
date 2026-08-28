@@ -251,6 +251,7 @@ pub struct Match {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMatches {
     pub harness: Harness,
+    pub subagent: Option<String>,
     /// The Project directory name the Session lives in.
     pub project: String,
     /// The Session id (the `.jsonl` file stem).
@@ -305,7 +306,7 @@ pub fn search_stores(
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Vec<SessionMatches> {
-    let sessions = stores.sessions(scope, false);
+    let sessions = stores.sessions(scope);
     let mut results: Vec<SessionMatches> = sessions
         .par_iter()
         .filter_map(|handle| {
@@ -353,6 +354,7 @@ fn search_parsed_session(
     }
     Some(SessionMatches {
         harness,
+        subagent: info.subagent.clone(),
         project: info.project.clone(),
         session_id: info.session_id.clone(),
         path: info.path.clone(),
@@ -429,6 +431,7 @@ fn search_one_session(
     let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     Some(SessionMatches {
         harness: Harness::Claude,
+        subagent: None,
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
@@ -446,6 +449,7 @@ fn search_one_session(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub harness: Harness,
+    pub subagent: Option<String>,
     /// The Project directory name the Session lives in.
     pub project: String,
     /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
@@ -482,7 +486,7 @@ pub fn list_sessions(project_dirs: &[PathBuf]) -> Vec<SessionInfo> {
 
 /// List Sessions enumerated by every configured Harness adapter.
 pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionInfo> {
-    stores.sessions(scope, false).into_iter().map(|session| session.info).collect()
+    stores.sessions(scope).into_iter().map(|session| session.info).collect()
 }
 
 /// Read a Session's header metadata (Title, newest timestamp, branch) without
@@ -500,6 +504,7 @@ fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
     let meta = session::read(&text).meta;
     Some(SessionInfo {
         harness: Harness::Claude,
+        subagent: None,
         project: project.to_string(),
         session_id,
         path: path.to_path_buf(),
@@ -722,6 +727,9 @@ pub fn format_sessions(sessions: &[SessionInfo]) -> String {
             s.timestamp.as_deref(),
             s.branch.as_deref(),
         ));
+        if let Some(name) = &s.subagent {
+            out.push_str(&format!(" [subagent: {name}]"));
+        }
         out.push('\n');
     }
     out
@@ -788,6 +796,9 @@ pub fn format_results(
             s.timestamp.as_deref(),
             s.branch.as_deref(),
         ));
+        if let Some(name) = &s.subagent {
+            out.push_str(&format!(" [subagent: {name}]"));
+        }
         out.push('\n');
 
         // A cap of 0 means show every Match.
@@ -844,7 +855,7 @@ pub enum StoreSessionRef {
 }
 
 pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessionRef {
-    let sessions = stores.all_sessions(false);
+    let sessions = stores.all_sessions();
     if let Some(exact) = sessions.iter().find(|session| session.info.session_id == prefix) {
         return StoreSessionRef::Unique(exact.clone());
     }
@@ -1408,7 +1419,7 @@ pub fn failed_in_stores(
     scope: &Scope,
     matcher: Option<&Matcher>,
 ) -> Vec<SessionFailures> {
-    let sessions = stores.sessions(scope, false);
+    let sessions = stores.sessions(scope);
     let mut results: Vec<SessionFailures> = sessions
         .par_iter()
         .filter_map(|handle| {
@@ -1449,6 +1460,7 @@ fn failures_in_one_session(
     let session = session::read(&text);
     let info = SessionInfo {
         harness: Harness::Claude,
+        subagent: None,
         project: project.to_string(),
         session_id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
         path: path.to_path_buf(),
@@ -2039,6 +2051,7 @@ mod tests {
     fn format_sessions_reuses_the_search_header_and_falls_back_to_untitled() {
         let info = SessionInfo {
             harness: Harness::Claude,
+            subagent: None,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
@@ -2050,7 +2063,7 @@ mod tests {
         let out = format_sessions(std::slice::from_ref(&info));
         // Byte-identical to a search Session header (ADR 0004): short-id leads,
         // (untitled) fallback, date sliced to its prefix, branch last.
-        assert_eq!(out, "abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
+        assert_eq!(out, "claude · abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
 
         assert_eq!(format_sessions(&[]), "No sessions.\n");
     }
@@ -2063,6 +2076,7 @@ mod tests {
         // unit `--project` matches is unaffected; only the display label changes.
         let info = SessionInfo {
             harness: Harness::Claude,
+            subagent: None,
             project: "E--projects-demo".into(),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
@@ -2072,7 +2086,7 @@ mod tests {
             cwd: Some(r"E:\projects\demo".into()),
         };
         let out = format_sessions(std::slice::from_ref(&info));
-        assert_eq!(out, "abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
+        assert_eq!(out, "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
     }
 
     /// A bare [`SessionInfo`] for a directory, dated and with a cwd — for
@@ -2080,6 +2094,7 @@ mod tests {
     fn sess(dir: &str, id: &str, timestamp: Option<&str>, cwd: Option<&str>) -> SessionInfo {
         SessionInfo {
             harness: Harness::Claude,
+            subagent: None,
             project: dir.into(),
             session_id: id.into(),
             path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
@@ -2148,6 +2163,7 @@ mod tests {
             .collect();
         SessionMatches {
             harness: Harness::Claude,
+            subagent: None,
             project: project.into(),
             session_id: "11111111-2222-3333-4444-555555555555".into(),
             path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
@@ -2257,6 +2273,7 @@ mod tests {
     fn a_title_match_shows_no_turn_bracket() {
         let s = SessionMatches {
             harness: Harness::Claude,
+            subagent: None,
             project: "p".into(),
             session_id: "abcd1234-rest".into(),
             path: PathBuf::from("/x/abcd1234-rest.jsonl"),

@@ -64,7 +64,12 @@ fn plant_codex_session(
         "payload": {
             "id": id,
             "cwd": cwd.to_string_lossy(),
-            "thread_source": thread_source
+            "thread_source": thread_source,
+            "source": if thread_source == "subagent" {
+                serde_json::json!({"subagent": {"other": "fixture-worker"}})
+            } else {
+                serde_json::json!("cli")
+            }
         }
     });
     let text = std::iter::once(meta.to_string())
@@ -189,6 +194,50 @@ fn codex_subagents_are_excluded_and_forked_sessions_remain_independent() {
         .stdout(predicates::str::contains("c0de0003"))
         .stdout(predicates::str::contains("c0de0004"))
         .stdout(predicates::str::contains("c0de0005").not());
+}
+
+#[test]
+fn include_subagents_makes_workers_searchable_listable_and_showable() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    plant_codex_session(
+        codex.path(),
+        "c0de0015-0000-0000-0000-000000000000",
+        workdir.path(),
+        "subagent",
+        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker-only marker"}]}}"#],
+    );
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(workdir.path().join("missing-claude"))
+            .arg("--codex-dir")
+            .arg(codex.path())
+            .arg("--include-subagents");
+        command
+    };
+
+    command()
+        .arg("worker-only")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0015"))
+        .stdout(predicates::str::contains("[subagent: fixture-worker]"));
+    command()
+        .arg("sessions")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("c0de0015"))
+        .stdout(predicates::str::contains("[subagent: fixture-worker]"));
+    command()
+        .arg("show")
+        .arg("c0de0015")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("worker-only marker"));
 }
 
 #[test]
