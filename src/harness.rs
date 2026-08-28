@@ -23,7 +23,6 @@ impl Harness {
 }
 
 pub(crate) trait HarnessAdapter: Send + Sync {
-    fn harness(&self) -> Harness;
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionInfo>;
     fn parse(&self, path: &Path) -> Option<Session>;
 }
@@ -39,10 +38,6 @@ impl ClaudeAdapter {
 }
 
 impl HarnessAdapter for ClaudeAdapter {
-    fn harness(&self) -> Harness {
-        Harness::Claude
-    }
-
     fn enumerate(&self, _include_subagents: bool) -> Vec<SessionInfo> {
         let Ok(projects) = std::fs::read_dir(&self.projects_root) else {
             return Vec::new();
@@ -103,10 +98,6 @@ impl CodexAdapter {
 }
 
 impl HarnessAdapter for CodexAdapter {
-    fn harness(&self) -> Harness {
-        Harness::Codex
-    }
-
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionInfo> {
         let titles = codex_titles(&self.codex_dir.join("session_index.jsonl"));
         self.rollout_paths()
@@ -189,7 +180,7 @@ fn visit_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn codex_read(text: &str) -> Session {
+pub(crate) fn codex_read(text: &str) -> Session {
     let mut meta = crate::session::SessionMeta::default();
     let mut records = Vec::new();
     let mut turn = 0;
@@ -279,37 +270,58 @@ fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
 
 fn codex_tool_output(output: Option<&Value>) -> (String, bool, Option<i64>) {
     let raw = match output {
-        Some(Value::String(text)) => text.clone(),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value.get("output").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| text.clone()),
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|item| item.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
+        Some(Value::Object(object)) => object
+            .get("output")
+            .or_else(|| object.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| serde_json::to_string(object).unwrap_or_default()),
         _ => String::new(),
     };
-    let parsed = serde_json::from_str::<Value>(&raw).ok();
-    let exit_code = parsed
-        .as_ref()
-        .and_then(|value| value.get("exit_code"))
-        .and_then(Value::as_i64)
-        .or_else(|| codex_text_exit_code(&raw));
-    let structural_error = parsed.as_ref().is_some_and(|value| {
-        value
-            .get("isError")
-            .or_else(|| value.get("is_error"))
-            .and_then(Value::as_bool)
-            == Some(true)
-    });
+    let (structural_error, structured_exit_code) = output.map(codex_structured_failure).unwrap_or_default();
+    let exit_code = structured_exit_code.or_else(|| codex_text_exit_code(&raw));
     let is_error = structural_error
         || exit_code.is_some_and(|code| code != 0)
         || raw.contains("<tool_use_error>");
-    let text = parsed
-        .as_ref()
-        .and_then(|value| value.get("output"))
-        .and_then(Value::as_str)
-        .unwrap_or(&raw)
-        .to_string();
-    (text, is_error, exit_code)
+    (raw, is_error, exit_code)
+}
+
+fn codex_structured_failure(value: &Value) -> (bool, Option<i64>) {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .map(|parsed| codex_structured_failure(&parsed))
+            .unwrap_or_default(),
+        Value::Array(items) => items.iter().fold((false, None), |(failed, code), item| {
+            let (item_failed, item_code) = codex_structured_failure(item);
+            (failed || item_failed, code.or(item_code))
+        }),
+        Value::Object(object) => {
+            let exit_code = object.get("exit_code").and_then(Value::as_i64);
+            let is_error = object
+                .get("isError")
+                .or_else(|| object.get("is_error"))
+                .and_then(Value::as_bool)
+                == Some(true)
+                || exit_code.is_some_and(|code| code != 0);
+            let nested = object
+                .get("structuredContent")
+                .or_else(|| object.get("content"))
+                .map(codex_structured_failure)
+                .unwrap_or_default();
+            (is_error || nested.0, exit_code.or(nested.1))
+        }
+        _ => (false, None),
+    }
 }
 
 fn codex_text_exit_code(text: &str) -> Option<i64> {
@@ -330,7 +342,7 @@ fn codex_text_exit_code(text: &str) -> Option<i64> {
 #[derive(Clone)]
 pub struct SessionHandle {
     pub info: SessionInfo,
-    adapter: usize,
+    adapter_index: usize,
 }
 
 pub struct Stores {
@@ -339,10 +351,6 @@ pub struct Stores {
 }
 
 impl Stores {
-    pub fn empty() -> Self {
-        Self { adapters: Vec::new(), include_subagents: false }
-    }
-
     pub fn with_claude(claude_dir: &Path) -> Self {
         Self { adapters: vec![Box::new(ClaudeAdapter::discover(claude_dir))], include_subagents: false }
     }
@@ -368,13 +376,13 @@ impl Stores {
 
     pub(crate) fn sessions(&self, scope: &Scope) -> Vec<SessionHandle> {
         let mut sessions = Vec::new();
-        for (adapter, source) in self.adapters.iter().enumerate() {
+        for (adapter_index, adapter) in self.adapters.iter().enumerate() {
             sessions.extend(
-                source
+                adapter
                     .enumerate(self.include_subagents)
                     .into_iter()
                     .filter(|info| in_scope(info, scope))
-                    .map(|info| SessionHandle { info, adapter }),
+                    .map(|info| SessionHandle { info, adapter_index }),
             );
         }
         sessions.sort_by(|a, b| {
@@ -391,18 +399,9 @@ impl Stores {
     }
 
     pub(crate) fn parse(&self, session: &SessionHandle) -> Option<Session> {
-        self.adapters.get(session.adapter)?.parse(&session.info.path)
+        self.adapters.get(session.adapter_index)?.parse(&session.info.path)
     }
 
-    pub(crate) fn harness(&self, session: &SessionHandle) -> Harness {
-        self.adapters[session.adapter].harness()
-    }
-
-    pub fn session_for_path(&self, path: &Path) -> Option<SessionHandle> {
-        self.all_sessions()
-            .into_iter()
-            .find(|session| session.info.path == path)
-    }
 }
 
 fn in_scope(info: &SessionInfo, scope: &Scope) -> bool {
@@ -493,5 +492,19 @@ mod tests {
                     } if text == "compile failed"
                 )
         ));
+    }
+
+    #[test]
+    fn codex_tool_outputs_detect_structured_failures() {
+        assert_eq!(
+            codex_tool_output(Some(&serde_json::json!({"exit_code": 2, "output": "bad"}))),
+            ("bad".into(), true, Some(2))
+        );
+        assert_eq!(
+            codex_tool_output(Some(&serde_json::json!([
+                {"text": "nested failure", "isError": true}
+            ]))),
+            ("nested failure".into(), true, None)
+        );
     }
 }
