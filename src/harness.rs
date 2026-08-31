@@ -24,9 +24,16 @@ impl Harness {
 }
 
 pub(crate) trait HarnessAdapter: Send + Sync {
+    fn harness(&self) -> Harness;
+    fn recognizes(&self, text: &str) -> bool;
+    fn parse_text(&self, text: &str) -> Option<Session>;
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity>;
-    fn parse(&self, path: &Path) -> Option<Session>;
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity>;
+
+    fn parse(&self, path: &Path) -> Option<Session> {
+        let text = std::fs::read_to_string(path).ok()?;
+        self.recognizes(&text).then(|| self.parse_text(&text)).flatten()
+    }
 }
 
 pub(crate) struct ClaudeAdapter {
@@ -66,7 +73,7 @@ impl ClaudeAdapter {
         Some(SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: Some(project.into()),
+            project: Some(ProjectKey::from_encoded(project)),
             session_id,
             path,
             title: parsed.meta.title,
@@ -86,12 +93,20 @@ impl ClaudeAdapter {
 }
 
 impl HarnessAdapter for ClaudeAdapter {
-    fn enumerate(&self, _include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(None)
+    fn harness(&self) -> Harness {
+        Harness::Claude
     }
 
-    fn parse(&self, path: &Path) -> Option<Session> {
-        std::fs::read_to_string(path).ok().map(|text| crate::session::read(&text))
+    fn recognizes(&self, _text: &str) -> bool {
+        true
+    }
+
+    fn parse_text(&self, text: &str) -> Option<Session> {
+        Some(crate::session::read(text))
+    }
+
+    fn enumerate(&self, _include_subagents: bool) -> Vec<SessionIdentity> {
+        self.sessions(None)
     }
 
     fn matching(&self, prefix: &str, _include_subagents: bool) -> Vec<SessionIdentity> {
@@ -110,6 +125,13 @@ impl CodexAdapter {
             codex_dir: codex_dir.to_path_buf(),
             titles: codex_titles(&codex_dir.join("session_index.jsonl")),
         }
+    }
+
+    fn for_session_path(path: &Path) -> Self {
+        codex_store_root(path).map_or_else(
+            || Self { codex_dir: PathBuf::new(), titles: Default::default() },
+            |root| Self::discover(&root),
+        )
     }
 
     fn rollout_paths(&self) -> Vec<PathBuf> {
@@ -142,20 +164,26 @@ impl CodexAdapter {
 }
 
 impl HarnessAdapter for CodexAdapter {
-    fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(None, include_subagents)
+    fn harness(&self) -> Harness {
+        Harness::Codex
     }
 
-    fn parse(&self, path: &Path) -> Option<Session> {
-        let text = std::fs::read_to_string(path).ok()?;
-        let meta = codex_meta(&text)?;
+    fn recognizes(&self, text: &str) -> bool {
+        codex_meta(text).is_some()
+    }
+
+    fn parse_text(&self, text: &str) -> Option<Session> {
+        let meta = codex_meta(text)?;
         let session_id = meta
             .pointer("/payload/id")
             .or_else(|| meta.pointer("/payload/session_id"))?
-            .as_str()?
-            .to_string();
-        let title = self.titles.get(&session_id).cloned();
-        Some(codex_read_with_title(&text, title))
+            .as_str()?;
+        let title = self.titles.get(session_id).cloned();
+        Some(codex_read_with_title(text, title))
+    }
+
+    fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity> {
+        self.sessions(None, include_subagents)
     }
 
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity> {
@@ -429,18 +457,16 @@ fn codex_text_exit_code(text: &str) -> Option<i64> {
 
 pub(crate) fn parse_session_path(path: &Path) -> Option<(Harness, Session)> {
     let text = std::fs::read_to_string(path).ok()?;
-    if let Some(meta) = codex_meta(&text) {
-        let session_id = meta
-            .pointer("/payload/id")
-            .or_else(|| meta.pointer("/payload/session_id"))
-            .and_then(Value::as_str);
-        let title = codex_store_root(path).and_then(|root| {
-            let id = session_id?;
-            codex_titles(&root.join("session_index.jsonl")).get(id).cloned()
-        });
-        return Some((Harness::Codex, codex_read_with_title(&text, title)));
-    }
-    Some((Harness::Claude, crate::session::read(&text)))
+    let adapters: [Box<dyn HarnessAdapter>; 2] = [
+        Box::new(CodexAdapter::for_session_path(path)),
+        Box::new(ClaudeAdapter { projects_root: PathBuf::new() }),
+    ];
+    adapters.into_iter().find_map(|adapter| {
+        adapter
+            .recognizes(&text)
+            .then(|| adapter.parse_text(&text).map(|session| (adapter.harness(), session)))
+            .flatten()
+    })
 }
 
 fn codex_store_root(path: &Path) -> Option<PathBuf> {
@@ -567,7 +593,7 @@ mod tests {
         let parsed = adapter.parse(&path).unwrap();
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].project.as_deref(), Some("E--projects-demo"));
+        assert_eq!(sessions[0].project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
         assert_eq!(parsed.records.len(), 1);
     }
 
@@ -585,6 +611,7 @@ mod tests {
                 r#"{"timestamp":"2026-08-28T10:02:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}}"#,
                 r#"{"timestamp":"2026-08-28T10:03:00Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"bad","name":"exec","input":"{\"cmd\":\"cargo test\"}"}}"#,
                 r#"{"timestamp":"2026-08-28T10:04:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"bad","output":"{\"exit_code\":101,\"output\":\"compile failed\"}"}}"#,
+                r#"{"timestamp":"2026-08-28T10:05:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
             ]
             .join("\n"),
         )
@@ -601,9 +628,9 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "c0de0001-0000-0000-0000-000000000000");
-        assert_eq!(sessions[0].project.as_deref(), Some("E--projects-demo"));
+        assert_eq!(sessions[0].project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
         assert_eq!(sessions[0].title.as_deref(), Some("Indexed title"));
-        assert_eq!(parsed.records.len(), 4);
+        assert_eq!(parsed.records.len(), 5);
         assert_eq!(parsed.meta.title.as_deref(), Some("Indexed title"));
         assert_eq!(parsed.records[0].kind, crate::session::RecordKind::Prompt("prompt".into()));
         assert!(matches!(
@@ -625,7 +652,7 @@ mod tests {
                 )
         ));
         let turns: Vec<_> = parsed.records.iter().map(|record| record.turn).collect();
-        assert_eq!(turns, vec![Some(1), Some(2), Some(2), Some(2)]);
+        assert_eq!(turns, vec![Some(1), Some(2), Some(3), Some(3), Some(3)]);
     }
 
     #[test]
@@ -665,6 +692,7 @@ mod tests {
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run tests"}]}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call","call_id":"fn-1","name":"shell","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"fn-1","output":"{\"exit_code\":1,\"output\":\"failed\"}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
             ]
             .join("\n"),
         )
