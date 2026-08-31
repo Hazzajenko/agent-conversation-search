@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::session::Session;
-use crate::{Scope, SessionIdentity};
+use crate::{ProjectKey, Scope, SessionIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -66,7 +66,7 @@ impl ClaudeAdapter {
         Some(SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: Some(project),
+            project: Some(project.into()),
             session_id,
             path,
             title: parsed.meta.title,
@@ -75,14 +75,19 @@ impl ClaudeAdapter {
             cwd: parsed.meta.cwd,
         })
     }
+
+    fn sessions(&self, prefix: Option<&str>) -> Vec<SessionIdentity> {
+        self.session_paths()
+            .into_iter()
+            .filter(|(_, session_id, _)| prefix.is_none_or(|prefix| session_id.starts_with(prefix)))
+            .filter_map(|(project, session_id, path)| self.session_info(project, session_id, path))
+            .collect()
+    }
 }
 
 impl HarnessAdapter for ClaudeAdapter {
     fn enumerate(&self, _include_subagents: bool) -> Vec<SessionIdentity> {
-        self.session_paths()
-            .into_iter()
-            .filter_map(|(project, session_id, path)| self.session_info(project, session_id, path))
-            .collect()
+        self.sessions(None)
     }
 
     fn parse(&self, path: &Path) -> Option<Session> {
@@ -90,11 +95,7 @@ impl HarnessAdapter for ClaudeAdapter {
     }
 
     fn matching(&self, prefix: &str, _include_subagents: bool) -> Vec<SessionIdentity> {
-        self.session_paths()
-            .into_iter()
-            .filter(|(_, session_id, _)| session_id.starts_with(prefix))
-            .filter_map(|(project, session_id, path)| self.session_info(project, session_id, path))
-            .collect()
+        self.sessions(Some(prefix))
     }
 }
 
@@ -117,17 +118,32 @@ impl CodexAdapter {
         files.sort();
         files
     }
-}
 
-impl HarnessAdapter for CodexAdapter {
-    fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity> {
+    fn sessions(&self, prefix: Option<&str>, include_subagents: bool) -> Vec<SessionIdentity> {
         self.rollout_paths()
             .into_iter()
             .filter_map(|path| {
+                if let Some(prefix) = prefix {
+                    let first = read_first_line(&path)?;
+                    let meta = codex_meta(&first)?;
+                    let session_id = meta
+                        .pointer("/payload/id")
+                        .or_else(|| meta.pointer("/payload/session_id"))?
+                        .as_str()?;
+                    if !session_id.starts_with(prefix) {
+                        return None;
+                    }
+                }
                 let text = std::fs::read_to_string(&path).ok()?;
                 codex_session_info(path, &text, &self.titles, include_subagents)
             })
             .collect()
+    }
+}
+
+impl HarnessAdapter for CodexAdapter {
+    fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity> {
+        self.sessions(None, include_subagents)
     }
 
     fn parse(&self, path: &Path) -> Option<Session> {
@@ -143,22 +159,7 @@ impl HarnessAdapter for CodexAdapter {
     }
 
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity> {
-        self.rollout_paths()
-            .into_iter()
-            .filter_map(|path| {
-                let first = read_first_line(&path)?;
-                let meta = codex_meta(&first)?;
-                let session_id = meta
-                    .pointer("/payload/id")
-                    .or_else(|| meta.pointer("/payload/session_id"))?
-                    .as_str()?;
-                if !session_id.starts_with(prefix) {
-                    return None;
-                }
-                let text = std::fs::read_to_string(&path).ok()?;
-                codex_session_info(path, &text, &self.titles, include_subagents)
-            })
-            .collect()
+        self.sessions(Some(prefix), include_subagents)
     }
 }
 
@@ -201,7 +202,7 @@ fn codex_session_info(
     Some(SessionIdentity {
         harness: Harness::Codex,
         subagent,
-        project: cwd.as_deref().map(crate::encode_project_dir),
+        project: cwd.as_deref().map(ProjectKey::from_cwd),
         session_id,
         path,
         title,
@@ -244,8 +245,7 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
     let mut meta = crate::session::SessionMeta::default();
     let mut records = crate::session::RecordBuilder::default();
     if let Some(title) = title {
-        meta.title = Some(title.clone());
-        records.push(false, Some(crate::session::RecordKind::Title(title)));
+        meta.title = Some(title);
     }
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -268,21 +268,14 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
         let Some(payload) = value.get("payload") else {
             continue;
         };
-        records.push(codex_advances_turn(payload), codex_record_kind(payload));
+        let kind = codex_record_kind(payload);
+        if payload.get("type").and_then(Value::as_str) == Some("message") {
+            records.message(kind);
+        } else {
+            records.attached(kind);
+        }
     }
     Session { meta, records: records.finish() }
-}
-
-fn codex_advances_turn(payload: &Value) -> bool {
-    matches!(
-        payload.get("type").and_then(Value::as_str),
-        Some("message")
-            | Some("reasoning")
-            | Some("custom_tool_call")
-            | Some("custom_tool_call_output")
-            | Some("function_call")
-            | Some("function_call_output")
-    )
 }
 
 fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
@@ -544,12 +537,12 @@ fn in_scope(info: &SessionIdentity, scope: &Scope) -> bool {
         Scope::All => true,
         Scope::Current { cwd } => info
             .project
-            .as_deref()
-            .is_some_and(|project| project.eq_ignore_ascii_case(&crate::encode_project_dir(cwd))),
+            .as_ref()
+            .is_some_and(|project| project.matches_cwd(cwd)),
         Scope::Project { name_substring } => info
             .project
-            .as_deref()
-            .is_some_and(|project| project.to_lowercase().contains(&name_substring.to_lowercase())),
+            .as_ref()
+            .is_some_and(|project| project.contains_ignore_case(name_substring)),
     }
 }
 
@@ -610,19 +603,16 @@ mod tests {
         assert_eq!(sessions[0].session_id, "c0de0001-0000-0000-0000-000000000000");
         assert_eq!(sessions[0].project.as_deref(), Some("E--projects-demo"));
         assert_eq!(sessions[0].title.as_deref(), Some("Indexed title"));
-        assert_eq!(parsed.records.len(), 5);
-        assert_eq!(
-            parsed.records[0].kind,
-            crate::session::RecordKind::Title("Indexed title".into())
-        );
-        assert_eq!(parsed.records[1].kind, crate::session::RecordKind::Prompt("prompt".into()));
+        assert_eq!(parsed.records.len(), 4);
+        assert_eq!(parsed.meta.title.as_deref(), Some("Indexed title"));
+        assert_eq!(parsed.records[0].kind, crate::session::RecordKind::Prompt("prompt".into()));
         assert!(matches!(
-            &parsed.records[2].kind,
+            &parsed.records[1].kind,
             crate::session::RecordKind::Assistant(blocks)
                 if blocks == &vec![crate::session::AssistantBlock::Text("reply".into())]
         ));
         assert!(matches!(
-            &parsed.records[4].kind,
+            &parsed.records[3].kind,
             crate::session::RecordKind::UserBlocks(blocks)
                 if matches!(
                     &blocks[0],
@@ -634,6 +624,8 @@ mod tests {
                     } if text == "compile failed"
                 )
         ));
+        let turns: Vec<_> = parsed.records.iter().map(|record| record.turn).collect();
+        assert_eq!(turns, vec![Some(1), Some(2), Some(2), Some(2)]);
     }
 
     #[test]
@@ -670,6 +662,7 @@ mod tests {
             &path,
             [
                 r#"{"type":"session_meta","payload":{"id":"meta1234-0000-0000-0000-000000000000","cwd":"E:\\projects\\demo","thread_source":"user"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run tests"}]}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call","call_id":"fn-1","name":"shell","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"fn-1","output":"{\"exit_code\":1,\"output\":\"failed\"}"}}"#,
             ]
@@ -684,12 +677,12 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].session_id, "meta1234-0000-0000-0000-000000000000");
         assert!(matches!(
-            &parsed.records[0].kind,
+            &parsed.records[1].kind,
             crate::session::RecordKind::Assistant(blocks)
                 if matches!(&blocks[0], crate::session::AssistantBlock::ToolUse { name, .. } if name == "shell")
         ));
         assert!(matches!(
-            &parsed.records[1].kind,
+            &parsed.records[2].kind,
             crate::session::RecordKind::UserBlocks(blocks)
                 if matches!(&blocks[0], crate::session::UserBlock::ToolResult { is_error: true, .. })
         ));
