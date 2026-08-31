@@ -139,8 +139,9 @@ impl RecordBuilder {
     }
 
     pub(crate) fn finish(mut self) -> Vec<Record> {
+        let turn = (self.turn > 0).then_some(self.turn);
         for kind in self.attached.drain(..) {
-            self.records.push(Record { turn: None, kind });
+            self.records.push(Record { turn, kind });
         }
         self.records
     }
