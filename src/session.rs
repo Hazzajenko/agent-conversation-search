@@ -101,13 +101,41 @@ pub(crate) struct Session {
     pub records: Vec<Record>,
 }
 
+/// Assign the shared Message-order coordinate while a Harness parser builds a
+/// Session. Each adapter decides whether its wire Record advances the
+/// coordinate; this type owns the increment and Title exception from ADR 0006.
+#[derive(Default)]
+pub(crate) struct RecordBuilder {
+    turn: usize,
+    records: Vec<Record>,
+}
+
+impl RecordBuilder {
+    pub(crate) fn push(&mut self, advances_turn: bool, kind: Option<RecordKind>) {
+        if advances_turn {
+            self.turn += 1;
+        }
+        if let Some(kind) = kind {
+            let turn = if matches!(kind, RecordKind::Title(_)) {
+                None
+            } else {
+                Some(self.turn)
+            };
+            self.records.push(Record { turn, kind });
+        }
+    }
+
+    pub(crate) fn finish(self) -> Vec<Record> {
+        self.records
+    }
+}
+
 /// Parse a Session file's text into a typed [`Session`] (ADR 0006). Pure and
 /// infallible: unparseable or unrecognised lines contribute no Record, so one
 /// malformed line never aborts the parse.
 pub(crate) fn read(text: &str) -> Session {
     let mut meta = SessionMeta::default();
-    let mut records = Vec::new();
-    let mut turn = 0;
+    let mut records = RecordBuilder::default();
 
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -136,9 +164,7 @@ pub(crate) fn read(text: &str) -> Session {
         let ty = value.get("type").and_then(|t| t.as_str());
         // The turn number ticks on every Message Record, *before* its content is
         // inspected — a contentless Message still consumes a turn (ADR 0002).
-        if matches!(ty, Some("user") | Some("assistant")) {
-            turn += 1;
-        }
+        let advances_turn = matches!(ty, Some("user") | Some("assistant"));
 
         let kind = match ty {
             Some("user") => user_kind(&value),
@@ -150,14 +176,10 @@ pub(crate) fn read(text: &str) -> Session {
             _ => None,
         };
 
-        if let Some(kind) = kind {
-            // A Title comes from an `ai-title` Record, not a turn.
-            let turn = if matches!(kind, RecordKind::Title(_)) { None } else { Some(turn) };
-            records.push(Record { turn, kind });
-        }
+        records.push(advances_turn, kind);
     }
 
-    Session { meta, records }
+    Session { meta, records: records.finish() }
 }
 
 /// Index every `tool_use` in the Records by its id, mapping to `(tool name,
