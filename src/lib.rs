@@ -68,36 +68,24 @@ impl ProjectKey {
         Self(encode_project_dir(cwd))
     }
 
+    pub(crate) fn from_encoded(encoded: impl Into<String>) -> Self {
+        Self(encoded.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub(crate) fn case_folded(&self) -> String {
         self.0.to_lowercase()
     }
 
     pub(crate) fn matches_cwd(&self, cwd: &str) -> bool {
-        self.0.eq_ignore_ascii_case(&encode_project_dir(cwd))
+        self.case_folded() == Self::from_cwd(cwd).case_folded()
     }
 
     pub(crate) fn contains_ignore_case(&self, substring: &str) -> bool {
         self.0.to_lowercase().contains(&substring.to_lowercase())
-    }
-}
-
-impl std::ops::Deref for ProjectKey {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<String> for ProjectKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for ProjectKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
     }
 }
 
@@ -218,7 +206,7 @@ pub enum Scope {
     Current { cwd: String },
     /// Every Project in the Store.
     All,
-    /// Projects whose directory name contains `name_substring` (case-insensitive).
+    /// Projects whose encoded logical cwd key contains `name_substring` (case-insensitive).
     Project { name_substring: String },
 }
 
@@ -352,7 +340,7 @@ impl SessionIdentity {
     pub(crate) fn display_project(&self) -> &str {
         self.cwd
             .as_deref()
-            .or(self.project.as_deref())
+            .or_else(|| self.project.as_ref().map(ProjectKey::as_str))
             .unwrap_or("(no project)")
     }
 }
@@ -389,7 +377,7 @@ pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
 /// Fold Sessions into Projects by their case-folded encoded working-directory
 /// key, summing counts and taking the newest timestamp and cwd per group.
 fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
-    // Group by the lower-cased directory name (the case-fold union key).
+    // Group by the case-folded encoded logical cwd key.
     let mut groups: HashMap<String, Vec<SessionIdentity>> = HashMap::new();
     for s in sessions {
         let Some(project) = s.project.as_ref() else {
@@ -1605,7 +1593,7 @@ mod tests {
         let results = search_store_session(&stores, &session, &lit("tokio"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].project.as_deref(), Some("E--projects-demo"));
+        assert_eq!(results[0].project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
         assert_eq!(results[0].session_id, "solo");
     }
 
@@ -1689,7 +1677,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
-        assert_eq!(s.project.as_deref(), Some("E--projects-demo"));
+        assert_eq!(s.project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
         assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
         assert_eq!(s.path, path);
         assert_eq!(s.title.as_deref(), Some("Borrow checker chat"));
@@ -1755,7 +1743,7 @@ mod tests {
         let info = SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: Some("E--projects-demo".into()),
+            project: Some(ProjectKey::from_encoded("E--projects-demo")),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
             title: None,
@@ -1780,7 +1768,7 @@ mod tests {
         let info = SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: Some("E--projects-demo".into()),
+            project: Some(ProjectKey::from_encoded("E--projects-demo")),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
             title: Some("Demo chat".into()),
@@ -1798,7 +1786,7 @@ mod tests {
         SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: Some(dir.into()),
+            project: Some(ProjectKey::from_encoded(dir)),
             session_id: id.into(),
             path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
             title: None,
@@ -1868,7 +1856,7 @@ mod tests {
             session: SessionIdentity {
                 harness: Harness::Claude,
                 subagent: None,
-                project: Some(project.into()),
+                project: Some(ProjectKey::from_encoded(project)),
                 session_id: "11111111-2222-3333-4444-555555555555".into(),
                 path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
                 title: title.map(Into::into),
@@ -1983,7 +1971,7 @@ mod tests {
             session: SessionIdentity {
                 harness: Harness::Claude,
                 subagent: None,
-                project: Some("p".into()),
+                project: Some(ProjectKey::from_encoded("p")),
                 session_id: "abcd1234-rest".into(),
                 path: PathBuf::from("/x/abcd1234-rest.jsonl"),
                 title: Some("Borrow chat".into()),
@@ -2550,7 +2538,7 @@ mod tests {
             session: SessionIdentity {
                 harness: Harness::Claude,
                 subagent: None,
-                project: Some("E--projects-demo".into()),
+                project: Some(ProjectKey::from_encoded("E--projects-demo")),
                 session_id: "abcd1234-rest".into(),
                 path: PathBuf::from("/x/abcd1234-rest.jsonl"),
                 title: None,
@@ -2658,7 +2646,7 @@ mod tests {
             session: SessionIdentity {
                 harness: Harness::Claude,
                 subagent: None,
-                project: Some("E--projects-demo".into()),
+                project: Some(ProjectKey::from_encoded("E--projects-demo")),
                 session_id: "abcd1234-rest".into(),
                 path: PathBuf::from("/x/abcd1234-rest.jsonl"),
                 title: Some("Build chat".into()),

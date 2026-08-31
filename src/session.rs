@@ -104,22 +104,28 @@ pub(crate) struct Session {
 
 /// Assign the shared Message-order coordinate while a Harness parser builds a
 /// Session. `message` advances it; adapter-normalized Blocks use `attached` to
-/// retain the current Message coordinate; metadata has no coordinate.
+/// buffer until their following Message and receive that coordinate; metadata
+/// has no coordinate.
 #[derive(Default)]
 pub(crate) struct RecordBuilder {
     turn: usize,
     records: Vec<Record>,
+    attached: Vec<RecordKind>,
 }
 
 impl RecordBuilder {
     pub(crate) fn message(&mut self, kind: Option<RecordKind>) {
         self.turn += 1;
+        for kind in self.attached.drain(..) {
+            self.records.push(Record { turn: Some(self.turn), kind });
+        }
         self.push(kind, Some(self.turn));
     }
 
     pub(crate) fn attached(&mut self, kind: Option<RecordKind>) {
-        let turn = (self.turn > 0).then_some(self.turn);
-        self.push(kind, turn);
+        if let Some(kind) = kind {
+            self.attached.push(kind);
+        }
     }
 
     pub(crate) fn metadata(&mut self, kind: Option<RecordKind>) {
@@ -132,7 +138,10 @@ impl RecordBuilder {
         }
     }
 
-    pub(crate) fn finish(self) -> Vec<Record> {
+    pub(crate) fn finish(mut self) -> Vec<Record> {
+        for kind in self.attached.drain(..) {
+            self.records.push(Record { turn: None, kind });
+        }
         self.records
     }
 }

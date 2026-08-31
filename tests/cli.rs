@@ -354,6 +354,7 @@ fn codex_search_content_flags_match_claude_semantics() {
             r#"{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"reasoning_text","text":"content-reasoning-needle"}]}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"exec_command","input":"{\"cmd\":\"tool-call-needle\"}"}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"tool-output-needle"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"finished"}]}}"#,
         ],
     );
     let command = |query: &str| {
@@ -378,6 +379,17 @@ fn codex_search_content_flags_match_claude_semantics() {
         .success()
         .stdout(predicates::str::contains("reasoning-only-needle"));
     command("content-reasoning")
+        .arg("--thinking")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[1] thinking:"))
+        .stdout(predicates::str::contains("content-reasoning-needle"));
+    command("show")
+        .arg("c0de0011")
+        .arg("--around")
+        .arg("1")
+        .arg("--context")
+        .arg("0")
         .arg("--thinking")
         .assert()
         .success()
@@ -565,6 +577,7 @@ fn codex_failed_and_stats_infer_failures_from_tool_outputs() {
             r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"ok","output":"{\"exit_code\":0,\"output\":\"Finished\"}"}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"bad","name":"exec","input":"{\"cmd\":\"cargo test\"}"}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"bad","output":"{\"exit_code\":101,\"output\":\"error[E0433]: failed to resolve\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"failure reported"}]}}"#,
         ],
     );
     let command = || {
