@@ -79,7 +79,7 @@ struct SearchArgs {
     #[arg(long, conflicts_with = "project")]
     all: bool,
 
-    /// Search projects whose directory name contains this substring
+    /// Search Projects whose encoded logical working-directory key contains this substring
     /// (case-insensitive).
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
@@ -169,7 +169,7 @@ struct SessionsArgs {
     #[arg(long, conflicts_with = "project")]
     all: bool,
 
-    /// List Sessions in Projects whose directory name contains this substring
+    /// List Sessions in Projects whose encoded logical working-directory key contains this substring
     /// (case-insensitive).
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
@@ -194,7 +194,7 @@ struct ProjectsArgs {
     #[arg(long, value_name = "WHEN")]
     since: Option<String>,
 
-    /// List only Projects whose directory name contains this substring
+    /// List only Projects whose encoded logical working-directory key contains this substring
     /// (case-insensitive).
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
@@ -330,7 +330,7 @@ fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
     };
 
     // --session resolves to one Session file; otherwise we operate over the
-    // scope's Project dirs. (--session conflicts with --all / --project.)
+    // Project scope. (--session conflicts with --all / --project.)
     let session_path = match &args.session {
         Some(prefix) => match resolve_store_session_prefix(stores, prefix) {
             StoreSessionRef::Unique(session) => Some(session),

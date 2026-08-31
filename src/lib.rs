@@ -722,6 +722,7 @@ fn turns_from_session(session: &session::Session) -> Vec<Turn> {
 /// turn number, so the find→read handoff coordinate (ADR 0002) is never
 /// recomputed here.
 fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<String>)>) -> Option<Turn> {
+    let number = record.turn?;
     let (kind, blocks) = match &record.kind {
         RecordKind::Title(_) => return None,
         RecordKind::Prompt(text) => {
@@ -753,7 +754,7 @@ fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<Str
             (TurnKind::Reply, blocks)
         }
     };
-    Some(Turn { number: record.turn.unwrap_or(0), kind, blocks })
+    Some(Turn { number, kind, blocks })
 }
 
 /// Project one [`UserBlock`] into a renderable [`TurnBlock`], dropping blank
