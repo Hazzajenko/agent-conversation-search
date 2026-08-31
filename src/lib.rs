@@ -58,26 +58,6 @@ pub fn encode_project_dir(path: &str) -> String {
         .collect()
 }
 
-/// Find the Project directories under `projects_root` that correspond to the
-/// given working directory.
-///
-/// The cwd is forward-encoded (see [`encode_project_dir`]) and matched
-/// **case-insensitively** against the directory names, because the stored
-/// drive-letter case is non-deterministic (ADR-0001). All matches are returned
-/// (the union), sorted for stable output. An unreadable `projects_root` yields
-/// an empty result rather than an error — a missing Store is "no matches".
-pub fn find_project_dirs(projects_root: &Path, cwd: &str) -> Vec<PathBuf> {
-    let target = encode_project_dir(cwd).to_lowercase();
-    project_dir_paths(projects_root)
-        .into_iter()
-        .filter(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().to_lowercase() == target)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
 /// Which kind of conversation content a [`Segment`] came from. Determines how
 /// a Match is labelled in output and which content-selection flags include it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,11 +165,6 @@ pub fn resolve_codex_dir(
         .or_else(|| home.map(|directory| directory.join(".codex")))
 }
 
-/// The Store (Projects root) under a resolved Claude config directory.
-pub fn projects_root(claude_dir: &Path) -> PathBuf {
-    claude_dir.join("projects")
-}
-
 /// Which Projects a search covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -201,43 +176,8 @@ pub enum Scope {
     Project { name_substring: String },
 }
 
-/// List every Project directory under `projects_root`, sorted. Returns empty if
-/// the root is unreadable.
-fn project_dir_paths(projects_root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(projects_root) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
-    dirs.sort();
-    dirs
-}
-
-/// Resolve a [`Scope`] to the concrete Project directories a search should
-/// cover.
-pub fn resolve_scope(projects_root: &Path, scope: &Scope) -> Vec<PathBuf> {
-    match scope {
-        Scope::Current { cwd } => find_project_dirs(projects_root, cwd),
-        Scope::All => project_dir_paths(projects_root),
-        Scope::Project { name_substring } => {
-            let needle = name_substring.to_lowercase();
-            project_dir_paths(projects_root)
-                .into_iter()
-                .filter(|p| {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase().contains(&needle))
-                        .unwrap_or(false)
-                })
-                .collect()
-        }
-    }
-}
-
 /// A single Match: the matching [`Segment`] plus the turn it was found in. The
-/// turn number is the same numbering [`parse_transcript`] / `show` use, so a
+/// turn number is the same numbering the Transcript projection uses, so a
 /// search hit points straight at `show --around <turn>` (ADR 0002). It is
 /// `None` for a Title match — a Title is session metadata, not a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,53 +190,23 @@ pub struct Match {
 /// to display and reopen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMatches {
-    pub harness: Harness,
-    pub subagent: Option<String>,
-    /// The Project directory name the Session lives in.
-    pub project: String,
-    /// The Session id (the `.jsonl` file stem).
-    pub session_id: String,
-    /// Full path to the Session file.
-    pub path: PathBuf,
-    /// The Session's AI-generated Title, if it has one.
-    pub title: Option<String>,
-    /// The newest record timestamp seen in the Session, as the raw ISO 8601
-    /// string. `None` if no record carried one. ISO 8601 strings sort
-    /// lexically in chronological order, so this doubles as the recency key.
-    pub timestamp: Option<String>,
-    /// The git branch the Session was recorded on (`gitBranch`), if any.
-    pub branch: Option<String>,
-    /// The real working directory the Session was recorded in (`cwd`), if any.
-    /// Displayed in place of the mangled directory name (ADR 0005); `None`
-    /// falls back to `project`.
-    pub cwd: Option<String>,
+    pub session: SessionIdentity,
     /// The Matches, in the order they appear in the Session.
     pub matches: Vec<Match>,
 }
 
-/// Search the given Project directories for `query`, returning one
-/// [`SessionMatches`] per Session that contains at least one Match.
-///
-/// Matching is delegated to `matcher` over the default content set (see
-/// [`segments_from_record`]). Sessions with no Matches are omitted. Unreadable
-/// directories and files are skipped rather than failing the whole search.
-pub fn search_project_dirs(
-    project_dirs: &[PathBuf],
-    matcher: &Matcher,
-    content: &ContentSet,
-) -> Vec<SessionMatches> {
-    let sessions = enumerate_sessions(project_dirs);
-    let mut results: Vec<SessionMatches> = sessions
-        .par_iter()
-        .filter_map(|(project, path)| search_one_session(project, path, matcher, content))
-        .collect();
+impl std::ops::Deref for SessionMatches {
+    type Target = SessionIdentity;
 
-    // Newest Session first (timestamps are ISO 8601 strings, so reverse
-    // lexical = newest-first; Sessions without a timestamp sort last). Ties
-    // and missing timestamps fall back to path order for determinism
-    // regardless of the parallel completion order.
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
-    results
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for SessionMatches {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
 }
 
 /// Search Sessions enumerated by every configured Harness adapter.
@@ -335,12 +245,12 @@ pub fn search_store_session(
 }
 
 fn search_parsed_session(
-    info: &SessionInfo,
+    info: &SessionIdentity,
     parsed: session::Session,
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Option<SessionMatches> {
-    let mut matches: Vec<Match> = parsed
+    let matches: Vec<Match> = parsed
         .records
         .iter()
         .flat_map(|record| {
@@ -348,124 +258,24 @@ fn search_parsed_session(
         })
         .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text))
         .collect();
-    let title_is_a_record = parsed
-        .records
-        .iter()
-        .any(|record| matches!(&record.kind, RecordKind::Title(_)));
-    if !title_is_a_record {
-        if let Some(title) = info.title.as_ref().filter(|title| matcher.is_match(title)) {
-            matches.insert(
-                0,
-                Match {
-                    turn: None,
-                    segment: Segment { role: Role::Title, text: title.clone() },
-                },
-            );
-        }
-    }
     if matches.is_empty() {
         return None;
     }
     Some(SessionMatches {
-        harness: info.harness,
-        subagent: info.subagent.clone(),
-        project: info.project.clone(),
-        session_id: info.session_id.clone(),
-        path: info.path.clone(),
-        title: info.title.clone(),
-        timestamp: info.timestamp.clone(),
-        branch: info.branch.clone(),
-        cwd: info.cwd.clone(),
+        session: info.clone(),
         matches,
     })
 }
 
-/// Every Session file as `(project name, path)` across the given Project dirs,
-/// each distinct dir scanned once. Shared by the search and failure scans.
-fn enumerate_sessions(project_dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
-    let mut dirs: Vec<&PathBuf> = project_dirs.iter().collect();
-    dirs.sort();
-    dirs.dedup();
-    dirs.iter()
-        .flat_map(|dir| {
-            let project = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-                .map(move |path| (project.clone(), path))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-/// Search a single Session file by path (the `--session` scope — ADR 0002),
-/// returning 0 or 1 [`SessionMatches`]. The Project name is derived from the
-/// file's parent directory.
-pub fn search_session_file(path: &Path, matcher: &Matcher, content: &ContentSet) -> Vec<SessionMatches> {
-    search_one_session(&session_project_name(path), path, matcher, content).into_iter().collect()
-}
-
-/// The Project name for a Session file: its parent directory's name.
-fn session_project_name(path: &Path) -> String {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-/// Scan a single Session file, returning its Matches if any. A file that cannot
-/// be read yields `None` rather than failing the whole search.
-fn search_one_session(
-    project: &str,
-    path: &Path,
-    matcher: &Matcher,
-    content: &ContentSet,
-) -> Option<SessionMatches> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let session = session::read(&text);
-
-    // Each typed Record carries its turn number (None for a Title — metadata, not
-    // a turn), so a hit points straight at `show --around <turn>` (ADR 0002). A
-    // segment is kept when its Role is in scope and the Query matches.
-    let matches: Vec<Match> = session
-        .records
-        .iter()
-        .flat_map(|record| {
-            segments_from_record(record).into_iter().map(move |segment| Match { turn: record.turn, segment })
-        })
-        .filter(|m| content.includes(m.segment.role) && matcher.is_match(&m.segment.text))
-        .collect();
-
-    if matches.is_empty() {
-        return None;
-    }
-    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    Some(SessionMatches {
-        harness: Harness::Claude,
-        subagent: None,
-        project: project.to_string(),
-        session_id,
-        path: path.to_path_buf(),
-        title: session.meta.title,
-        timestamp: session.meta.timestamp,
-        branch: session.meta.branch,
-        cwd: session.meta.cwd,
-        matches,
-    })
-}
-
-/// A Session's display metadata, gathered without a Query — the unit the
-/// `sessions` verb lists. Carries exactly the fields [`session_header`] needs,
-/// so a listing row is byte-identical to a search Session header (ADR 0004).
+/// The identity and display metadata shared by every projection of a Session.
+/// The `sessions` verb lists it directly; search and failure results carry it
+/// alongside their projection-specific data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionInfo {
+pub struct SessionIdentity {
     pub harness: Harness,
     pub subagent: Option<String>,
-    /// The Project directory name the Session lives in.
-    pub project: String,
+    /// The encoded Project key, or `None` when the Harness recorded no cwd.
+    pub project: Option<String>,
     /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
     pub session_id: String,
     /// Full path to the Session file (for `-l` / piping into `show -`).
@@ -482,51 +292,18 @@ pub struct SessionInfo {
     pub cwd: Option<String>,
 }
 
-/// List every Session across the given Project dirs, newest first — the
-/// content-agnostic counterpart to [`search_project_dirs`] (ADR 0004). Every
-/// `.jsonl` with a session-id is included; there is **no content filter**, so a
-/// Session with no Messages still appears (unlike search). Files that cannot be
-/// read are skipped. Sorted by the same recency key as search: newest
-/// `timestamp` first, undateable Sessions last, ties by path for determinism.
-pub fn list_sessions(project_dirs: &[PathBuf]) -> Vec<SessionInfo> {
-    let sessions = enumerate_sessions(project_dirs);
-    let mut results: Vec<SessionInfo> = sessions
-        .par_iter()
-        .filter_map(|(project, path)| session_info(project, path))
-        .collect();
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
-    results
+impl SessionIdentity {
+    pub(crate) fn display_project(&self) -> &str {
+        self.cwd
+            .as_deref()
+            .or(self.project.as_deref())
+            .unwrap_or("(no project)")
+    }
 }
 
 /// List Sessions enumerated by every configured Harness adapter.
-pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionInfo> {
+pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionIdentity> {
     stores.sessions(scope).into_iter().map(|session| session.info).collect()
-}
-
-/// Read a Session's header metadata (Title, newest timestamp, branch) without
-/// matching a Query. Mirrors the metadata pass in [`search_one_session`] but
-/// keeps every Session rather than only those with a Match. Returns `None` when
-/// the file cannot be read or its stem is empty (no session-id to `show`).
-fn session_info(project: &str, path: &Path) -> Option<SessionInfo> {
-    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    if session_id.is_empty() {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    // A listing needs only the header metadata — no Query, no Records walked
-    // beyond the single parse `read` already does.
-    let meta = session::read(&text).meta;
-    Some(SessionInfo {
-        harness: Harness::Claude,
-        subagent: None,
-        project: project.to_string(),
-        session_id,
-        path: path.to_path_buf(),
-        title: meta.title,
-        timestamp: meta.timestamp,
-        branch: meta.branch,
-        cwd: meta.cwd,
-    })
 }
 
 /// A Project's display metadata — the unit the `projects` verb lists (ADR 0004,
@@ -544,25 +321,11 @@ pub struct ProjectInfo {
     pub last_touched: Option<String>,
 }
 
-/// List the Projects across the given directories, newest-touched first (ADR
-/// 0005). Identity is the on-disk directory; directories whose names are equal
-/// case-insensitively are folded into one Project (ADR 0001's union rule without
-/// a cwd), so the listing behaves the same on case-insensitive (Windows/macOS)
-/// and case-sensitive (Linux/WSL) Stores. A directory with no listable Session
-/// contributes nothing. Each Project's display name is the `cwd` of its newest
-/// Session, falling back to the encoded directory name.
-pub fn list_projects(project_dirs: &[PathBuf]) -> Vec<ProjectInfo> {
-    // Reuse the Session listing: it already carries each Session's directory
-    // name, newest timestamp, and cwd — everything a Project row needs. The
-    // fold itself is a pure step over that data (see [`group_projects`]).
-    group_projects(list_sessions(project_dirs))
-}
-
 /// List Projects derived from Sessions across every configured Store.
 pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
     let sessions = list_store_sessions(stores, scope)
         .into_iter()
-        .filter(|session| !session.project.is_empty())
+        .filter(|session| session.project.is_some())
         .collect();
     group_projects(sessions)
 }
@@ -573,21 +336,24 @@ pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
 /// [`list_projects`] because the case-variant fold cannot be staged on a
 /// case-insensitive filesystem (the two directories can't coexist), so the
 /// logic is tested here on constructed data rather than the real Store.
-fn group_projects(sessions: Vec<SessionInfo>) -> Vec<ProjectInfo> {
+fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
     // Group by the lower-cased directory name (the case-fold union key).
-    let mut groups: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<SessionIdentity>> = HashMap::new();
     for s in sessions {
-        groups.entry(s.project.to_lowercase()).or_default().push(s);
+        let Some(project) = s.project.as_deref() else {
+            continue;
+        };
+        groups.entry(project.to_lowercase()).or_default().push(s);
     }
 
     let mut projects: Vec<(String, ProjectInfo)> = groups
         .into_iter()
         .map(|(key, mut members)| {
             // Newest Session first within the group (same comparator as
-            // list_sessions), so member[0] supplies the display cwd and date.
+            // Session listing), so member[0] supplies the display cwd and date.
             members.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
             let newest = &members[0];
-            let name = newest.cwd.clone().unwrap_or_else(|| newest.project.clone());
+            let name = newest.display_project().to_string();
             let info = ProjectInfo {
                 name,
                 session_count: members.len(),
@@ -694,29 +460,21 @@ fn short_id(session_id: &str) -> String {
 /// The one-line Session header shared by search and `--failed`: leads with the
 /// short session-id (paste-able into `show`), then `project · title · date ·
 /// branch`, omitting date/branch when absent.
-fn session_header(
-    harness: Harness,
-    subagent: Option<&str>,
-    short: &str,
-    project: &str,
-    title: Option<&str>,
-    timestamp: Option<&str>,
-    branch: Option<&str>,
-) -> String {
+fn session_header(session: &SessionIdentity) -> String {
     let mut header = vec![
-        harness.as_str().to_string(),
-        short.to_string(),
-        project.to_string(),
-        title.unwrap_or("(untitled)").to_string(),
+        session.harness.as_str().to_string(),
+        short_id(&session.session_id),
+        session.display_project().to_string(),
+        session.title.as_deref().unwrap_or("(untitled)").to_string(),
     ];
-    if let Some(date) = timestamp.and_then(date_prefix) {
+    if let Some(date) = session.timestamp.as_deref().and_then(date_prefix) {
         header.push(date.to_string());
     }
-    if let Some(branch) = branch {
+    if let Some(branch) = &session.branch {
         header.push(branch.to_string());
     }
     let mut rendered = header.join(" · ");
-    if let Some(name) = subagent {
+    if let Some(name) = &session.subagent {
         rendered.push_str(&format!(" [subagent: {name}]"));
     }
     rendered
@@ -739,23 +497,13 @@ pub fn format_paths(results: &[SessionMatches]) -> String {
 /// line search prints above its Snippets (ADR 0004) — newest first. An empty
 /// listing renders a clear "no sessions" line. The header carries no colour
 /// (search colours only Snippets), so this output is plain text.
-pub fn format_sessions(sessions: &[SessionInfo]) -> String {
+pub fn format_sessions(sessions: &[SessionIdentity]) -> String {
     if sessions.is_empty() {
         return "No sessions.\n".to_string();
     }
     let mut out = String::new();
     for s in sessions {
-        out.push_str(&session_header(
-            s.harness,
-            s.subagent.as_deref(),
-            &short_id(&s.session_id),
-            // Prefer the real cwd over the mangled directory name — the reason
-            // the tool exists — falling back as `projects` does (ADR 0005).
-            s.cwd.as_deref().unwrap_or(&s.project),
-            s.title.as_deref(),
-            s.timestamp.as_deref(),
-            s.branch.as_deref(),
-        ));
+        out.push_str(&session_header(s));
         out.push('\n');
     }
     out
@@ -784,7 +532,7 @@ pub fn format_projects(projects: &[ProjectInfo]) -> String {
 
 /// Render just the listed Session file paths, one per line, in listing order —
 /// the `sessions -l` counterpart to [`format_paths`], for piping into `show -`.
-pub fn format_session_paths(sessions: &[SessionInfo]) -> String {
+pub fn format_session_paths(sessions: &[SessionIdentity]) -> String {
     let mut out = String::new();
     for s in sessions {
         out.push_str(&s.path.to_string_lossy());
@@ -793,7 +541,7 @@ pub fn format_session_paths(sessions: &[SessionInfo]) -> String {
     out
 }
 
-/// Render search results as human- and Claude-readable text: each Session as a
+/// Render search results as human- and machine-readable text: each Session as a
 /// `short-id · project · title · date · branch` header followed by one
 /// `[turn] role: snippet` line per Match. At most `max_per_session` Matches are
 /// shown per Session (`0` = unlimited), with an actionable `… +N more  ›
@@ -811,17 +559,7 @@ pub fn format_results(
     let mut out = String::new();
     for s in results {
         let short = short_id(&s.session_id);
-        out.push_str(&session_header(
-            s.harness,
-            s.subagent.as_deref(),
-            &short,
-            // Prefer the real cwd over the mangled directory name (ADR 0005),
-            // as `sessions` and `projects` do.
-            s.cwd.as_deref().unwrap_or(&s.project),
-            s.title.as_deref(),
-            s.timestamp.as_deref(),
-            s.branch.as_deref(),
-        ));
+        out.push_str(&session_header(&s.session));
         out.push('\n');
 
         // A cap of 0 means show every Match.
@@ -855,21 +593,6 @@ pub fn format_results(
 
 // --- show: resolving a Session and rendering it as a Transcript ---------
 
-/// The outcome of resolving a git-style session-id prefix against the whole
-/// Store (see ADR 0002). A session-id is globally unique, so resolution scans
-/// every Project — you often reopen a Session from a different Project than the
-/// cwd.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionRef {
-    /// Exactly one Session matched the prefix; here is its file path.
-    Unique(PathBuf),
-    /// More than one Session shares the prefix; here are their full session-ids
-    /// (sorted) so the caller can ask the user to disambiguate.
-    Ambiguous(Vec<String>),
-    /// No Session in the Store starts with the prefix.
-    NotFound,
-}
-
 /// Result of resolving a Session id across every configured Store.
 pub enum StoreSessionRef {
     Unique(SessionHandle),
@@ -878,7 +601,7 @@ pub enum StoreSessionRef {
 }
 
 pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessionRef {
-    let sessions = stores.all_sessions();
+    let sessions = stores.matching_sessions(prefix);
     if let Some(exact) = sessions.iter().find(|session| session.info.session_id == prefix) {
         return StoreSessionRef::Unique(exact.clone());
     }
@@ -894,42 +617,6 @@ pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessi
     }
 }
 
-/// Resolve `prefix` to a single Session file across the whole Store, git-style.
-///
-/// A full session-id that exactly equals an existing stem wins outright (so a
-/// complete id is never reported ambiguous against a longer one). Otherwise the
-/// prefix must match exactly one Session stem. Unreadable directories are
-/// skipped rather than failing resolution.
-pub fn resolve_session_prefix(projects_root: &Path, prefix: &str) -> SessionRef {
-    let mut matches: Vec<(String, PathBuf)> = Vec::new();
-    for dir in project_dir_paths(projects_root) {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            if stem == prefix {
-                return SessionRef::Unique(path); // exact id wins, git-style
-            }
-            if stem.starts_with(prefix) {
-                matches.push((stem, path));
-            }
-        }
-    }
-    match matches.len() {
-        0 => SessionRef::NotFound,
-        1 => SessionRef::Unique(matches.pop().unwrap().1),
-        _ => {
-            matches.sort();
-            SessionRef::Ambiguous(matches.into_iter().map(|(stem, _)| stem).collect())
-        }
-    }
-}
-
 /// Which kind of turn a [`Turn`] is, and therefore how it is labelled. A user
 /// Message whose content is a plain string is a [`Prompt`](TurnKind::Prompt);
 /// a user Message carrying only `tool_result` blocks is mechanically-generated
@@ -939,7 +626,7 @@ pub fn resolve_session_prefix(projects_root: &Path, prefix: &str) -> SessionRef 
 pub enum TurnKind {
     /// A user Message the person typed (rendered under `you`).
     Prompt,
-    /// An assistant Message (rendered under `claude`).
+    /// An assistant Message (rendered under its Harness name).
     Reply,
     /// A user Message that is purely tool results (rendered header-less).
     ToolOutput,
@@ -971,15 +658,6 @@ pub struct Turn {
     pub blocks: Vec<TurnBlock>,
 }
 
-/// Parse a whole Session file into its Transcript turns (Messages only — the
-/// noise Records are dropped), projecting the typed Records from [`session::read`]
-/// (ADR 0006). A failed `tool_result` is labelled with the tool that produced it,
-/// joined through [`session::tool_index`].
-pub fn parse_transcript(session_text: &str) -> Vec<Turn> {
-    let session = session::read(session_text);
-    turns_from_session(&session)
-}
-
 /// Parse a resolved Session through its Harness adapter and project it as a Transcript.
 pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option<Vec<Turn>> {
     stores.parse(handle).map(|session| turns_from_session(&session))
@@ -989,17 +667,7 @@ pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option
 /// the JSONL envelope. This keeps the path-pipe form of `show -` independent of
 /// configured Store discovery.
 pub fn parse_transcript_path(path: &Path) -> Option<(Harness, Vec<Turn>)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let harness = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find_map(|record| record.get("type").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .filter(|record_type| record_type == "session_meta")
-        .map_or(Harness::Claude, |_| Harness::Codex);
-    let parsed = match harness {
-        Harness::Claude => session::read(&text),
-        Harness::Codex => harness::codex_read(&text),
-    };
+    let (harness, parsed) = harness::parse_session_path(path)?;
     Some((harness, turns_from_session(&parsed)))
 }
 
@@ -1136,10 +804,6 @@ fn push_wrapped(out: &mut String, text: &str) {
 /// compact one-liners, Failures flagged loudly with `✗ … FAILED`. Thinking is
 /// collapsed to a one-line count unless `show_thinking` is set. A Session with
 /// no Messages renders a clear placeholder.
-pub fn format_transcript(turns: &[Turn], show_thinking: bool) -> String {
-    format_transcript_for_harness(turns, show_thinking, Harness::Claude)
-}
-
 pub fn format_transcript_for_harness(
     turns: &[Turn],
     show_thinking: bool,
@@ -1188,10 +852,6 @@ pub fn window_turns(turns: &[Turn], around: usize, context: usize) -> (&[Turn], 
 /// Render a windowed Transcript: the turns around `around` (see
 /// [`window_turns`]), bracketed by indicators of how many turns are hidden
 /// above and below so the reader knows where they are in the Session.
-pub fn format_windowed(turns: &[Turn], around: usize, context: usize, show_thinking: bool) -> String {
-    format_windowed_for_harness(turns, around, context, show_thinking, Harness::Claude)
-}
-
 pub fn format_windowed_for_harness(
     turns: &[Turn],
     around: usize,
@@ -1446,35 +1106,22 @@ pub struct Failure {
 /// to display and reopen it — the failure-analysis analogue of [`SessionMatches`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFailures {
-    pub harness: Harness,
-    pub subagent: Option<String>,
-    pub project: String,
-    pub session_id: String,
-    pub path: PathBuf,
-    pub title: Option<String>,
-    pub timestamp: Option<String>,
-    pub branch: Option<String>,
-    /// The real working directory the Session was recorded in (`cwd`), if any —
-    /// displayed in place of the mangled directory name (ADR 0005).
-    pub cwd: Option<String>,
+    pub session: SessionIdentity,
     pub failures: Vec<Failure>,
 }
 
-/// Scan the given Project dirs for Failures, returning one [`SessionFailures`]
-/// per Session that has at least one. When `matcher` is `Some`, only Failures
-/// whose command or error text matches the Query are kept (the Query is
-/// optional under `--failed`). Newest Session first, like search.
-pub fn failed_in_project_dirs(
-    project_dirs: &[PathBuf],
-    matcher: Option<&Matcher>,
-) -> Vec<SessionFailures> {
-    let sessions = enumerate_sessions(project_dirs);
-    let mut results: Vec<SessionFailures> = sessions
-        .par_iter()
-        .filter_map(|(project, path)| failures_in_one_session(project, path, matcher))
-        .collect();
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
-    results
+impl std::ops::Deref for SessionFailures {
+    type Target = SessionIdentity;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for SessionFailures {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
 }
 
 /// Scan Sessions enumerated by every configured Harness adapter for Failures.
@@ -1507,37 +1154,8 @@ pub fn failed_in_store_session(
         .collect()
 }
 
-/// List Failures within a single Session file by path, so `--failed` composes
-/// with the `--session` scope. Returns 0 or 1 [`SessionFailures`].
-pub fn failed_in_session_file(path: &Path, matcher: Option<&Matcher>) -> Vec<SessionFailures> {
-    failures_in_one_session(&session_project_name(path), path, matcher).into_iter().collect()
-}
-
-/// Scan a single Session for Failures, joining each errored `tool_result` to
-/// its `tool_use`. A file that cannot be read yields `None`.
-fn failures_in_one_session(
-    project: &str,
-    path: &Path,
-    matcher: Option<&Matcher>,
-) -> Option<SessionFailures> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let session = session::read(&text);
-    let info = SessionInfo {
-        harness: Harness::Claude,
-        subagent: None,
-        project: project.to_string(),
-        session_id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
-        path: path.to_path_buf(),
-        title: session.meta.title.clone(),
-        timestamp: session.meta.timestamp.clone(),
-        branch: session.meta.branch.clone(),
-        cwd: session.meta.cwd.clone(),
-    };
-    failures_in_parsed_session(&info, session, matcher)
-}
-
 fn failures_in_parsed_session(
-    info: &SessionInfo,
+    info: &SessionIdentity,
     session: session::Session,
     matcher: Option<&Matcher>,
 ) -> Option<SessionFailures> {
@@ -1584,15 +1202,7 @@ fn failures_in_parsed_session(
         return None;
     }
     Some(SessionFailures {
-        harness: info.harness,
-        subagent: info.subagent.clone(),
-        project: info.project.clone(),
-        session_id: info.session_id.clone(),
-        path: info.path.clone(),
-        title: info.title.clone(),
-        timestamp: info.timestamp.clone(),
-        branch: info.branch.clone(),
-        cwd: info.cwd.clone(),
+        session: info.clone(),
         failures,
     })
 }
@@ -1639,16 +1249,7 @@ pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full
     let mut out = String::new();
     for s in results {
         let short = short_id(&s.session_id);
-        out.push_str(&session_header(
-            s.harness,
-            s.subagent.as_deref(),
-            &short,
-            // Prefer the real cwd over the mangled directory name (ADR 0005).
-            s.cwd.as_deref().unwrap_or(&s.project),
-            s.title.as_deref(),
-            s.timestamp.as_deref(),
-            s.branch.as_deref(),
-        ));
+        out.push_str(&session_header(&s.session));
         out.push('\n');
 
         let shown = if max_per_session == 0 {
@@ -1892,62 +1493,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn all_scope_returns_every_project_dir_sorted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join("E--projects-a")).unwrap();
-        fs::create_dir(root.join("C--hacking-b")).unwrap();
-        fs::write(root.join("loose-file.txt"), "ignored").unwrap();
-
-        let dirs = resolve_scope(root, &Scope::All);
-
-        assert_eq!(dirs, vec![root.join("C--hacking-b"), root.join("E--projects-a")]);
-    }
-
-    #[test]
-    fn project_scope_matches_name_substring_case_insensitively_and_unions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join("E--projects-games-creature-game")).unwrap();
-        fs::create_dir(root.join("E--projects-rust-agsearch")).unwrap();
-        fs::create_dir(root.join("C--hacking-jplag")).unwrap();
-
-        let dirs = resolve_scope(root, &Scope::Project { name_substring: "PROJECTS".into() });
-
-        assert_eq!(
-            dirs,
-            vec![
-                root.join("E--projects-games-creature-game"),
-                root.join("E--projects-rust-agsearch"),
-            ]
-        );
-    }
-
-    #[test]
-    fn finds_the_project_dir_for_the_current_cwd_case_insensitively() {
-        let tmp = tempfile::tempdir().unwrap();
-        let projects = tmp.path();
-        // The stored directory uses a lowercase drive letter, but the cwd we
-        // search from reports an uppercase one (the ADR-0001 drive wobble).
-        fs::create_dir(projects.join("e--Vault2026")).unwrap();
-        fs::create_dir(projects.join("C--hacking-jplag")).unwrap();
-
-        let found = find_project_dirs(projects, r"E:\Vault2026");
-
-        assert_eq!(found, vec![projects.join("e--Vault2026")]);
-    }
-
-    #[test]
-    fn returns_empty_when_the_projects_root_does_not_exist() {
-        let missing = Path::new("this-store-does-not-exist-anywhere");
-        assert!(find_project_dirs(missing, r"E:\whatever").is_empty());
-    }
-
     /// A default Matcher (literal, case-insensitive) for tests that only care
     /// about which Sessions match, not how the Query is compiled.
     fn lit(query: &str) -> Matcher {
         Matcher::new(query, false, false).unwrap()
+    }
+
+    fn claude_stores(project_dirs: &[PathBuf]) -> Stores {
+        let projects_root = project_dirs
+            .first()
+            .and_then(|project| project.parent())
+            .expect("test Project has a parent Store");
+        Stores::with_claude_projects_root(projects_root)
+    }
+
+    fn search_projects(
+        project_dirs: &[PathBuf],
+        matcher: &Matcher,
+        content: &ContentSet,
+    ) -> Vec<SessionMatches> {
+        search_stores(&claude_stores(project_dirs), &Scope::All, matcher, content)
+    }
+
+    fn list_project_sessions(project_dirs: &[PathBuf]) -> Vec<SessionIdentity> {
+        list_store_sessions(&claude_stores(project_dirs), &Scope::All)
+    }
+
+    fn project_failures(
+        project_dirs: &[PathBuf],
+        matcher: Option<&Matcher>,
+    ) -> Vec<SessionFailures> {
+        failed_in_stores(&claude_stores(project_dirs), &Scope::All, matcher)
+    }
+
+    fn claude_turns(text: &str) -> Vec<Turn> {
+        turns_from_session(&session::read(text))
     }
 
     fn write_session(dir: &Path, id: &str, lines: &[&str]) -> PathBuf {
@@ -1961,16 +1541,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
         fs::create_dir(&proj).unwrap();
-        let path = write_session(
+        write_session(
             &proj,
             "solo",
             &[r#"{"type":"user","message":{"role":"user","content":"tokio here"}}"#],
         );
 
-        let results = search_session_file(&path, &lit("tokio"), &ContentSet::default());
+        let stores = claude_stores(std::slice::from_ref(&proj));
+        let StoreSessionRef::Unique(session) = resolve_store_session_prefix(&stores, "solo") else {
+            panic!("expected one Session");
+        };
+        let results = search_store_session(&stores, &session, &lit("tokio"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].project, "E--projects-demo", "project derived from the parent dir");
+        assert_eq!(results[0].project.as_deref(), Some("E--projects-demo"));
         assert_eq!(results[0].session_id, "solo");
     }
 
@@ -1990,7 +1574,7 @@ mod tests {
             ],
         );
 
-        let results = search_project_dirs(&[proj], &lit("tokio"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("tokio"), &ContentSet::default());
         let matches = &results[0].matches;
 
         // A Title match is metadata, not a turn. The two user prompts are turns
@@ -2021,10 +1605,10 @@ mod tests {
         let proj = tmp.path().join("E--projects-demo");
         fs::create_dir(&proj).unwrap();
         write_session(&proj, "agree", &lines);
-        let results = search_project_dirs(&[proj], &lit("alpha two"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("alpha two"), &ContentSet::default());
         let search_turn = results[0].matches[0].turn;
 
-        let turns = parse_transcript(&lines.join("\n"));
+        let turns = claude_turns(&lines.join("\n"));
         let show_turn = turns
             .iter()
             .find(|t| t.blocks.iter().any(|b| matches!(b, TurnBlock::Text(s) if s.contains("alpha two"))))
@@ -2050,11 +1634,11 @@ mod tests {
         );
 
         let results =
-            search_project_dirs(std::slice::from_ref(&proj), &lit("borrow"), &ContentSet::default());
+            search_projects(std::slice::from_ref(&proj), &lit("borrow"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
-        assert_eq!(s.project, "E--projects-demo");
+        assert_eq!(s.project.as_deref(), Some("E--projects-demo"));
         assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
         assert_eq!(s.path, path);
         assert_eq!(s.title.as_deref(), Some("Borrow checker chat"));
@@ -2096,7 +1680,7 @@ mod tests {
             &[r#"{"type":"queue-operation","operation":"x","timestamp":"2026-03-01T10:00:00.000Z"}"#],
         );
 
-        let sessions = list_sessions(std::slice::from_ref(&proj));
+        let sessions = list_project_sessions(std::slice::from_ref(&proj));
 
         // Every Session is listed (the contentless one too — no content filter),
         // newest timestamp first.
@@ -2117,10 +1701,10 @@ mod tests {
 
     #[test]
     fn format_sessions_reuses_the_search_header_and_falls_back_to_untitled() {
-        let info = SessionInfo {
+        let info = SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: "E--projects-demo".into(),
+            project: Some("E--projects-demo".into()),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
             title: None,
@@ -2142,10 +1726,10 @@ mod tests {
         // mangled (E--projects-demo). When a Session carries its real cwd we show
         // that instead — matching what `projects` already does (lib.rs:466). The
         // unit `--project` matches is unaffected; only the display label changes.
-        let info = SessionInfo {
+        let info = SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: "E--projects-demo".into(),
+            project: Some("E--projects-demo".into()),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
             path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
             title: Some("Demo chat".into()),
@@ -2157,13 +1741,13 @@ mod tests {
         assert_eq!(out, "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
     }
 
-    /// A bare [`SessionInfo`] for a directory, dated and with a cwd — for
+    /// A bare [`SessionIdentity`] for a directory, dated and with a cwd — for
     /// exercising the Project fold without touching the filesystem.
-    fn sess(dir: &str, id: &str, timestamp: Option<&str>, cwd: Option<&str>) -> SessionInfo {
-        SessionInfo {
+    fn sess(dir: &str, id: &str, timestamp: Option<&str>, cwd: Option<&str>) -> SessionIdentity {
+        SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
-            project: dir.into(),
+            project: Some(dir.into()),
             session_id: id.into(),
             path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
             title: None,
@@ -2230,15 +1814,17 @@ mod tests {
             .map(|(i, segment)| Match { turn: Some(i + 1), segment })
             .collect();
         SessionMatches {
-            harness: Harness::Claude,
-            subagent: None,
-            project: project.into(),
-            session_id: "11111111-2222-3333-4444-555555555555".into(),
-            path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
-            title: title.map(Into::into),
-            timestamp: None,
-            branch: None,
-            cwd: None,
+            session: SessionIdentity {
+                harness: Harness::Claude,
+                subagent: None,
+                project: Some(project.into()),
+                session_id: "11111111-2222-3333-4444-555555555555".into(),
+                path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
+                title: title.map(Into::into),
+                timestamp: None,
+                branch: None,
+                cwd: None,
+            },
             matches,
         }
     }
@@ -2343,15 +1929,17 @@ mod tests {
     #[test]
     fn a_title_match_shows_no_turn_bracket() {
         let s = SessionMatches {
-            harness: Harness::Claude,
-            subagent: None,
-            project: "p".into(),
-            session_id: "abcd1234-rest".into(),
-            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
-            title: Some("Borrow chat".into()),
-            timestamp: None,
-            branch: None,
-            cwd: None,
+            session: SessionIdentity {
+                harness: Harness::Claude,
+                subagent: None,
+                project: Some("p".into()),
+                session_id: "abcd1234-rest".into(),
+                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                title: Some("Borrow chat".into()),
+                timestamp: None,
+                branch: None,
+                cwd: None,
+            },
             matches: vec![Match {
                 turn: None,
                 segment: Segment { role: Role::Title, text: "Borrow chat".into() },
@@ -2513,14 +2101,6 @@ mod tests {
     }
 
     #[test]
-    fn projects_root_is_the_projects_subdir_of_the_claude_dir() {
-        assert_eq!(
-            projects_root(Path::new("/home/jenki/.claude")),
-            PathBuf::from("/home/jenki/.claude/projects")
-        );
-    }
-
-    #[test]
     fn deduplicates_when_the_same_project_dir_is_passed_more_than_once() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("E--projects-demo");
@@ -2532,7 +2112,7 @@ mod tests {
         );
 
         let results =
-            search_project_dirs(&[proj.clone(), proj.clone()], &lit("alpha"), &ContentSet::default());
+            search_projects(&[proj.clone(), proj.clone()], &lit("alpha"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
     }
@@ -2550,7 +2130,7 @@ mod tests {
             );
         }
 
-        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("alpha"), &ContentSet::default());
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["11-a", "22-b", "33-c"]);
@@ -2568,7 +2148,7 @@ mod tests {
         );
 
         let case_sensitive = Matcher::new("borrow", false, true).unwrap();
-        assert!(search_project_dirs(
+        assert!(search_projects(
             std::slice::from_ref(&proj),
             &case_sensitive,
             &ContentSet::default()
@@ -2577,7 +2157,7 @@ mod tests {
 
         let case_insensitive = Matcher::new("borrow", false, false).unwrap();
         assert_eq!(
-            search_project_dirs(&[proj], &case_insensitive, &ContentSet::default()).len(),
+            search_projects(&[proj], &case_insensitive, &ContentSet::default()).len(),
             1
         );
     }
@@ -2600,7 +2180,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-06-01T10:00:00.000Z"}"#],
         );
 
-        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("alpha"), &ContentSet::default());
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["99-alphabetically-last", "01-alphabetically-first"]);
@@ -2617,7 +2197,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"gitBranch":"feature/search"}"#],
         );
 
-        let results = search_project_dirs(&[proj], &lit("alpha"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("alpha"), &ContentSet::default());
 
         assert_eq!(results[0].branch.as_deref(), Some("feature/search"));
     }
@@ -2638,7 +2218,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"unrelated chatter"}}"#],
         );
 
-        let results = search_project_dirs(&[proj], &lit("tokio"), &ContentSet::default());
+        let results = search_projects(&[proj], &lit("tokio"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "hit");
@@ -2657,13 +2237,13 @@ mod tests {
 
         let default = ContentSet::default();
         assert!(
-            search_project_dirs(std::slice::from_ref(&proj), &lit("hunter2"), &default).is_empty(),
+            search_projects(std::slice::from_ref(&proj), &lit("hunter2"), &default).is_empty(),
             "thinking is not in the default content set"
         );
 
         let with_thinking = ContentSet { thinking: true, ..ContentSet::default() };
         assert_eq!(
-            search_project_dirs(&[proj], &lit("hunter2"), &with_thinking).len(),
+            search_projects(&[proj], &lit("hunter2"), &with_thinking).len(),
             1,
             "--thinking includes thinking blocks"
         );
@@ -2685,12 +2265,12 @@ mod tests {
 
         let default = ContentSet::default();
         assert!(
-            search_project_dirs(std::slice::from_ref(&proj), &lit("zzztest"), &default).is_empty(),
+            search_projects(std::slice::from_ref(&proj), &lit("zzztest"), &default).is_empty(),
             "tool calls/results are not in the default content set"
         );
 
         let with_tools = ContentSet { tools: true, ..ContentSet::default() };
-        let results = search_project_dirs(&[proj], &lit("zzztest"), &with_tools);
+        let results = search_projects(&[proj], &lit("zzztest"), &with_tools);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matches.len(), 2, "both the tool_use and tool_result match");
         assert!(results[0].matches.iter().all(|m| m.segment.role == Role::Tool));
@@ -2853,7 +2433,7 @@ mod tests {
             ],
         );
 
-        let results = failed_in_project_dirs(&[proj], None);
+        let results = project_failures(&[proj], None);
 
         assert_eq!(results.len(), 1);
         let failures = &results[0].failures;
@@ -2875,7 +2455,7 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"all good"}]}}"#],
         );
 
-        assert!(failed_in_project_dirs(&[proj], None).is_empty(), "a successful tool_result is not a Failure");
+        assert!(project_failures(&[proj], None).is_empty(), "a successful tool_result is not a Failure");
     }
 
     #[test]
@@ -2894,10 +2474,10 @@ mod tests {
             ],
         );
 
-        let all = failed_in_project_dirs(std::slice::from_ref(&proj), None);
+        let all = project_failures(std::slice::from_ref(&proj), None);
         assert_eq!(all[0].failures.len(), 2, "no query lists every Failure");
 
-        let cargo = failed_in_project_dirs(&[proj], Some(&lit("cargo")));
+        let cargo = project_failures(&[proj], Some(&lit("cargo")));
         assert_eq!(cargo[0].failures.len(), 1, "query keeps only the matching command");
         assert_eq!(cargo[0].failures[0].command.as_deref(), Some("cargo test"));
     }
@@ -2916,15 +2496,17 @@ mod tests {
 
     fn session_of(failures: Vec<Failure>) -> SessionFailures {
         SessionFailures {
-            harness: Harness::Claude,
-            subagent: None,
-            project: "E--projects-demo".into(),
-            session_id: "abcd1234-rest".into(),
-            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
-            title: None,
-            timestamp: None,
-            branch: None,
-            cwd: None,
+            session: SessionIdentity {
+                harness: Harness::Claude,
+                subagent: None,
+                project: Some("E--projects-demo".into()),
+                session_id: "abcd1234-rest".into(),
+                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                title: None,
+                timestamp: None,
+                branch: None,
+                cwd: None,
+            },
             failures,
         }
     }
@@ -3022,15 +2604,17 @@ mod tests {
 
     fn one_failure(failure: Failure) -> SessionFailures {
         SessionFailures {
-            harness: Harness::Claude,
-            subagent: None,
-            project: "E--projects-demo".into(),
-            session_id: "abcd1234-rest".into(),
-            path: PathBuf::from("/x/abcd1234-rest.jsonl"),
-            title: Some("Build chat".into()),
-            timestamp: None,
-            branch: None,
-            cwd: None,
+            session: SessionIdentity {
+                harness: Harness::Claude,
+                subagent: None,
+                project: Some("E--projects-demo".into()),
+                session_id: "abcd1234-rest".into(),
+                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                title: Some("Build chat".into()),
+                timestamp: None,
+                branch: None,
+                cwd: None,
+            },
             failures: vec![failure],
         }
     }
@@ -3236,10 +2820,11 @@ mod tests {
         // A Session in a *different* Project — prefix resolution spans the Store.
         plant(root, "C--hacking-b", "9999aaaa-0000-0000-0000-000000000000");
 
-        assert_eq!(
-            resolve_session_prefix(root, "4c28878f"),
-            SessionRef::Unique(target)
-        );
+        let stores = Stores::with_claude_projects_root(root);
+        let StoreSessionRef::Unique(found) = resolve_store_session_prefix(&stores, "4c28878f") else {
+            panic!("expected a unique Session");
+        };
+        assert_eq!(found.info.path, target);
     }
 
     #[test]
@@ -3249,10 +2834,11 @@ mod tests {
         plant(root, "E--projects-a", "abc222-second");
         plant(root, "E--projects-a", "abc111-first");
 
-        assert_eq!(
-            resolve_session_prefix(root, "abc"),
-            SessionRef::Ambiguous(vec!["abc111-first".into(), "abc222-second".into()])
-        );
+        let stores = Stores::with_claude_projects_root(root);
+        let StoreSessionRef::Ambiguous(ids) = resolve_store_session_prefix(&stores, "abc") else {
+            panic!("expected ambiguous Sessions");
+        };
+        assert_eq!(ids, vec!["abc111-first", "abc222-second"]);
     }
 
     #[test]
@@ -3261,7 +2847,11 @@ mod tests {
         let root = tmp.path();
         plant(root, "E--projects-a", "abc111-first");
 
-        assert_eq!(resolve_session_prefix(root, "zzz"), SessionRef::NotFound);
+        let stores = Stores::with_claude_projects_root(root);
+        assert!(matches!(
+            resolve_store_session_prefix(&stores, "zzz"),
+            StoreSessionRef::NotFound
+        ));
     }
 
     #[test]
@@ -3273,7 +2863,11 @@ mod tests {
         let exact = plant(root, "E--projects-a", "abc111");
         plant(root, "E--projects-a", "abc111-longer");
 
-        assert_eq!(resolve_session_prefix(root, "abc111"), SessionRef::Unique(exact));
+        let stores = Stores::with_claude_projects_root(root);
+        let StoreSessionRef::Unique(found) = resolve_store_session_prefix(&stores, "abc111") else {
+            panic!("expected an exact Session");
+        };
+        assert_eq!(found.info.path, exact);
     }
 
     // --- transcript parsing + rendering ----------------------------------
@@ -3288,7 +2882,7 @@ mod tests {
         ]
         .join("\n");
 
-        let turns = parse_transcript(&session);
+        let turns = claude_turns(&session);
 
         assert_eq!(turns.len(), 2, "only the two Messages become turns");
         assert_eq!(turns[0].number, 1);
@@ -3302,7 +2896,7 @@ mod tests {
     fn a_tool_use_keeps_only_its_key_argument() {
         let session = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"src/lib.rs","limit":50}}]}}"#;
 
-        let turns = parse_transcript(session);
+        let turns = claude_turns(session);
 
         assert_eq!(
             turns[0].blocks,
@@ -3319,7 +2913,7 @@ mod tests {
         ]
         .join("\n");
 
-        let turns = parse_transcript(&session);
+        let turns = claude_turns(&session);
 
         assert_eq!(turns[1].kind, TurnKind::ToolOutput, "a pure tool_result turn is header-less");
         assert_eq!(
@@ -3346,7 +2940,7 @@ mod tests {
             },
         ];
 
-        let out = format_transcript(&turns, false);
+        let out = format_transcript_for_harness(&turns, false, Harness::Claude);
 
         assert!(out.contains("you\n  fix the build"), "user header + prompt: {out}");
         assert!(out.contains("claude\n  Let me look."), "assistant header + reply: {out}");
@@ -3366,7 +2960,7 @@ mod tests {
             }],
         }];
 
-        let out = format_transcript(&turns, false);
+        let out = format_transcript_for_harness(&turns, false, Harness::Claude);
 
         assert!(out.contains("✗ Bash FAILED"), "failure flagged loudly: {out}");
         assert!(out.contains("E0433"), "error text carried through: {out}");
@@ -3381,11 +2975,11 @@ mod tests {
             blocks: vec![TurnBlock::Thinking("step one\nstep two\nstep three".into())],
         }];
 
-        let collapsed = format_transcript(&turns, false);
+        let collapsed = format_transcript_for_harness(&turns, false, Harness::Claude);
         assert!(collapsed.contains("[thinking: 3 lines hidden"), "collapsed with a count: {collapsed}");
         assert!(!collapsed.contains("step two"), "thinking text hidden by default: {collapsed}");
 
-        let expanded = format_transcript(&turns, true);
+        let expanded = format_transcript_for_harness(&turns, true, Harness::Claude);
         assert!(expanded.contains("step two"), "--thinking reveals the text: {expanded}");
     }
 
@@ -3395,12 +2989,15 @@ mod tests {
         // `thinking` string. It must not become a turn or a misleading count.
         let session = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"abc"}]}}"#;
 
-        assert!(parse_transcript(session).is_empty(), "empty thinking yields no turn");
+        assert!(claude_turns(session).is_empty(), "empty thinking yields no turn");
     }
 
     #[test]
     fn an_empty_session_renders_a_clear_placeholder() {
-        assert_eq!(format_transcript(&parse_transcript(""), false), "(no messages)\n");
+        assert_eq!(
+            format_transcript_for_harness(&claude_turns(""), false, Harness::Claude),
+            "(no messages)\n"
+        );
     }
 
     /// `n` plain Prompt turns numbered 1..=n, each carrying a unique marker.
@@ -3454,7 +3051,7 @@ mod tests {
     fn format_windowed_renders_only_the_window_with_hidden_indicators() {
         let turns = numbered_turns(10);
 
-        let out = format_windowed(&turns, 5, 2, false);
+        let out = format_windowed_for_harness(&turns, 5, 2, false, Harness::Claude);
 
         assert!(out.contains("turn-5-text"), "the target turn is shown: {out}");
         assert!(!out.contains("turn-2-text") && !out.contains("turn-8-text"), "outside hidden: {out}");
