@@ -34,7 +34,8 @@ pub(crate) fn tool_key_arg(input: &Value) -> Option<String> {
 /// A Session's header metadata, accumulated in the same pass as its Records.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SessionMeta {
-    /// The AI-generated Title (`ai-title` Record), if any.
+    /// The Harness-derived Title, if any. Claude reads an `ai-title` Record;
+    /// Codex reads `thread_name` from its Store index.
     pub title: Option<String>,
     /// The newest record timestamp (raw ISO 8601) — the recency key. ISO 8601
     /// sorts lexically, so the max string is the newest record.
@@ -102,8 +103,8 @@ pub(crate) struct Session {
 }
 
 /// Assign the shared Message-order coordinate while a Harness parser builds a
-/// Session. Each adapter decides whether its wire Record advances the
-/// coordinate; this type owns the increment and Title exception from ADR 0006.
+/// Session. `message` advances it; adapter-normalized Blocks use `attached` to
+/// retain the current Message coordinate; metadata has no coordinate.
 #[derive(Default)]
 pub(crate) struct RecordBuilder {
     turn: usize,
@@ -111,16 +112,22 @@ pub(crate) struct RecordBuilder {
 }
 
 impl RecordBuilder {
-    pub(crate) fn push(&mut self, advances_turn: bool, kind: Option<RecordKind>) {
-        if advances_turn {
-            self.turn += 1;
-        }
+    pub(crate) fn message(&mut self, kind: Option<RecordKind>) {
+        self.turn += 1;
+        self.push(kind, Some(self.turn));
+    }
+
+    pub(crate) fn attached(&mut self, kind: Option<RecordKind>) {
+        let turn = (self.turn > 0).then_some(self.turn);
+        self.push(kind, turn);
+    }
+
+    pub(crate) fn metadata(&mut self, kind: Option<RecordKind>) {
+        self.push(kind, None);
+    }
+
+    fn push(&mut self, kind: Option<RecordKind>, turn: Option<usize>) {
         if let Some(kind) = kind {
-            let turn = if matches!(kind, RecordKind::Title(_)) {
-                None
-            } else {
-                Some(self.turn)
-            };
             self.records.push(Record { turn, kind });
         }
     }
@@ -164,8 +171,6 @@ pub(crate) fn read(text: &str) -> Session {
         let ty = value.get("type").and_then(|t| t.as_str());
         // The turn number ticks on every Message Record, *before* its content is
         // inspected — a contentless Message still consumes a turn (ADR 0002).
-        let advances_turn = matches!(ty, Some("user") | Some("assistant"));
-
         let kind = match ty {
             Some("user") => user_kind(&value),
             Some("assistant") => assistant_kind(&value),
@@ -176,7 +181,11 @@ pub(crate) fn read(text: &str) -> Session {
             _ => None,
         };
 
-        records.push(advances_turn, kind);
+        if matches!(ty, Some("user") | Some("assistant")) {
+            records.message(kind);
+        } else {
+            records.metadata(kind);
+        }
     }
 
     Session { meta, records: records.finish() }

@@ -58,6 +58,49 @@ pub fn encode_project_dir(path: &str) -> String {
         .collect()
 }
 
+/// The cross-Harness Project identity from ADR 0009: an encoded logical
+/// working directory compared case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectKey(String);
+
+impl ProjectKey {
+    pub(crate) fn from_cwd(cwd: &str) -> Self {
+        Self(encode_project_dir(cwd))
+    }
+
+    pub(crate) fn case_folded(&self) -> String {
+        self.0.to_lowercase()
+    }
+
+    pub(crate) fn matches_cwd(&self, cwd: &str) -> bool {
+        self.0.eq_ignore_ascii_case(&encode_project_dir(cwd))
+    }
+
+    pub(crate) fn contains_ignore_case(&self, substring: &str) -> bool {
+        self.0.to_lowercase().contains(&substring.to_lowercase())
+    }
+}
+
+impl std::ops::Deref for ProjectKey {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for ProjectKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ProjectKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// Which kind of conversation content a [`Segment`] came from. Determines how
 /// a Match is labelled in output and which content-selection flags include it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,9 +121,9 @@ pub struct Segment {
 }
 
 /// Which kinds of content a search includes beyond the always-on default set
-/// (Prompts, Replies, Titles). [`segments_from_record`] emits every kind tagged
-/// by [`Role`]; this is the policy the search pipeline applies to decide what to
-/// actually match. The [`Default`] is the default set only.
+/// (Prompts, Replies, Titles). Session metadata supplies Titles;
+/// [`segments_from_record`] emits Message content tagged by [`Role`]. This is
+/// the policy the search pipeline applies to decide what to match.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentSet {
     /// Also search assistant `thinking` blocks.
@@ -103,7 +146,7 @@ impl ContentSet {
 /// The searchable [`Segment`]s a typed [`Record`] contributes, each tagged with
 /// its [`Role`]. Applies no content policy — the search pipeline decides which
 /// Roles to match via a [`ContentSet`]. A user `text` block is not a Segment
-/// (only Prompts, tool_results, Replies, thinking, tool calls, and Titles are),
+/// (only Prompts, tool_results, Replies, thinking, and tool calls are),
 /// matching `show`'s richer rendering being a separate projection.
 fn segments_from_record(record: &Record) -> Vec<Segment> {
     match &record.kind {
@@ -127,7 +170,10 @@ fn segments_from_record(record: &Record) -> Vec<Segment> {
                 }
             })
             .collect(),
-        RecordKind::Title(text) => vec![Segment { role: Role::Title, text: text.clone() }],
+        // Every Harness exposes its Title through Session metadata. Claude's
+        // on-disk Title Record remains in the lossless model but contributes no
+        // second searchable Segment.
+        RecordKind::Title(_) => Vec::new(),
     }
 }
 
@@ -250,14 +296,24 @@ fn search_parsed_session(
     matcher: &Matcher,
     content: &ContentSet,
 ) -> Option<SessionMatches> {
-    let matches: Vec<Match> = parsed
-        .records
-        .iter()
-        .flat_map(|record| {
-            segments_from_record(record).into_iter().map(move |segment| Match { turn: record.turn, segment })
-        })
-        .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text))
-        .collect();
+    let mut matches = Vec::new();
+    if let Some(title) = parsed.meta.title.as_ref().filter(|title| matcher.is_match(title)) {
+        matches.push(Match {
+            turn: None,
+            segment: Segment { role: Role::Title, text: title.clone() },
+        });
+    }
+    matches.extend(
+        parsed
+            .records
+            .iter()
+            .flat_map(|record| {
+                segments_from_record(record)
+                    .into_iter()
+                    .map(move |segment| Match { turn: record.turn, segment })
+            })
+            .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text)),
+    );
     if matches.is_empty() {
         return None;
     }
@@ -275,7 +331,7 @@ pub struct SessionIdentity {
     pub harness: Harness,
     pub subagent: Option<String>,
     /// The encoded Project key, or `None` when the Harness recorded no cwd.
-    pub project: Option<String>,
+    pub project: Option<ProjectKey>,
     /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
     pub session_id: String,
     /// Full path to the Session file (for `-l` / piping into `show -`).
@@ -306,9 +362,9 @@ pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionIdentit
     stores.sessions(scope).into_iter().map(|session| session.info).collect()
 }
 
-/// A Project's display metadata — the unit the `projects` verb lists (ADR 0004,
-/// ADR 0005). Identity is the on-disk directory; case-variant directories are
-/// folded into one `ProjectInfo` so the listing is identical on every OS.
+/// A Project's display metadata, the unit the `projects` verb lists. ADR 0009
+/// defines identity as the encoded logical working directory across Harnesses;
+/// case variants fold into one `ProjectInfo` on every OS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectInfo {
     /// Display name: the real `cwd` of the group's newest Session, falling back
@@ -330,20 +386,16 @@ pub fn list_store_projects(stores: &Stores, scope: &Scope) -> Vec<ProjectInfo> {
     group_projects(sessions)
 }
 
-/// Fold a flat list of Sessions into Projects: group by the lower-cased
-/// directory name (ADR 0001's union key without a cwd), summing counts and
-/// taking the newest `timestamp` / its `cwd` per group. Split from
-/// [`list_projects`] because the case-variant fold cannot be staged on a
-/// case-insensitive filesystem (the two directories can't coexist), so the
-/// logic is tested here on constructed data rather than the real Store.
+/// Fold Sessions into Projects by their case-folded encoded working-directory
+/// key, summing counts and taking the newest timestamp and cwd per group.
 fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
     // Group by the lower-cased directory name (the case-fold union key).
     let mut groups: HashMap<String, Vec<SessionIdentity>> = HashMap::new();
     for s in sessions {
-        let Some(project) = s.project.as_deref() else {
+        let Some(project) = s.project.as_ref() else {
             continue;
         };
-        groups.entry(project.to_lowercase()).or_default().push(s);
+        groups.entry(project.case_folded()).or_default().push(s);
     }
 
     let mut projects: Vec<(String, ProjectInfo)> = groups
@@ -1207,9 +1259,8 @@ fn failures_in_parsed_session(
     })
 }
 
-/// One row of the `stats` table (ADR 0003): a count of Failures sharing the
-/// same `(tool, signature)`, where `signature` is the matched [`FAILURE_MARKERS`]
-/// entry (or `None` — one no-marker bucket per tool).
+/// One row of the `stats` table: a count of Failures sharing the same tool and
+/// ADR 0007 hybrid signature. Empty failure text uses `(no marker)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureGroup {
     pub tool: Option<String>,

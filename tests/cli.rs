@@ -325,13 +325,13 @@ fn codex_show_and_session_search_use_the_transparent_id_handoff() {
         .arg("c0de0010")
         .assert()
         .success()
-        .stdout(predicates::str::contains("[5] assistant: handoff reply marker"));
+        .stdout(predicates::str::contains("[2] assistant: handoff reply marker"));
 
     command()
         .arg("show")
         .arg("c0de0010")
         .arg("--around")
-        .arg("5")
+        .arg("2")
         .arg("--context")
         .arg("0")
         .assert()
