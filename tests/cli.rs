@@ -65,8 +65,13 @@ fn plant_codex_session(
             "id": id,
             "cwd": cwd.to_string_lossy(),
             "thread_source": thread_source,
+            "agent_nickname": if thread_source == "subagent" {
+                serde_json::Value::String("fixture-worker".into())
+            } else {
+                serde_json::Value::Null
+            },
             "source": if thread_source == "subagent" {
-                serde_json::json!({"subagent": {"other": "fixture-worker"}})
+                serde_json::json!({"subagent": {"thread_spawn": {"agent_nickname": "nested-worker"}}})
             } else {
                 serde_json::json!("cli")
             }
@@ -346,6 +351,7 @@ fn codex_search_content_flags_match_claude_semantics() {
         "user",
         &[
             r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"reasoning-only-needle"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"reasoning_text","text":"content-reasoning-needle"}]}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"exec_command","input":"{\"cmd\":\"tool-call-needle\"}"}}"#,
             r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"tool-output-needle"}}"#,
         ],
@@ -371,6 +377,11 @@ fn codex_search_content_flags_match_claude_semantics() {
         .assert()
         .success()
         .stdout(predicates::str::contains("reasoning-only-needle"));
+    command("content-reasoning")
+        .arg("--thinking")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("content-reasoning-needle"));
     command("tool-output")
         .arg("--tools")
         .assert()

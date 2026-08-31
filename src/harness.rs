@@ -121,7 +121,12 @@ impl HarnessAdapter for CodexAdapter {
                 let title = titles.get(&session_id).cloned();
                 let subagent = if thread_source == Some("subagent") {
                     Some(
-                        meta.pointer("/payload/source/subagent/other")
+                        meta.pointer("/payload/agent_nickname")
+                            .or_else(|| {
+                                meta.pointer(
+                                    "/payload/source/subagent/thread_spawn/agent_nickname",
+                                )
+                            })
                             .and_then(Value::as_str)
                             .unwrap_or("worker")
                             .to_string(),
@@ -232,10 +237,10 @@ fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
             }
         }
         Some("reasoning") => {
-            let text = payload
-                .get("summary")
-                .and_then(Value::as_array)
+            let text = [payload.get("summary"), payload.get("content")]
                 .into_iter()
+                .flatten()
+                .filter_map(Value::as_array)
                 .flatten()
                 .filter_map(|item| item.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
