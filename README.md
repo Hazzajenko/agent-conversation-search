@@ -14,15 +14,17 @@ claude · d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker 
   … +3 more  ›  agsearch show d712581e
 
 $ agsearch show d712581e        # reopen the whole conversation
+$ agsearch current             # inspect the Session that invoked this command
 ```
 
 ## Why
 
 The transcripts use Harness-specific layouts and JSON formats. `agsearch`
-turns them into three jobs:
+turns them into four jobs:
 
 - **find** a conversation — `agsearch <query>`
 - **read** a conversation — `agsearch show <id>`
+- **inspect** the Current Session — `agsearch current`
 - **analyse** what went wrong — `agsearch --failed` / `--stats`
 
 ## Install
@@ -98,6 +100,41 @@ collapse to one-liners; failed tool calls are flagged; thinking is hidden).
 `<id>` is a git-style prefix resolved across your whole history; `-` reads a
 file path from stdin.
 
+### `current` — inspect the invoking Session
+
+`agsearch current` prints the Current Session identified by the Harness that
+launched the command: Harness, full Session ID, Project, title, source path,
+and whether the caller is a worker. It does not guess from the newest
+conversation.
+
+| Flag | Effect |
+|------|--------|
+| `--id-only` | print only the full top-level Session ID |
+| `--path` | print only the source Session path |
+
+Claude identity comes from `$CLAUDE_CODE_SESSION_ID`. Codex identity comes from
+`$CODEX_SESSION_ID` (the top-level Session) and `$CODEX_THREAD_ID` (the
+calling thread). At the top level those two identify the same Session; a
+spawned worker still resolves `current` to the top-level Session.
+
+If no supported Harness identity is available, the command fails rather than
+picking a Session. If the identity is not in the configured Stores, it fails.
+If both Harnesses supply a valid identity, it reports the ambiguity until you
+pass `--harness claude` or `--harness codex`.
+
+```console
+$ agsearch current
+Harness: claude
+Session: 11111111-aaaa-bbbb-cccc-ddddeeee0001
+Project: E:\projects\demo
+Title: Lifetimes and the borrow checker
+Path: C:\Users\you\.claude\projects\E--projects-demo\11111111-aaaa-bbbb-cccc-ddddeeee0001.jsonl
+Caller: top-level
+
+$ agsearch current --id-only
+11111111-aaaa-bbbb-cccc-ddddeeee0001
+```
+
 ### `sessions` — list conversations
 
 `agsearch sessions` lists the Sessions in scope, newest first, one per line —
@@ -170,7 +207,8 @@ Codex subagent Sessions stay excluded unless you pass `--include-subagents`.
 - "No matches" / "No sessions" / "No projects" exit **0** — an empty result is
   not an error.
 - Bad input (unparseable regex, unparseable `--since`, an ambiguous id, a
-  missing Session) exits **non-zero** with a readable message.
+  missing Session, unavailable or ambiguous current context) exits **non-zero**
+  with a readable message.
 
 ## As a Claude Code plugin
 
