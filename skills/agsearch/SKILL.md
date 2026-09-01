@@ -30,6 +30,7 @@ $ agsearch "diesel migration"        # find — note the id in each header
 $ agsearch show 4c28878f             # read — the whole transcript
 $ agsearch show 4c28878f --around 220  # read — just the turns near turn 220
 $ agsearch "panic" --session 4c28878f  # search within that one conversation
+$ agsearch current --id-only          # full id of the Session that invoked this
 ```
 
 Prefer `show` over reading raw `.jsonl` files — it renders the transcript for
@@ -41,6 +42,11 @@ you. Result trailers print the exact `show` command to run next.
   substring). `-e` for regex, `-s` for case-sensitive.
 - `agsearch show <id>` — render a session as a transcript; `--around N`
   windows it.
+- `agsearch current` — print the Current Session (Harness, full id, Project,
+  title, path, caller kind). `--id-only` prints the full top-level id;
+  `--path` prints the source file. Fails outside a supported Harness, when
+  the identity is missing from the configured Stores, or when Claude and Codex
+  both identify a Session unless `--harness` is passed.
 - `agsearch sessions` / `agsearch projects` — list sessions in scope /
   projects in the store, newest first. Use these to orient before searching.
 - `agsearch --failed [query]` — list failed tool calls by structure; the
@@ -75,7 +81,8 @@ when the user asks about a different project, reach for a scope flag:
 - Windows and WSL keep separate histories; `--claude-dir` points at the other
   Claude Store and `--codex-dir` points at the other Codex Store.
 - Use `--harness claude` or `--harness codex` only when the user names a
-  Harness. The default cross-Store search is better when the Harness is unknown.
+  Harness, or when `agsearch current` reports that both Harnesses identified a
+  Session. The default cross-Store search is better when the Harness is unknown.
 - Codex subagent Sessions are excluded by default. Use `--include-subagents`
   when the user asks about worker activity. The output marks those Sessions.
 - Output is human-readable only (no JSON mode); read it directly.

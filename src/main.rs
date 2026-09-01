@@ -6,12 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use agsearch::{
-    failed_in_store_session, failed_in_stores, format_failures, format_paths, format_projects,
-    format_results, format_session_paths, format_sessions, format_stats, format_transcript_for_harness,
-    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
-    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_store_session_prefix,
-    search_store_session, search_stores, resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
-    StoreSessionRef, Stores,
+    failed_in_store_session, failed_in_stores, format_current, format_failures, format_paths,
+    format_projects, format_results, format_session_paths, format_sessions, format_stats,
+    format_transcript_for_harness, format_windowed_for_harness, group_failures, list_store_projects,
+    list_store_sessions, parse_store_transcript, parse_transcript_path, resolve_claude_dir,
+    resolve_current_context, resolve_store_session_prefix, search_store_session, search_stores,
+    resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef,
+    Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -19,6 +20,7 @@ use agsearch::{
 /// By default `agsearch <QUERY>` searches the conversations recorded for the
 /// current working directory's Project, matching a case-insensitive substring.
 /// `agsearch show <SESSION>` renders a whole conversation as a Transcript.
+/// `agsearch current` prints the Session that invoked this command.
 #[derive(Parser)]
 #[command(name = "agsearch", version, about)]
 struct Cli {
@@ -35,7 +37,7 @@ struct Cli {
     #[arg(long, value_enum, global = true)]
     harness: Option<HarnessChoice>,
 
-    /// Include Codex subagent threads in search, listing, and id resolution.
+    /// Include subagent threads in search, listing, and id resolution.
     #[arg(long, global = true)]
     include_subagents: bool,
 
@@ -63,6 +65,13 @@ enum Command {
     Sessions(SessionsArgs),
     /// List the Projects in the Store, newest-touched first (no Query).
     Projects(ProjectsArgs),
+    /// Show the Current Session identified by the invoking Harness.
+    ///
+    /// Reads `CLAUDE_CODE_SESSION_ID` or `CODEX_SESSION_ID` / `CODEX_THREAD_ID`.
+    /// Fails if no supported Harness identity is available, if the Session is
+    /// not in the configured Stores, or if both Harnesses identify a Session
+    /// and `--harness` is omitted. Never guesses from the newest Session.
+    Current(CurrentArgs),
 }
 
 /// Arguments for the `search` verb. Flattened into [`Cli`] so bare
@@ -200,6 +209,19 @@ struct ProjectsArgs {
     project: Option<String>,
 }
 
+/// Arguments for the `current` verb: inspect the Session that invoked
+/// `agsearch`. Fails rather than guessing when no Harness identity is available.
+#[derive(Args)]
+struct CurrentArgs {
+    /// Print only the full top-level Session ID.
+    #[arg(long, conflicts_with = "path")]
+    id_only: bool,
+
+    /// Print only the source Session path.
+    #[arg(long)]
+    path: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -241,6 +263,7 @@ fn main() -> ExitCode {
         Some(Command::Search(args)) => run_search(&stores, &args),
         Some(Command::Sessions(args)) => run_sessions(&stores, &args),
         Some(Command::Projects(args)) => run_projects(&stores, &args),
+        Some(Command::Current(args)) => run_current(&stores, &args),
         None => run_search(&stores, &cli.search),
     }
 }
@@ -262,6 +285,28 @@ fn parse_since(value: Option<&str>) -> Result<Option<i64>, ()> {
                  (use a duration like 3d/2w/1h, or an ISO date like 2026-05-01)"
             );
             Err(())
+        }
+    }
+}
+
+/// Run the `current` verb: resolve the invoking Harness's Current Session and
+/// print it. Never infers identity from the newest Session in the Store.
+fn run_current(stores: &Stores, args: &CurrentArgs) -> ExitCode {
+    match resolve_current_context(stores) {
+        Ok(context) => {
+            let rendered = if args.id_only {
+                format!("{}\n", context.session.session_id)
+            } else if args.path {
+                format!("{}\n", context.session.path.display())
+            } else {
+                format_current(&context)
+            };
+            let _ = write!(anstream::stdout(), "{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("agsearch: {err}");
+            ExitCode::FAILURE
         }
     }
 }
