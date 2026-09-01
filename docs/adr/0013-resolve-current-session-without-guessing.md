@@ -1,0 +1,3 @@
+# Resolve the Current Session without guessing
+
+`current` selects the top-level Session identified by the invoking Harness, while `current-thread` selects the calling thread and resolves to the same Session at the top level. An explicit thread selector may access a spawned worker even though ordinary listing and search exclude subagents. `agsearch current` exposes the resolved metadata, with `--id-only` and `--path` projections for scripts. If no supported Harness identity is available, selection fails rather than inferring the newest Session. If valid identities from more than one Harness are present, selection reports the ambiguity and requires `--harness`; fixed Harness precedence could silently select or export the wrong conversation in nested setups.

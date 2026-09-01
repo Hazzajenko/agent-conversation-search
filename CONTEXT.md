@@ -16,6 +16,14 @@ _Avoid_: folder, workspace, repo.
 A single conversation, stored as exactly one `.jsonl` file. Identified by a `sessionId`, looked up transparently across all Stores. Codex subagent threads (rollout files whose meta marks them as spawned workers) are not Sessions by default — they are excluded from listing and search unless opted in. A forked Codex thread is its own Session.
 _Avoid_: chat, thread. (User-facing surfaces may say "conversation" as a synonym for Session.)
 
+**Current Session**:
+The top-level Session from which a Harness invokes `agsearch`. When a spawned worker invokes it, the Current Session remains the top-level conversation; the worker's own subagent thread is selected explicitly when needed.
+_Avoid_: active chat, current conversation.
+
+**Current Session Family**:
+The Current Session together with every subagent thread descended from it. Multi-Session analysis excludes this entire family by default, including when subagent Sessions are otherwise included.
+_Avoid_: current group, active sessions.
+
 **Record**:
 One line of a Session file — a single JSON object, in the Harness's own envelope (Claude Code: typed lines like `user` / `assistant` / `ai-title`; Codex: `{timestamp, type, payload}` envelopes such as `session_meta` and `response_item`). Every line is a Record, but not every Record is a Message.
 _Avoid_: line, entry, event.
@@ -63,6 +71,10 @@ _Avoid_: excerpt, preview, context.
 **Transcript**:
 The full, human-readable rendering of a single Session in turn order, produced by the `show` verb. Query-agnostic — unlike a Snippet, it is not centered on a Match. Shows Messages only (the noise Records are dropped); tool calls render as compact one-liners and failed tool results are flagged.
 _Avoid_: dump, log, printout, history.
+
+**Export**:
+A point-in-time copy of a Session written outside its Store. An Export is either a portable, human-readable document containing the Transcript and its provenance, or an exact copy of the Harness's raw Session file.
+_Avoid_: backup, dump.
 
 **Failure**:
 A tool call that errored. Detected per Harness: Claude Code marks it structurally (`tool_result` with `is_error: true`, joined via `tool_use_id` to the `tool_use` that names the tool and command); Codex has no such flag, so failure is inferred from the tool-output payload. The unit that failure-analysis lists and counts; distinct from a Match (a Failure is found by structure, not by a Query).
