@@ -28,18 +28,23 @@ impl CurrentContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurrentContextError {
     Unavailable,
-    NotInStore { harness: Harness, session_id: String },
-    Ambiguous { harnesses: Vec<Harness> },
+    NotInStore {
+        harness: Harness,
+        session_id: String,
+    },
+    Ambiguous {
+        harnesses: Vec<Harness>,
+    },
 }
 
 impl std::fmt::Display for CurrentContextError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unavailable => write!(
-                f,
-                "no current Session; run from a supported Harness"
-            ),
-            Self::NotInStore { harness, session_id } => write!(
+            Self::Unavailable => write!(f, "no current Session; run from a supported Harness"),
+            Self::NotInStore {
+                harness,
+                session_id,
+            } => write!(
                 f,
                 "current Session {session_id} was not found in the configured {} Store",
                 harness.as_str()
@@ -96,30 +101,60 @@ pub fn resolve_current_context(stores: &Stores) -> Result<CurrentContext, Curren
     resolve(stores, AmbientIdentity::from_env())
 }
 
-fn resolve(stores: &Stores, ambient: AmbientIdentity) -> Result<CurrentContext, CurrentContextError> {
+fn resolve(
+    stores: &Stores,
+    ambient: AmbientIdentity,
+) -> Result<CurrentContext, CurrentContextError> {
     let configured = stores.configured_harnesses();
-    let mut candidates = Vec::new();
+    let mut attempts = Vec::new();
     if configured.contains(&Harness::Claude) && ambient.claude_present() {
-        candidates.push(Harness::Claude);
+        attempts.push(resolve_claude(
+            stores,
+            ambient.claude_session_id.as_deref().unwrap(),
+        ));
     }
     if configured.contains(&Harness::Codex) && ambient.codex_present() {
-        candidates.push(Harness::Codex);
+        attempts.push(resolve_codex(stores, &ambient));
     }
-    match candidates.as_slice() {
-        [] => Err(CurrentContextError::Unavailable),
-        [Harness::Claude] => resolve_claude(stores, ambient.claude_session_id.as_deref().unwrap()),
-        [Harness::Codex] => resolve_codex(stores, &ambient),
-        _ => Err(CurrentContextError::Ambiguous { harnesses: candidates }),
+
+    if attempts.is_empty() {
+        return Err(CurrentContextError::Unavailable);
+    }
+
+    let mut contexts = Vec::new();
+    let mut errors = Vec::new();
+    for attempt in attempts {
+        match attempt {
+            Ok(context) => contexts.push(context),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    match contexts.len() {
+        0 => Err(errors.into_iter().next().unwrap()),
+        1 => Ok(contexts.pop().unwrap()),
+        _ => Err(CurrentContextError::Ambiguous {
+            harnesses: contexts
+                .into_iter()
+                .map(|context| context.session.harness)
+                .collect(),
+        }),
     }
 }
 
-fn resolve_claude(stores: &Stores, session_id: &str) -> Result<CurrentContext, CurrentContextError> {
+fn resolve_claude(
+    stores: &Stores,
+    session_id: &str,
+) -> Result<CurrentContext, CurrentContextError> {
     let thread = lookup_required(stores, Harness::Claude, session_id)?;
     let session = walk_to_root(stores, &thread)?;
     Ok(context_from(stores, session, thread))
 }
 
-fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> Result<CurrentContext, CurrentContextError> {
+fn resolve_codex(
+    stores: &Stores,
+    ambient: &AmbientIdentity,
+) -> Result<CurrentContext, CurrentContextError> {
     let thread_id = ambient
         .codex_thread_id
         .as_deref()
@@ -127,7 +162,9 @@ fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> Result<CurrentCo
         .unwrap();
     let thread = lookup_required(stores, Harness::Codex, thread_id)?;
     let session = match ambient.codex_session_id.as_deref() {
-        Some(session_id) if session_id != thread_id => lookup_required(stores, Harness::Codex, session_id)?,
+        Some(session_id) if session_id != thread_id => {
+            lookup_required(stores, Harness::Codex, session_id)?
+        }
         _ => walk_to_root(stores, &thread)?,
     };
     Ok(context_from(stores, session, thread))
@@ -138,21 +175,31 @@ fn lookup_required(
     harness: Harness,
     session_id: &str,
 ) -> Result<SessionIdentity, CurrentContextError> {
-    stores.lookup_session(session_id).map(|handle| handle.info).ok_or(CurrentContextError::NotInStore {
-        harness,
-        session_id: session_id.to_string(),
-    })
+    stores
+        .lookup_session(harness, session_id)
+        .map(|handle| handle.info)
+        .ok_or(CurrentContextError::NotInStore {
+            harness,
+            session_id: session_id.to_string(),
+        })
 }
 
-fn context_from(stores: &Stores, session: SessionIdentity, thread: SessionIdentity) -> CurrentContext {
+fn context_from(
+    stores: &Stores,
+    session: SessionIdentity,
+    thread: SessionIdentity,
+) -> CurrentContext {
     CurrentContext {
-        family_ids: collect_family(stores, &session.session_id),
+        family_ids: collect_family(stores, session.harness, &session.session_id),
         session,
         thread,
     }
 }
 
-fn walk_to_root(stores: &Stores, identity: &SessionIdentity) -> Result<SessionIdentity, CurrentContextError> {
+fn walk_to_root(
+    stores: &Stores,
+    identity: &SessionIdentity,
+) -> Result<SessionIdentity, CurrentContextError> {
     let mut current = identity.clone();
     let mut seen = HashSet::new();
     while let Some(parent_id) = current.parent_id.clone() {
@@ -164,11 +211,16 @@ fn walk_to_root(stores: &Stores, identity: &SessionIdentity) -> Result<SessionId
     Ok(current)
 }
 
-fn collect_family(stores: &Stores, root_id: &str) -> Vec<String> {
+fn collect_family(stores: &Stores, harness: Harness, root_id: &str) -> Vec<String> {
     let parents: HashMap<String, Option<String>> = stores
-        .sessions_including_subagents()
+        .sessions_including_subagents(harness)
         .into_iter()
-        .map(|session| (session.info.session_id.clone(), session.info.parent_id.clone()))
+        .map(|session| {
+            (
+                session.info.session_id.clone(),
+                session.info.parent_id.clone(),
+            )
+        })
         .collect();
     let mut family: Vec<String> = parents
         .keys()
@@ -223,7 +275,12 @@ mod tests {
         let cwd = store.path().join("demo");
         let parent_id = "c0de2001-0000-0000-0000-000000000000";
         let worker_id = "c0de2002-0000-0000-0000-000000000000";
-        let dir = store.path().join("sessions").join("2026").join("08").join("28");
+        let dir = store
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("28");
         fs::create_dir_all(&dir).unwrap();
         let parent_meta = serde_json::json!({
             "timestamp": "2026-08-28T10:00:00.000Z",
@@ -240,8 +297,16 @@ mod tests {
                 "parent_thread_id": parent_id
             }
         });
-        fs::write(dir.join(format!("rollout-{parent_id}.jsonl")), parent_meta.to_string()).unwrap();
-        fs::write(dir.join(format!("rollout-{worker_id}.jsonl")), worker_meta.to_string()).unwrap();
+        fs::write(
+            dir.join(format!("rollout-{parent_id}.jsonl")),
+            parent_meta.to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join(format!("rollout-{worker_id}.jsonl")),
+            worker_meta.to_string(),
+        )
+        .unwrap();
 
         let stores = Stores::with_codex(store.path());
         let context = resolve(

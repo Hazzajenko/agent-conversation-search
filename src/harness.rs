@@ -30,6 +30,14 @@ pub(crate) trait HarnessAdapter: Send + Sync {
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity>;
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity>;
 
+    fn enumerate_including_subagents(&self) -> Vec<SessionIdentity> {
+        self.enumerate(true)
+    }
+
+    fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
+        self.matching(prefix, true)
+    }
+
     fn parse(&self, path: &Path) -> Option<Session> {
         let text = std::fs::read_to_string(path).ok()?;
         self.recognizes(&text).then(|| self.parse_text(&text)).flatten()
@@ -118,12 +126,20 @@ impl HarnessAdapter for ClaudeAdapter {
         Some(crate::session::read(text))
     }
 
-    fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(None, include_subagents)
+    fn enumerate(&self, _include_subagents: bool) -> Vec<SessionIdentity> {
+        self.sessions(None, false)
     }
 
-    fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(Some(prefix), include_subagents)
+    fn matching(&self, prefix: &str, _include_subagents: bool) -> Vec<SessionIdentity> {
+        self.sessions(Some(prefix), false)
+    }
+
+    fn enumerate_including_subagents(&self) -> Vec<SessionIdentity> {
+        self.sessions(None, true)
+    }
+
+    fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
+        self.sessions(Some(prefix), true)
     }
 }
 
@@ -584,12 +600,17 @@ impl Stores {
     /// Look up a Session by exact id, including subagent threads that ordinary
     /// listing hides. Current-context resolution uses this so a worker can
     /// name its calling thread without `--include-subagents`.
-    pub(crate) fn lookup_session(&self, id: &str) -> Option<SessionHandle> {
+    pub(crate) fn lookup_session(&self, harness: Harness, id: &str) -> Option<SessionHandle> {
         let mut matches = Vec::new();
-        for (adapter_index, adapter) in self.adapters.iter().enumerate() {
+        for (adapter_index, adapter) in self
+            .adapters
+            .iter()
+            .enumerate()
+            .filter(|(_, adapter)| adapter.harness() == harness)
+        {
             matches.extend(
                 adapter
-                    .matching(id, true)
+                    .matching_including_subagents(id)
                     .into_iter()
                     .filter(|info| info.session_id == id)
                     .map(|info| SessionHandle { info, adapter_index }),
@@ -598,12 +619,17 @@ impl Stores {
         matches.into_iter().next()
     }
 
-    pub(crate) fn sessions_including_subagents(&self) -> Vec<SessionHandle> {
+    pub(crate) fn sessions_including_subagents(&self, harness: Harness) -> Vec<SessionHandle> {
         let mut sessions = Vec::new();
-        for (adapter_index, adapter) in self.adapters.iter().enumerate() {
+        for (adapter_index, adapter) in self
+            .adapters
+            .iter()
+            .enumerate()
+            .filter(|(_, adapter)| adapter.harness() == harness)
+        {
             sessions.extend(
                 adapter
-                    .enumerate(true)
+                    .enumerate_including_subagents()
                     .into_iter()
                     .map(|info| SessionHandle { info, adapter_index }),
             );

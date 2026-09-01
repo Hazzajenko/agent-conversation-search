@@ -94,9 +94,6 @@ fn plant_codex_session(
     thread_source: &str,
     records: &[&str],
 ) -> std::path::PathBuf {
-    let dir = codex_dir.join("sessions").join("2026").join("08").join("28");
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("rollout-2026-08-28T10-00-00-{id}.jsonl"));
     let meta = serde_json::json!({
         "timestamp": "2026-08-28T10:00:00.000Z",
         "type": "session_meta",
@@ -116,12 +113,7 @@ fn plant_codex_session(
             }
         }
     });
-    let text = std::iter::once(meta.to_string())
-        .chain(records.iter().map(|record| (*record).to_string()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&path, text).unwrap();
-    path
+    write_codex_rollout(codex_dir, id, meta, records)
 }
 
 fn plant_codex_title(codex_dir: &std::path::Path, id: &str, title: &str) {
@@ -137,9 +129,6 @@ fn plant_codex_subagent(
     parent_id: &str,
     records: &[&str],
 ) -> std::path::PathBuf {
-    let dir = codex_dir.join("sessions").join("2026").join("08").join("28");
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("rollout-2026-08-28T10-00-00-{id}.jsonl"));
     let meta = serde_json::json!({
         "timestamp": "2026-08-28T10:00:00.000Z",
         "type": "session_meta",
@@ -152,6 +141,18 @@ fn plant_codex_subagent(
             "source": {"subagent": {"thread_spawn": {"agent_nickname": "nested-worker", "parent_thread_id": parent_id}}}
         }
     });
+    write_codex_rollout(codex_dir, id, meta, records)
+}
+
+fn write_codex_rollout(
+    codex_dir: &std::path::Path,
+    id: &str,
+    meta: serde_json::Value,
+    records: &[&str],
+) -> std::path::PathBuf {
+    let dir = codex_dir.join("sessions").join("2026").join("08").join("28");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-08-28T10-00-00-{id}.jsonl"));
     let text = std::iter::once(meta.to_string())
         .chain(records.iter().map(|record| (*record).to_string()))
         .collect::<Vec<_>>()
@@ -2115,4 +2116,95 @@ fn current_reports_ambiguity_when_both_harnesses_identify_a_session() {
         .success()
         .stdout(predicates::str::contains("Harness: claude"))
         .stdout(predicates::str::contains(format!("Session: {claude_id}")));
+}
+
+#[test]
+fn current_ignores_a_stale_identity_when_the_other_harness_resolves() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let codex_id = "c0de4001-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        codex_id,
+        workdir.path(),
+        "user",
+        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"valid codex current"}]}}"#],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env(
+            "CLAUDE_CODE_SESSION_ID",
+            "aaaaaaaa-1111-1111-1111-111111111111",
+        )
+        .env("CODEX_SESSION_ID", codex_id)
+        .env("CODEX_THREAD_ID", codex_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Harness: codex"))
+        .stdout(predicates::str::contains(format!("Session: {codex_id}")));
+}
+
+#[test]
+fn current_does_not_resolve_an_identity_from_the_other_harness_store() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let shared_id = "c0de4002-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        shared_id,
+        workdir.path(),
+        "user",
+        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex only"}]}}"#],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", shared_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("current")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("configured claude Store"));
+}
+
+#[test]
+fn include_subagents_does_not_expose_claude_workers() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0040";
+    let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0041";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        r#"{"type":"user","message":{"role":"user","content":"parent prompt"}}"#,
+    );
+    plant_claude_subagent(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        r#"{"type":"user","message":{"role":"user","content":"claude worker private marker"}}"#,
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--include-subagents")
+        .arg("claude worker private marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
 }
