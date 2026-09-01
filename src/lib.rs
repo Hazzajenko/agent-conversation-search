@@ -29,7 +29,11 @@ impl Matcher {
     /// false matching ignores ASCII/Unicode case. An invalid regex Query yields
     /// an error rather than a panic.
     pub fn new(query: &str, regex: bool, case_sensitive: bool) -> anyhow::Result<Matcher> {
-        let pattern = if regex { query.to_string() } else { regex::escape(query) };
+        let pattern = if regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
         let re = RegexBuilder::new(&pattern)
             .case_insensitive(!case_sensitive)
             .build()?;
@@ -140,23 +144,42 @@ impl ContentSet {
 /// matching `show`'s richer rendering being a separate projection.
 fn segments_from_record(record: &Record) -> Vec<Segment> {
     match &record.kind {
-        RecordKind::Prompt(text) => vec![Segment { role: Role::User, text: text.clone() }],
+        RecordKind::Prompt(text) => vec![Segment {
+            role: Role::User,
+            text: text.clone(),
+        }],
         RecordKind::UserBlocks(blocks) => blocks
             .iter()
             .filter_map(|b| match b {
-                UserBlock::ToolResult { text, .. } => Some(Segment { role: Role::Tool, text: text.clone() }),
+                UserBlock::ToolResult { text, .. } => Some(Segment {
+                    role: Role::Tool,
+                    text: text.clone(),
+                }),
                 UserBlock::Text(_) => None,
             })
             .collect(),
         RecordKind::Assistant(blocks) => blocks
             .iter()
             .map(|b| match b {
-                AssistantBlock::Text(text) => Segment { role: Role::Assistant, text: text.clone() },
-                AssistantBlock::Thinking(text) => Segment { role: Role::Thinking, text: text.clone() },
+                AssistantBlock::Text(text) => Segment {
+                    role: Role::Assistant,
+                    text: text.clone(),
+                },
+                AssistantBlock::Thinking(text) => Segment {
+                    role: Role::Thinking,
+                    text: text.clone(),
+                },
                 AssistantBlock::ToolUse { name, input, .. } => {
                     // Both the tool name and its input arguments are searchable.
-                    let input = if input.is_null() { String::new() } else { input.to_string() };
-                    Segment { role: Role::Tool, text: format!("{name} {input}").trim().to_string() }
+                    let input = if input.is_null() {
+                        String::new()
+                    } else {
+                        input.to_string()
+                    };
+                    Segment {
+                        role: Role::Tool,
+                        text: format!("{name} {input}").trim().to_string(),
+                    }
                 }
             })
             .collect(),
@@ -260,7 +283,11 @@ pub fn search_stores(
             search_parsed_session(&handle.info, parsed, matcher, content)
         })
         .collect();
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     results
 }
 
@@ -273,9 +300,7 @@ pub fn search_store_session(
 ) -> Vec<SessionMatches> {
     stores
         .parse(handle)
-        .and_then(|parsed| {
-            search_parsed_session(&handle.info, parsed, matcher, content)
-        })
+        .and_then(|parsed| search_parsed_session(&handle.info, parsed, matcher, content))
         .into_iter()
         .collect()
 }
@@ -287,10 +312,18 @@ fn search_parsed_session(
     content: &ContentSet,
 ) -> Option<SessionMatches> {
     let mut matches = Vec::new();
-    if let Some(title) = parsed.meta.title.as_ref().filter(|title| matcher.is_match(title)) {
+    if let Some(title) = parsed
+        .meta
+        .title
+        .as_ref()
+        .filter(|title| matcher.is_match(title))
+    {
         matches.push(Match {
             turn: None,
-            segment: Segment { role: Role::Title, text: title.clone() },
+            segment: Segment {
+                role: Role::Title,
+                text: title.clone(),
+            },
         });
     }
     matches.extend(
@@ -300,9 +333,14 @@ fn search_parsed_session(
             .flat_map(|record| {
                 segments_from_record(record)
                     .into_iter()
-                    .map(move |segment| Match { turn: record.turn, segment })
+                    .map(move |segment| Match {
+                        turn: record.turn,
+                        segment,
+                    })
             })
-            .filter(|found| content.includes(found.segment.role) && matcher.is_match(&found.segment.text)),
+            .filter(|found| {
+                content.includes(found.segment.role) && matcher.is_match(&found.segment.text)
+            }),
     );
     if matches.is_empty() {
         return None;
@@ -351,7 +389,11 @@ impl SessionIdentity {
 
 /// List Sessions enumerated by every configured Harness adapter.
 pub fn list_store_sessions(stores: &Stores, scope: &Scope) -> Vec<SessionIdentity> {
-    stores.sessions(scope).into_iter().map(|session| session.info).collect()
+    stores
+        .sessions(scope)
+        .into_iter()
+        .map(|session| session.info)
+        .collect()
 }
 
 /// A Project's display metadata, the unit the `projects` verb lists. ADR 0009
@@ -395,7 +437,11 @@ fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
         .map(|(key, mut members)| {
             // Newest Session first within the group (same comparator as
             // Session listing), so member[0] supplies the display cwd and date.
-            members.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+            members.sort_by(|a, b| {
+                b.timestamp
+                    .cmp(&a.timestamp)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
             let newest = &members[0];
             let name = newest.display_project().to_string();
             let info = ProjectInfo {
@@ -408,7 +454,11 @@ fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
         .collect();
 
     // Newest-touched first; ties broken by the lower-cased group key.
-    projects.sort_by(|a, b| b.1.last_touched.cmp(&a.1.last_touched).then_with(|| a.0.cmp(&b.0)));
+    projects.sort_by(|a, b| {
+        b.1.last_touched
+            .cmp(&a.1.last_touched)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     projects.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -437,7 +487,10 @@ fn centered_snippet(text: &str, matcher: &Matcher, color: bool) -> String {
 
     // Locate the Match in char indices (regex gives byte offsets).
     let span = matcher.find(&collapsed).map(|(b0, b1)| {
-        (collapsed[..b0].chars().count(), collapsed[..b1].chars().count())
+        (
+            collapsed[..b0].chars().count(),
+            collapsed[..b1].chars().count(),
+        )
     });
 
     // Window: the whole text if it fits, otherwise SNIPPET_MAX_CHARS centered
@@ -476,7 +529,9 @@ fn push_window(
 ) {
     use owo_colors::OwoColorize;
 
-    let highlight = span.filter(|_| color).map(|(ms, me)| (ms.max(start), me.min(end)));
+    let highlight = span
+        .filter(|_| color)
+        .map(|(ms, me)| (ms.max(start), me.min(end)));
     match highlight {
         Some((hs, he)) if hs < he => {
             out.extend(&chars[start..hs]);
@@ -563,7 +618,11 @@ pub fn format_projects(projects: &[ProjectInfo]) -> String {
     }
     let mut out = String::new();
     for p in projects {
-        let noun = if p.session_count == 1 { "session" } else { "sessions" };
+        let noun = if p.session_count == 1 {
+            "session"
+        } else {
+            "sessions"
+        };
         out.push_str(&format!("{} · {} {noun}", p.name, p.session_count));
         if let Some(date) = p.last_touched.as_deref().and_then(date_prefix) {
             out.push_str(" · ");
@@ -647,7 +706,10 @@ pub enum StoreSessionRef {
 
 pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessionRef {
     let sessions = stores.matching_sessions(prefix);
-    if let Some(exact) = sessions.iter().find(|session| session.info.session_id == prefix) {
+    if let Some(exact) = sessions
+        .iter()
+        .find(|session| session.info.session_id == prefix)
+    {
         return StoreSessionRef::Unique(exact.clone());
     }
     let mut matches: Vec<SessionHandle> = sessions
@@ -658,7 +720,12 @@ pub fn resolve_store_session_prefix(stores: &Stores, prefix: &str) -> StoreSessi
     match matches.len() {
         0 => StoreSessionRef::NotFound,
         1 => StoreSessionRef::Unique(matches.remove(0)),
-        _ => StoreSessionRef::Ambiguous(matches.into_iter().map(|session| session.info.session_id).collect()),
+        _ => StoreSessionRef::Ambiguous(
+            matches
+                .into_iter()
+                .map(|session| session.info.session_id)
+                .collect(),
+        ),
     }
 }
 
@@ -690,7 +757,11 @@ pub enum TurnBlock {
     ToolUse { name: String, arg: Option<String> },
     /// A tool result, with whether it errored and the tool it came from (joined
     /// via `tool_use_id`), if known.
-    ToolResult { is_error: bool, tool: Option<String>, text: String },
+    ToolResult {
+        is_error: bool,
+        tool: Option<String>,
+        text: String,
+    },
 }
 
 /// A single turn of a Transcript — one user or assistant Message Record, with
@@ -705,7 +776,9 @@ pub struct Turn {
 
 /// Parse a resolved Session through its Harness adapter and project it as a Transcript.
 pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option<Vec<Turn>> {
-    stores.parse(handle).map(|session| turns_from_session(&session))
+    stores
+        .parse(handle)
+        .map(|session| turns_from_session(&session))
 }
 
 /// Parse a Session directly from a readable path, inferring its Harness from
@@ -718,7 +791,11 @@ pub fn parse_transcript_path(path: &Path) -> Option<(Harness, Vec<Turn>)> {
 
 fn turns_from_session(session: &session::Session) -> Vec<Turn> {
     let tools = session::tool_index(&session.records);
-    session.records.iter().filter_map(|record| turn_from_record(record, &tools)).collect()
+    session
+        .records
+        .iter()
+        .filter_map(|record| turn_from_record(record, &tools))
+        .collect()
 }
 
 /// Project one typed [`Record`] into a renderable [`Turn`], or `None` when it
@@ -726,7 +803,10 @@ fn turns_from_session(session: &session::Session) -> Vec<Turn> {
 /// empty Prompt, a signature-only thinking block). The Record already carries its
 /// turn number, so the find→read handoff coordinate (ADR 0002) is never
 /// recomputed here.
-fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<String>)>) -> Option<Turn> {
+fn turn_from_record(
+    record: &Record,
+    tools: &HashMap<String, (String, Option<String>)>,
+) -> Option<Turn> {
     let number = record.turn?;
     let (kind, blocks) = match &record.kind {
         RecordKind::Title(_) => return None,
@@ -737,14 +817,19 @@ fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<Str
             (TurnKind::Prompt, vec![TurnBlock::Text(text.clone())])
         }
         RecordKind::UserBlocks(blocks) => {
-            let blocks: Vec<TurnBlock> =
-                blocks.iter().filter_map(|b| user_turn_block(b, tools)).collect();
+            let blocks: Vec<TurnBlock> = blocks
+                .iter()
+                .filter_map(|b| user_turn_block(b, tools))
+                .collect();
             if blocks.is_empty() {
                 return None;
             }
             // A user Message that is *only* tool results is mechanical output,
             // not something the person typed.
-            let kind = if blocks.iter().all(|b| matches!(b, TurnBlock::ToolResult { .. })) {
+            let kind = if blocks
+                .iter()
+                .all(|b| matches!(b, TurnBlock::ToolResult { .. }))
+            {
                 TurnKind::ToolOutput
             } else {
                 TurnKind::Prompt
@@ -759,19 +844,38 @@ fn turn_from_record(record: &Record, tools: &HashMap<String, (String, Option<Str
             (TurnKind::Reply, blocks)
         }
     };
-    Some(Turn { number, kind, blocks })
+    Some(Turn {
+        number,
+        kind,
+        blocks,
+    })
 }
 
 /// Project one [`UserBlock`] into a renderable [`TurnBlock`], dropping blank
 /// text. A `tool_result` is labelled with the tool that produced it, joined
 /// through `tools`.
-fn user_turn_block(block: &UserBlock, tools: &HashMap<String, (String, Option<String>)>) -> Option<TurnBlock> {
+fn user_turn_block(
+    block: &UserBlock,
+    tools: &HashMap<String, (String, Option<String>)>,
+) -> Option<TurnBlock> {
     match block {
         UserBlock::Text(text) if !text.trim().is_empty() => Some(TurnBlock::Text(text.clone())),
         UserBlock::Text(_) => None,
-        UserBlock::ToolResult { is_error, tool_use_id, text, .. } => {
-            let tool = tool_use_id.as_deref().and_then(|id| tools.get(id)).map(|(name, _)| name.clone());
-            Some(TurnBlock::ToolResult { is_error: *is_error, tool, text: text.clone() })
+        UserBlock::ToolResult {
+            is_error,
+            tool_use_id,
+            text,
+            ..
+        } => {
+            let tool = tool_use_id
+                .as_deref()
+                .and_then(|id| tools.get(id))
+                .map(|(name, _)| name.clone());
+            Some(TurnBlock::ToolResult {
+                is_error: *is_error,
+                tool,
+                text: text.clone(),
+            })
         }
     }
 }
@@ -780,13 +884,24 @@ fn user_turn_block(block: &UserBlock, tools: &HashMap<String, (String, Option<St
 /// blocks that render nothing (blank text, or a signature-only thinking block).
 fn assistant_turn_block(block: &AssistantBlock) -> Option<TurnBlock> {
     match block {
-        AssistantBlock::Text(text) if !text.trim().is_empty() => Some(TurnBlock::Text(text.clone())),
+        AssistantBlock::Text(text) if !text.trim().is_empty() => {
+            Some(TurnBlock::Text(text.clone()))
+        }
         AssistantBlock::Text(_) => None,
-        AssistantBlock::Thinking(text) if !text.trim().is_empty() => Some(TurnBlock::Thinking(text.clone())),
+        AssistantBlock::Thinking(text) if !text.trim().is_empty() => {
+            Some(TurnBlock::Thinking(text.clone()))
+        }
         AssistantBlock::Thinking(_) => None,
         AssistantBlock::ToolUse { name, input, .. } => {
-            let name = if name.is_empty() { "tool".to_string() } else { name.clone() };
-            Some(TurnBlock::ToolUse { name, arg: session::tool_key_arg(input) })
+            let name = if name.is_empty() {
+                "tool".to_string()
+            } else {
+                name.clone()
+            };
+            Some(TurnBlock::ToolUse {
+                name,
+                arg: session::tool_key_arg(input),
+            })
         }
     }
 }
@@ -890,8 +1005,14 @@ fn render_turn(out: &mut String, turn: &Turn, show_thinking: bool, harness: Harn
 pub fn window_turns(turns: &[Turn], around: usize, context: usize) -> (&[Turn], usize, usize) {
     let lo = around.saturating_sub(context);
     let hi = around.saturating_add(context);
-    let start = turns.iter().position(|t| t.number >= lo).unwrap_or(turns.len());
-    let end = turns.iter().rposition(|t| t.number <= hi).map_or(start, |i| i + 1);
+    let start = turns
+        .iter()
+        .position(|t| t.number >= lo)
+        .unwrap_or(turns.len());
+    let end = turns
+        .iter()
+        .rposition(|t| t.number <= hi)
+        .map_or(start, |i| i + 1);
     (&turns[start..end], start, turns.len() - end)
 }
 
@@ -938,17 +1059,26 @@ fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
             } else {
                 let lines = text.lines().count().max(1);
                 let unit = if lines == 1 { "line" } else { "lines" };
-                out.push_str(&format!("  [thinking: {lines} {unit} hidden — pass --thinking]\n"));
+                out.push_str(&format!(
+                    "  [thinking: {lines} {unit} hidden — pass --thinking]\n"
+                ));
             }
         }
         TurnBlock::ToolUse { name, arg } => match arg {
             Some(arg) => out.push_str(&format!("  → {name} {}\n", one_line(arg, TOOL_LINE_MAX))),
             None => out.push_str(&format!("  → {name}\n")),
         },
-        TurnBlock::ToolResult { is_error, tool, text } => {
+        TurnBlock::ToolResult {
+            is_error,
+            tool,
+            text,
+        } => {
             if *is_error {
                 let label = tool.as_deref().unwrap_or("tool");
-                out.push_str(&format!("  ✗ {label} FAILED: {}\n", one_line(text, TOOL_LINE_MAX)));
+                out.push_str(&format!(
+                    "  ✗ {label} FAILED: {}\n",
+                    one_line(text, TOOL_LINE_MAX)
+                ));
             } else {
                 out.push_str(&format!("  ← {}\n", one_line(text, TOOL_LINE_MAX)));
             }
@@ -977,13 +1107,21 @@ struct FailureMarker {
 
 /// A universal marker: its `label` is a stable `stats` signature for everyone.
 const fn fm(needle: &'static str, label: &'static str) -> FailureMarker {
-    FailureMarker { needle, label, universal: true }
+    FailureMarker {
+        needle,
+        label,
+        universal: true,
+    }
 }
 
 /// A display-only hint: used by [`salient_line`] to pick the informative line,
 /// but its Failures group by structural shape, not by this `label`.
 const fn hint(needle: &'static str, label: &'static str) -> FailureMarker {
-    FailureMarker { needle, label, universal: false }
+    FailureMarker {
+        needle,
+        label,
+        universal: false,
+    }
 }
 
 /// Markers that classify a tool Failure, in **priority order**. Applied
@@ -1020,7 +1158,10 @@ const FAILURE_MARKERS: &[FailureMarker] = &[
     // Common tool errors that match no code marker (issue 14) — universal.
     fm("String to replace not found", "String to replace not found"),
     fm("has not been read", "has not been read"),
-    fm("exceeds maximum allowed tokens", "exceeds maximum allowed tokens"),
+    fm(
+        "exceeds maximum allowed tokens",
+        "exceeds maximum allowed tokens",
+    ),
     fm("is not recognized", "is not recognized"),
     fm("Blocked:", "Blocked"),
     // Harness noise: structurally is_error, but the tool did not error. Bucketed
@@ -1041,7 +1182,9 @@ fn strip_ansi(text: &str) -> String {
 /// ANSI codes. Shared by [`failure_signature`] and [`salient_line`] so the
 /// aggregate table and the per-Failure list always agree.
 fn clean_error_text(error_text: &str) -> String {
-    let unwrapped = error_text.replace("<tool_use_error>", "").replace("</tool_use_error>", "");
+    let unwrapped = error_text
+        .replace("<tool_use_error>", "")
+        .replace("</tool_use_error>", "");
     strip_ansi(&unwrapped)
 }
 
@@ -1049,7 +1192,9 @@ fn clean_error_text(error_text: &str) -> String {
 /// matches, or `None` when none do.
 fn matched_marker(error_text: &str) -> Option<&'static FailureMarker> {
     let cleaned = clean_error_text(error_text);
-    FAILURE_MARKERS.iter().find(|m| cleaned.lines().any(|l| l.contains(m.needle)))
+    FAILURE_MARKERS
+        .iter()
+        .find(|m| cleaned.lines().any(|l| l.contains(m.needle)))
 }
 
 /// The Failure's **signature** — the grouping key for `stats` (ADR 0003 / 0007):
@@ -1063,7 +1208,11 @@ fn failure_signature(error_text: &str) -> String {
         Some(m) if m.universal => m.label.to_string(),
         _ => {
             let shape = structural_signature(&salient_line(error_text));
-            if shape.is_empty() { "(no marker)".to_string() } else { shape }
+            if shape.is_empty() {
+                "(no marker)".to_string()
+            } else {
+                shape
+            }
         }
     }
 }
@@ -1118,7 +1267,13 @@ fn salient_line(error_text: &str) -> String {
             .iter()
             .find(|l| l.contains(m.needle))
             .map_or_else(String::new, |l| l.trim().to_string()),
-        None => lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string(),
+        None => lines
+            .iter()
+            .rev()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -1184,7 +1339,11 @@ pub fn failed_in_stores(
             failures_in_parsed_session(&handle.info, parsed, matcher)
         })
         .collect();
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.path.cmp(&b.path)));
+    results.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     results
 }
 
@@ -1220,11 +1379,18 @@ fn failures_in_parsed_session(
         })
         .flat_map(|(turn, blocks)| blocks.iter().map(move |block| (turn, block)))
         .filter_map(|(turn, block)| match block {
-            UserBlock::ToolResult { is_error: true, exit_code: inferred_exit_code, tool_use_id, text } => {
+            UserBlock::ToolResult {
+                is_error: true,
+                exit_code: inferred_exit_code,
+                tool_use_id,
+                text,
+            } => {
                 let (tool, command) = tool_use_id
                     .as_deref()
                     .and_then(|id| tools.get(id))
-                    .map_or((None, None), |(name, command)| (Some(name.clone()), command.clone()));
+                    .map_or((None, None), |(name, command)| {
+                        (Some(name.clone()), command.clone())
+                    });
                 Some(Failure {
                     turn,
                     tool,
@@ -1240,7 +1406,8 @@ fn failures_in_parsed_session(
     // Query filter (optional under --failed): match command or error text.
     if let Some(matcher) = matcher {
         failures.retain(|f| {
-            f.command.as_deref().is_some_and(|c| matcher.is_match(c)) || matcher.is_match(&f.error_text)
+            f.command.as_deref().is_some_and(|c| matcher.is_match(c))
+                || matcher.is_match(&f.error_text)
         });
     }
 
@@ -1270,15 +1437,24 @@ pub fn group_failures(results: &[SessionFailures]) -> Vec<FailureGroup> {
     let mut counts: HashMap<(Option<String>, String), usize> = HashMap::new();
     for session in results {
         for f in &session.failures {
-            *counts.entry((f.tool.clone(), failure_signature(&f.error_text))).or_insert(0) += 1;
+            *counts
+                .entry((f.tool.clone(), failure_signature(&f.error_text)))
+                .or_insert(0) += 1;
         }
     }
     let mut groups: Vec<FailureGroup> = counts
         .into_iter()
-        .map(|((tool, signature), count)| FailureGroup { tool, signature, count })
+        .map(|((tool, signature), count)| FailureGroup {
+            tool,
+            signature,
+            count,
+        })
         .collect();
     groups.sort_by(|a, b| {
-        b.count.cmp(&a.count).then_with(|| a.tool.cmp(&b.tool)).then_with(|| a.signature.cmp(&b.signature))
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.tool.cmp(&b.tool))
+            .then_with(|| a.signature.cmp(&b.signature))
     });
     groups
 }
@@ -1333,7 +1509,11 @@ pub fn format_stats(groups: &[FailureGroup]) -> String {
     } else {
         (recurring, groups.iter().filter(|g| g.count == 1).count())
     };
-    let count_width = shown.iter().map(|g| g.count.to_string().len()).max().unwrap_or(1);
+    let count_width = shown
+        .iter()
+        .map(|g| g.count.to_string().len())
+        .max()
+        .unwrap_or(1);
     // Cap the tool column so one long name (e.g. a verbose MCP tool) cannot
     // sparse-out every other row; longer names simply overflow past the pad.
     const TOOL_WIDTH_CAP: usize = 16;
@@ -1384,7 +1564,10 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
             Some(code) => format!("exit {code} · "),
             None => String::new(),
         };
-        out.push_str(&format!("{indent}{prefix}{}\n", salient_line(&f.error_text)));
+        out.push_str(&format!(
+            "{indent}{prefix}{}\n",
+            salient_line(&f.error_text)
+        ));
     }
 }
 
@@ -1418,7 +1601,11 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
     }
     let bytes = s.as_bytes();
     let (hour, min, sec) = if s.len() >= 19 && (bytes[10] == b'T' || bytes[10] == b' ') {
-        (s.get(11..13)?.parse().ok()?, s.get(14..16)?.parse().ok()?, s.get(17..19)?.parse().ok()?)
+        (
+            s.get(11..13)?.parse().ok()?,
+            s.get(14..16)?.parse().ok()?,
+            s.get(17..19)?.parse().ok()?,
+        )
     } else {
         (0, 0, 0)
     };
@@ -1455,7 +1642,9 @@ pub fn since_cutoff(value: &str, now_unix: i64) -> Option<i64> {
 /// missing or unparseable timestamp is treated as "too old" (excluded), so
 /// `--since` never silently keeps undateable Sessions.
 pub fn timestamp_is_since(timestamp: Option<&str>, cutoff_unix: i64) -> bool {
-    timestamp.and_then(parse_iso_to_unix).is_some_and(|t| t >= cutoff_unix)
+    timestamp
+        .and_then(parse_iso_to_unix)
+        .is_some_and(|t| t >= cutoff_unix)
 }
 
 #[cfg(test)]
@@ -1482,7 +1671,10 @@ mod tests {
     fn regex_mode_matches_the_query_as_a_pattern() {
         let m = Matcher::new("foo|bar", true, false).unwrap();
         assert!(m.is_match("a bar walked in"));
-        assert!(m.is_match("FOO shouted"), "still case-insensitive by default");
+        assert!(
+            m.is_match("FOO shouted"),
+            "still case-insensitive by default"
+        );
         assert!(!m.is_match("neither here"));
     }
 
@@ -1596,10 +1788,14 @@ mod tests {
         let StoreSessionRef::Unique(session) = resolve_store_session_prefix(&stores, "solo") else {
             panic!("expected one Session");
         };
-        let results = search_store_session(&stores, &session, &lit("tokio"), &ContentSet::default());
+        let results =
+            search_store_session(&stores, &session, &lit("tokio"), &ContentSet::default());
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
+        assert_eq!(
+            results[0].project.as_ref().map(ProjectKey::as_str),
+            Some("E--projects-demo")
+        );
         assert_eq!(results[0].session_id, "solo");
     }
 
@@ -1656,11 +1852,19 @@ mod tests {
         let turns = claude_turns(&lines.join("\n"));
         let show_turn = turns
             .iter()
-            .find(|t| t.blocks.iter().any(|b| matches!(b, TurnBlock::Text(s) if s.contains("alpha two"))))
+            .find(|t| {
+                t.blocks
+                    .iter()
+                    .any(|b| matches!(b, TurnBlock::Text(s) if s.contains("alpha two")))
+            })
             .map(|t| t.number);
 
         assert_eq!(search_turn, show_turn, "search and show must agree");
-        assert_eq!(search_turn, Some(3), "the contentless thinking Record at turn 2 still counts");
+        assert_eq!(
+            search_turn,
+            Some(3),
+            "the contentless thinking Record at turn 2 still counts"
+        );
     }
 
     #[test]
@@ -1678,22 +1882,37 @@ mod tests {
             ],
         );
 
-        let results =
-            search_projects(std::slice::from_ref(&proj), &lit("borrow"), &ContentSet::default());
+        let results = search_projects(
+            std::slice::from_ref(&proj),
+            &lit("borrow"),
+            &ContentSet::default(),
+        );
 
         assert_eq!(results.len(), 1);
         let s = &results[0];
-        assert_eq!(s.project.as_ref().map(ProjectKey::as_str), Some("E--projects-demo"));
+        assert_eq!(
+            s.project.as_ref().map(ProjectKey::as_str),
+            Some("E--projects-demo")
+        );
         assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
         assert_eq!(s.path, path);
         assert_eq!(s.title.as_deref(), Some("Borrow checker chat"));
         assert_eq!(
             s.matches,
             vec![
-                Match { turn: None, segment: Segment { role: Role::Title, text: "Borrow checker chat".into() } },
+                Match {
+                    turn: None,
+                    segment: Segment {
+                        role: Role::Title,
+                        text: "Borrow checker chat".into()
+                    }
+                },
                 Match {
                     turn: Some(1),
-                    segment: Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+                    segment: Segment {
+                        role: Role::User,
+                        text: "how do I satisfy the BORROW checker".into()
+                    },
                 },
             ]
         );
@@ -1717,12 +1936,16 @@ mod tests {
         write_session(
             &proj,
             "bbbbbbbb-1111-1111-1111-111111111111",
-            &[r#"{"type":"user","message":{"role":"user","content":"hi again"},"timestamp":"2026-06-01T10:00:00.000Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi again"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+            ],
         );
         write_session(
             &proj,
             "cccccccc-2222-2222-2222-222222222222",
-            &[r#"{"type":"queue-operation","operation":"x","timestamp":"2026-03-01T10:00:00.000Z"}"#],
+            &[
+                r#"{"type":"queue-operation","operation":"x","timestamp":"2026-03-01T10:00:00.000Z"}"#,
+            ],
         );
 
         let sessions = list_project_sessions(std::slice::from_ref(&proj));
@@ -1761,7 +1984,10 @@ mod tests {
         let out = format_sessions(std::slice::from_ref(&info));
         // Byte-identical to a search Session header (ADR 0004): short-id leads,
         // (untitled) fallback, date sliced to its prefix, branch last.
-        assert_eq!(out, "claude · abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n");
+        assert_eq!(
+            out,
+            "claude · abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n"
+        );
 
         assert_eq!(format_sessions(&[]), "No sessions.\n");
     }
@@ -1785,7 +2011,10 @@ mod tests {
             parent_id: None,
         };
         let out = format_sessions(std::slice::from_ref(&info));
-        assert_eq!(out, "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
+        assert_eq!(
+            out,
+            "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n"
+        );
     }
 
     /// A bare [`SessionIdentity`] for a directory, dated and with a cwd — for
@@ -1811,14 +2040,33 @@ mod tests {
         // case-sensitive Store. (This can't be staged on a case-insensitive
         // filesystem, hence constructed data rather than the real Store.)
         let sessions = vec![
-            sess("E--projects-demo", "aaaa", Some("2026-01-01T10:00:00.000Z"), Some("E:\\projects\\demo")),
-            sess("e--projects-demo", "bbbb", Some("2026-06-01T10:00:00.000Z"), Some("E:\\projects\\demo")),
-            sess("E--projects-other", "cccc", Some("2026-06-02T10:00:00.000Z"), Some("E:\\projects\\other")),
+            sess(
+                "E--projects-demo",
+                "aaaa",
+                Some("2026-01-01T10:00:00.000Z"),
+                Some("E:\\projects\\demo"),
+            ),
+            sess(
+                "e--projects-demo",
+                "bbbb",
+                Some("2026-06-01T10:00:00.000Z"),
+                Some("E:\\projects\\demo"),
+            ),
+            sess(
+                "E--projects-other",
+                "cccc",
+                Some("2026-06-02T10:00:00.000Z"),
+                Some("E:\\projects\\other"),
+            ),
         ];
 
         let projects = group_projects(sessions);
 
-        assert_eq!(projects.len(), 2, "the two case-variant dirs fold into one Project");
+        assert_eq!(
+            projects.len(),
+            2,
+            "the two case-variant dirs fold into one Project"
+        );
         // Newest-touched first.
         assert_eq!(projects[0].name, "E:\\projects\\other");
         assert_eq!(projects[0].session_count, 1);
@@ -1826,12 +2074,20 @@ mod tests {
         // name from the newest Session's cwd.
         assert_eq!(projects[1].name, "E:\\projects\\demo");
         assert_eq!(projects[1].session_count, 2);
-        assert_eq!(projects[1].last_touched.as_deref(), Some("2026-06-01T10:00:00.000Z"));
+        assert_eq!(
+            projects[1].last_touched.as_deref(),
+            Some("2026-06-01T10:00:00.000Z")
+        );
     }
 
     #[test]
     fn group_projects_falls_back_to_the_encoded_name_without_a_cwd() {
-        let projects = group_projects(vec![sess("E--projects-x", "aaaa", Some("2026-06-01T10:00:00.000Z"), None)]);
+        let projects = group_projects(vec![sess(
+            "E--projects-x",
+            "aaaa",
+            Some("2026-06-01T10:00:00.000Z"),
+            None,
+        )]);
         assert_eq!(projects[0].name, "E--projects-x");
     }
 
@@ -1843,7 +2099,11 @@ mod tests {
                 session_count: 7,
                 last_touched: Some("2026-06-02T10:00:00.000Z".into()),
             },
-            ProjectInfo { name: "E:\\projects\\solo".into(), session_count: 1, last_touched: None },
+            ProjectInfo {
+                name: "E:\\projects\\solo".into(),
+                session_count: 1,
+                last_touched: None,
+            },
         ];
         let out = format_projects(&projects);
         assert_eq!(
@@ -1859,7 +2119,10 @@ mod tests {
         let matches = segments
             .into_iter()
             .enumerate()
-            .map(|(i, segment)| Match { turn: Some(i + 1), segment })
+            .map(|(i, segment)| Match {
+                turn: Some(i + 1),
+                segment,
+            })
             .collect();
         SessionMatches {
             session: SessionIdentity {
@@ -1872,7 +2135,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
-            parent_id: None,
+                parent_id: None,
             },
             matches,
         }
@@ -1884,55 +2147,97 @@ mod tests {
             "E--projects-demo",
             Some("Borrow checker chat"),
             vec![
-                Segment { role: Role::Title, text: "Borrow checker chat".into() },
-                Segment { role: Role::User, text: "how do I satisfy the BORROW checker".into() },
+                Segment {
+                    role: Role::Title,
+                    text: "Borrow checker chat".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "how do I satisfy the BORROW checker".into(),
+                },
             ],
         )];
 
         let out = format_results(&results, &lit("borrow"), 0, false);
 
-        assert!(out.contains("E--projects-demo"), "header shows project: {out}");
-        assert!(out.contains("Borrow checker chat"), "header shows title: {out}");
+        assert!(
+            out.contains("E--projects-demo"),
+            "header shows project: {out}"
+        );
+        assert!(
+            out.contains("Borrow checker chat"),
+            "header shows title: {out}"
+        );
         assert!(
             out.contains("how do I satisfy the BORROW checker"),
             "match text shown: {out}"
         );
-        assert!(out.to_lowercase().contains("user"), "match labelled by role: {out}");
+        assert!(
+            out.to_lowercase().contains("user"),
+            "match labelled by role: {out}"
+        );
     }
 
     #[test]
     fn search_header_prefers_the_real_cwd_over_the_encoded_directory_name() {
         // search's default-verb header must recover the real path too — not just
         // `sessions`/`projects` (issue 18). The encoded name stays the fallback.
-        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
-            Segment { role: Role::User, text: "borrow".into() },
-        ]);
+        let mut s = session(
+            "E--projects-demo",
+            Some("Borrow chat"),
+            vec![Segment {
+                role: Role::User,
+                text: "borrow".into(),
+            }],
+        );
         s.cwd = Some(r"E:\projects\demo".into());
 
         let out = format_results(&[s], &lit("borrow"), 0, false);
 
-        assert!(out.contains(r"E:\projects\demo"), "header shows real cwd: {out}");
-        assert!(!out.contains("E--projects-demo"), "not the mangled name: {out}");
+        assert!(
+            out.contains(r"E:\projects\demo"),
+            "header shows real cwd: {out}"
+        );
+        assert!(
+            !out.contains("E--projects-demo"),
+            "not the mangled name: {out}"
+        );
     }
 
     #[test]
     fn header_shows_the_date_sliced_from_the_timestamp() {
-        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
-            Segment { role: Role::User, text: "borrow".into() },
-        ]);
+        let mut s = session(
+            "E--projects-demo",
+            Some("Borrow chat"),
+            vec![Segment {
+                role: Role::User,
+                text: "borrow".into(),
+            }],
+        );
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
 
         let out = format_results(&[s], &lit("borrow"), 0, false);
 
-        assert!(out.contains("2026-06-01"), "header shows YYYY-MM-DD date: {out}");
-        assert!(!out.contains("10:00:00"), "but not the time component: {out}");
+        assert!(
+            out.contains("2026-06-01"),
+            "header shows YYYY-MM-DD date: {out}"
+        );
+        assert!(
+            !out.contains("10:00:00"),
+            "but not the time component: {out}"
+        );
     }
 
     #[test]
     fn header_shows_the_git_branch() {
-        let mut s = session("E--projects-demo", Some("Borrow chat"), vec![
-            Segment { role: Role::User, text: "borrow".into() },
-        ]);
+        let mut s = session(
+            "E--projects-demo",
+            Some("Borrow chat"),
+            vec![Segment {
+                role: Role::User,
+                text: "borrow".into(),
+            }],
+        );
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
         s.branch = Some("feature/search".into());
 
@@ -1946,7 +2251,10 @@ mod tests {
         let s = session(
             "E--projects-demo",
             Some("Borrow chat"),
-            vec![Segment { role: Role::User, text: "borrow".into() }],
+            vec![Segment {
+                role: Role::User,
+                text: "borrow".into(),
+            }],
         );
 
         let out = format_results(&[s], &lit("borrow"), 0, false);
@@ -1964,15 +2272,27 @@ mod tests {
             "p",
             Some("t"),
             vec![
-                Segment { role: Role::User, text: "alpha".into() },
-                Segment { role: Role::Assistant, text: "alpha beta".into() },
+                Segment {
+                    role: Role::User,
+                    text: "alpha".into(),
+                },
+                Segment {
+                    role: Role::Assistant,
+                    text: "alpha beta".into(),
+                },
             ],
         );
 
         let out = format_results(&[s], &lit("alpha"), 0, false);
 
-        assert!(out.contains("[1] user:"), "first match shows its turn: {out}");
-        assert!(out.contains("[2] assistant:"), "second match shows its turn: {out}");
+        assert!(
+            out.contains("[1] user:"),
+            "first match shows its turn: {out}"
+        );
+        assert!(
+            out.contains("[2] assistant:"),
+            "second match shows its turn: {out}"
+        );
     }
 
     #[test]
@@ -1988,31 +2308,53 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
-            parent_id: None,
+                parent_id: None,
             },
             matches: vec![Match {
                 turn: None,
-                segment: Segment { role: Role::Title, text: "Borrow chat".into() },
+                segment: Segment {
+                    role: Role::Title,
+                    text: "Borrow chat".into(),
+                },
             }],
         };
 
         let out = format_results(&[s], &lit("borrow"), 0, false);
 
-        assert!(out.contains("  title: Borrow chat"), "title rendered without a turn bracket: {out}");
+        assert!(
+            out.contains("  title: Borrow chat"),
+            "title rendered without a turn bracket: {out}"
+        );
     }
 
     #[test]
     fn snippet_is_centered_on_the_match_with_ellipses_when_cut() {
         let text = format!("{}NEEDLE {}", "alpha ".repeat(60), "omega ".repeat(60));
-        let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text,
+            }],
+        );
 
         let out = format_results(&[s], &lit("NEEDLE"), 0, false);
         // The match line is the indented one carrying NEEDLE.
-        let line = out.lines().find(|l| l.contains("NEEDLE")).expect("a line with the match");
+        let line = out
+            .lines()
+            .find(|l| l.contains("NEEDLE"))
+            .expect("a line with the match");
 
         assert!(line.contains('…'), "ellipsis marks the cut: {line}");
-        assert!(line.contains("alpha"), "context before the match is shown: {line}");
-        assert!(line.contains("omega"), "context after the match is shown: {line}");
+        assert!(
+            line.contains("alpha"),
+            "context before the match is shown: {line}"
+        );
+        assert!(
+            line.contains("omega"),
+            "context after the match is shown: {line}"
+        );
         assert!(
             line.chars().count() <= SNIPPET_MAX_CHARS + 30,
             "the window is bounded (got {} chars): {line}",
@@ -2023,13 +2365,30 @@ mod tests {
     #[test]
     fn snippet_at_the_start_has_no_leading_ellipsis() {
         let text = format!("NEEDLE {}", "omega ".repeat(100));
-        let s = session("p", Some("t"), vec![Segment { role: Role::User, text }]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text,
+            }],
+        );
 
         let out = format_results(&[s], &lit("NEEDLE"), 0, false);
-        let snippet = out.lines().find(|l| l.contains("NEEDLE")).unwrap().trim_start();
+        let snippet = out
+            .lines()
+            .find(|l| l.contains("NEEDLE"))
+            .unwrap()
+            .trim_start();
 
-        assert!(snippet.starts_with("[1] user: NEEDLE"), "no leading ellipsis at the start: {snippet}");
-        assert!(snippet.ends_with('…'), "trailing ellipsis where cut: {snippet}");
+        assert!(
+            snippet.starts_with("[1] user: NEEDLE"),
+            "no leading ellipsis at the start: {snippet}"
+        );
+        assert!(
+            snippet.ends_with('…'),
+            "trailing ellipsis where cut: {snippet}"
+        );
     }
 
     #[test]
@@ -2037,29 +2396,60 @@ mod tests {
         let results = vec![session(
             "p",
             Some("t"),
-            vec![Segment { role: Role::User, text: "line one\n\n   line two".into() }],
+            vec![Segment {
+                role: Role::User,
+                text: "line one\n\n   line two".into(),
+            }],
         )];
 
         let out = format_results(&results, &lit("line"), 0, false);
 
         assert!(out.contains("line one line two"), "collapsed: {out}");
-        assert!(!out.contains("line one\n"), "no embedded newline in snippet: {out}");
+        assert!(
+            !out.contains("line one\n"),
+            "no embedded newline in snippet: {out}"
+        );
     }
 
     #[test]
     fn caps_matches_per_session_and_notes_how_many_more() {
-        let s = session("p", Some("t"), vec![
-            Segment { role: Role::User, text: "match-one".into() },
-            Segment { role: Role::User, text: "match-two".into() },
-            Segment { role: Role::User, text: "match-three".into() },
-            Segment { role: Role::User, text: "match-four".into() },
-            Segment { role: Role::User, text: "match-five".into() },
-        ]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![
+                Segment {
+                    role: Role::User,
+                    text: "match-one".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-two".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-three".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-four".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-five".into(),
+                },
+            ],
+        );
 
         let out = format_results(&[s], &lit("match"), 3, false);
 
-        assert!(out.contains("match-one") && out.contains("match-three"), "first 3 shown: {out}");
-        assert!(!out.contains("match-four") && !out.contains("match-five"), "rest hidden: {out}");
+        assert!(
+            out.contains("match-one") && out.contains("match-three"),
+            "first 3 shown: {out}"
+        );
+        assert!(
+            !out.contains("match-four") && !out.contains("match-five"),
+            "rest hidden: {out}"
+        );
         assert!(out.contains("+2 more"), "notes how many were hidden: {out}");
         assert!(
             out.contains("agsearch show 11111111"),
@@ -2069,12 +2459,28 @@ mod tests {
 
     #[test]
     fn a_cap_of_zero_means_unlimited() {
-        let s = session("p", Some("t"), vec![
-            Segment { role: Role::User, text: "match-one".into() },
-            Segment { role: Role::User, text: "match-two".into() },
-            Segment { role: Role::User, text: "match-three".into() },
-            Segment { role: Role::User, text: "match-four".into() },
-        ]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![
+                Segment {
+                    role: Role::User,
+                    text: "match-one".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-two".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-three".into(),
+                },
+                Segment {
+                    role: Role::User,
+                    text: "match-four".into(),
+                },
+            ],
+        );
 
         let out = format_results(&[s], &lit("match"), 0, false);
 
@@ -2084,9 +2490,23 @@ mod tests {
 
     #[test]
     fn files_mode_prints_one_session_path_per_line() {
-        let mut a = session("p", Some("t"), vec![Segment { role: Role::User, text: "x".into() }]);
+        let mut a = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text: "x".into(),
+            }],
+        );
         a.path = PathBuf::from("/store/proj/aaa.jsonl");
-        let mut b = session("p", Some("t"), vec![Segment { role: Role::User, text: "x".into() }]);
+        let mut b = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text: "x".into(),
+            }],
+        );
         b.path = PathBuf::from("/store/proj/bbb.jsonl");
 
         let out = format_paths(&[a, b]);
@@ -2096,25 +2516,44 @@ mod tests {
 
     #[test]
     fn color_on_highlights_the_match_with_ansi_codes() {
-        let s = session("p", Some("t"), vec![
-            Segment { role: Role::User, text: "the BORROW checker".into() },
-        ]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text: "the BORROW checker".into(),
+            }],
+        );
 
         let out = format_results(&[s], &lit("borrow"), 0, true);
 
-        assert!(out.contains('\u{1b}'), "ANSI escape present when colour is on: {out:?}");
-        assert!(out.contains("checker"), "surrounding text still present: {out:?}");
+        assert!(
+            out.contains('\u{1b}'),
+            "ANSI escape present when colour is on: {out:?}"
+        );
+        assert!(
+            out.contains("checker"),
+            "surrounding text still present: {out:?}"
+        );
     }
 
     #[test]
     fn color_off_emits_no_ansi_codes() {
-        let s = session("p", Some("t"), vec![
-            Segment { role: Role::User, text: "the BORROW checker".into() },
-        ]);
+        let s = session(
+            "p",
+            Some("t"),
+            vec![Segment {
+                role: Role::User,
+                text: "the BORROW checker".into(),
+            }],
+        );
 
         let out = format_results(&[s], &lit("borrow"), 0, false);
 
-        assert!(!out.contains('\u{1b}'), "no ANSI when colour is off: {out:?}");
+        assert!(
+            !out.contains('\u{1b}'),
+            "no ANSI when colour is off: {out:?}"
+        );
     }
 
     #[test]
@@ -2161,8 +2600,11 @@ mod tests {
             &[r#"{"type":"user","message":{"role":"user","content":"alpha match"}}"#],
         );
 
-        let results =
-            search_projects(&[proj.clone(), proj.clone()], &lit("alpha"), &ContentSet::default());
+        let results = search_projects(
+            &[proj.clone(), proj.clone()],
+            &lit("alpha"),
+            &ContentSet::default(),
+        );
 
         assert_eq!(results.len(), 1);
     }
@@ -2222,18 +2664,25 @@ mod tests {
         write_session(
             &proj,
             "01-alphabetically-first",
-            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-01-15T10:00:00.000Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-01-15T10:00:00.000Z"}"#,
+            ],
         );
         write_session(
             &proj,
             "99-alphabetically-last",
-            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-06-01T10:00:00.000Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"alpha match"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+            ],
         );
 
         let results = search_projects(&[proj], &lit("alpha"), &ContentSet::default());
 
         let ids: Vec<_> = results.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["99-alphabetically-last", "01-alphabetically-first"]);
+        assert_eq!(
+            ids,
+            vec!["99-alphabetically-last", "01-alphabetically-first"]
+        );
     }
 
     #[test]
@@ -2244,7 +2693,9 @@ mod tests {
         write_session(
             &proj,
             "branchy",
-            &[r#"{"type":"user","message":{"role":"user","content":"alpha match"},"gitBranch":"feature/search"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"alpha match"},"gitBranch":"feature/search"}"#,
+            ],
         );
 
         let results = search_projects(&[proj], &lit("alpha"), &ContentSet::default());
@@ -2282,7 +2733,9 @@ mod tests {
         write_session(
             &proj,
             "only-thinking",
-            &[r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"the secret password is hunter2"}]}}"#],
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"the secret password is hunter2"}]}}"#,
+            ],
         );
 
         let default = ContentSet::default();
@@ -2291,7 +2744,10 @@ mod tests {
             "thinking is not in the default content set"
         );
 
-        let with_thinking = ContentSet { thinking: true, ..ContentSet::default() };
+        let with_thinking = ContentSet {
+            thinking: true,
+            ..ContentSet::default()
+        };
         assert_eq!(
             search_projects(&[proj], &lit("hunter2"), &with_thinking).len(),
             1,
@@ -2319,11 +2775,21 @@ mod tests {
             "tool calls/results are not in the default content set"
         );
 
-        let with_tools = ContentSet { tools: true, ..ContentSet::default() };
+        let with_tools = ContentSet {
+            tools: true,
+            ..ContentSet::default()
+        };
         let results = search_projects(&[proj], &lit("zzztest"), &with_tools);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].matches.len(), 2, "both the tool_use and tool_result match");
-        assert!(results[0].matches.iter().all(|m| m.segment.role == Role::Tool));
+        assert_eq!(
+            results[0].matches.len(),
+            2,
+            "both the tool_use and tool_result match"
+        );
+        assert!(results[0]
+            .matches
+            .iter()
+            .all(|m| m.segment.role == Role::Tool));
     }
 
     // --- failure salient-line picker -------------------------------------
@@ -2333,14 +2799,20 @@ mod tests {
         // The handoff's load-bearing finding: the first line is just the exit
         // code; the real error is several lines down.
         let text = "Exit code 101\n   Compiling x\nerror[E0433]: failed to resolve: use of undeclared crate\n  --> src/main.rs:3:5";
-        assert_eq!(salient_line(text), "error[E0433]: failed to resolve: use of undeclared crate");
+        assert_eq!(
+            salient_line(text),
+            "error[E0433]: failed to resolve: use of undeclared crate"
+        );
     }
 
     #[test]
     fn salient_line_finds_a_panic() {
         let text = "Exit code 101\nrunning 1 test\nthread 'main' panicked at src/lib.rs:5:9:\nassertion `left == right` failed";
         // `panicked at` outranks `assertion failed` in the priority list.
-        assert_eq!(salient_line(text), "thread 'main' panicked at src/lib.rs:5:9:");
+        assert_eq!(
+            salient_line(text),
+            "thread 'main' panicked at src/lib.rs:5:9:"
+        );
     }
 
     #[test]
@@ -2434,7 +2906,9 @@ mod tests {
             "has not been read",
         );
         assert_eq!(
-            failure_signature("File content (38631 tokens) exceeds maximum allowed tokens (25000)."),
+            failure_signature(
+                "File content (38631 tokens) exceeds maximum allowed tokens (25000)."
+            ),
             "exceeds maximum allowed tokens",
         );
         assert_eq!(
@@ -2442,7 +2916,9 @@ mod tests {
             "is not recognized",
         );
         assert_eq!(
-            failure_signature("<tool_use_error>Blocked: sleep 90 followed by: cat x</tool_use_error>"),
+            failure_signature(
+                "<tool_use_error>Blocked: sleep 90 followed by: cat x</tool_use_error>"
+            ),
             "Blocked",
         );
     }
@@ -2451,9 +2927,11 @@ mod tests {
     fn failure_signature_buckets_harness_noise_under_clean_labels() {
         // Structurally is_error, but the tool did not error — bucketed, not
         // filtered, under a short label distinct from the matched substring.
-        let rejected = "The user doesn't want to proceed with this tool use. The tool use was rejected";
+        let rejected =
+            "The user doesn't want to proceed with this tool use. The tool use was rejected";
         assert_eq!(failure_signature(rejected), "rejected");
-        let unavailable = "claude-opus-4-8 is temporarily unavailable, so auto mode cannot determine safety";
+        let unavailable =
+            "claude-opus-4-8 is temporarily unavailable, so auto mode cannot determine safety";
         assert_eq!(failure_signature(unavailable), "unavailable");
         // A parallel-batch sibling errored, so this call was cancelled unrun.
         let cancelled = "Cancelled: parallel tool call Bash(cd \"D:\\x\" && git status) errored";
@@ -2488,10 +2966,22 @@ mod tests {
         assert_eq!(results.len(), 1);
         let failures = &results[0].failures;
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].tool.as_deref(), Some("Bash"), "tool joined from tool_use");
-        assert_eq!(failures[0].command.as_deref(), Some("cargo test"), "command joined from tool_use");
+        assert_eq!(
+            failures[0].tool.as_deref(),
+            Some("Bash"),
+            "tool joined from tool_use"
+        );
+        assert_eq!(
+            failures[0].command.as_deref(),
+            Some("cargo test"),
+            "command joined from tool_use"
+        );
         assert_eq!(failures[0].exit_code, Some(101));
-        assert_eq!(failures[0].turn, Some(3), "turn 3: user(1), assistant(2), tool_result(3)");
+        assert_eq!(
+            failures[0].turn,
+            Some(3),
+            "turn 3: user(1), assistant(2), tool_result(3)"
+        );
     }
 
     #[test]
@@ -2502,10 +2992,15 @@ mod tests {
         write_session(
             &proj,
             "ok",
-            &[r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"all good"}]}}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"all good"}]}}"#,
+            ],
         );
 
-        assert!(project_failures(&[proj], None).is_empty(), "a successful tool_result is not a Failure");
+        assert!(
+            project_failures(&[proj], None).is_empty(),
+            "a successful tool_result is not a Failure"
+        );
     }
 
     #[test]
@@ -2528,7 +3023,11 @@ mod tests {
         assert_eq!(all[0].failures.len(), 2, "no query lists every Failure");
 
         let cargo = project_failures(&[proj], Some(&lit("cargo")));
-        assert_eq!(cargo[0].failures.len(), 1, "query keeps only the matching command");
+        assert_eq!(
+            cargo[0].failures.len(),
+            1,
+            "query keeps only the matching command"
+        );
         assert_eq!(cargo[0].failures[0].command.as_deref(), Some("cargo test"));
     }
 
@@ -2556,7 +3055,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
-            parent_id: None,
+                parent_id: None,
             },
             failures,
         }
@@ -2567,17 +3066,29 @@ mod tests {
         let s = session_of(vec![
             // Two compile errors of the *same shape* (only the masked code
             // differs) collapse into one structural group of 2.
-            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type"),
-            failure("PowerShell", "Exit code 101\nerror[E0609]: cannot find type"),
+            failure(
+                "PowerShell",
+                "Exit code 101\nerror[E0433]: cannot find type",
+            ),
+            failure(
+                "PowerShell",
+                "Exit code 101\nerror[E0609]: cannot find type",
+            ),
             // A universal OS error keeps its stable label.
-            failure("Bash", "Exit code 2\nunexpected EOF while looking for matching `\"'"),
+            failure(
+                "Bash",
+                "Exit code 2\nunexpected EOF while looking for matching `\"'",
+            ),
         ]);
 
         let groups = group_failures(std::slice::from_ref(&s));
 
         let ps = groups
             .iter()
-            .find(|g| g.tool.as_deref() == Some("PowerShell") && g.signature == "error[EN]: cannot find type")
+            .find(|g| {
+                g.tool.as_deref() == Some("PowerShell")
+                    && g.signature == "error[EN]: cannot find type"
+            })
             .expect("a PowerShell structural group");
         assert_eq!(ps.count, 2);
         let bash = groups
@@ -2613,9 +3124,14 @@ mod tests {
 
         // No marker matched, yet nothing lands in one `(no marker)` lump — each
         // gets the masked shape of its salient line.
-        assert!(groups.iter().all(|g| g.signature != "(no marker)"), "no lumping");
+        assert!(
+            groups.iter().all(|g| g.signature != "(no marker)"),
+            "no lumping"
+        );
         assert!(groups.iter().any(|g| g.signature == "nothing notable here"));
-        assert!(groups.iter().any(|g| g.signature == "another line the markers do not recognise"));
+        assert!(groups
+            .iter()
+            .any(|g| g.signature == "another line the markers do not recognise"));
         assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 2);
     }
 
@@ -2624,15 +3140,28 @@ mod tests {
         let s = session_of(vec![
             failure("Bash", "Exit code 2\nThe tool use was rejected"),
             failure("PowerShell", "claude is temporarily unavailable"),
-            failure("PowerShell", "Exit code 101\nerror[E0433]: cannot find type"),
+            failure(
+                "PowerShell",
+                "Exit code 101\nerror[E0433]: cannot find type",
+            ),
         ]);
 
         let groups = group_failures(&[s]);
 
         // All three remain present (nothing filtered); noise carries clean labels.
-        assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), 3, "no Failure is dropped");
-        assert!(groups.iter().any(|g| g.signature == "rejected"), "rejection bucketed");
-        assert!(groups.iter().any(|g| g.signature == "unavailable"), "unavailability bucketed");
+        assert_eq!(
+            groups.iter().map(|g| g.count).sum::<usize>(),
+            3,
+            "no Failure is dropped"
+        );
+        assert!(
+            groups.iter().any(|g| g.signature == "rejected"),
+            "rejection bucketed"
+        );
+        assert!(
+            groups.iter().any(|g| g.signature == "unavailable"),
+            "unavailability bucketed"
+        );
     }
 
     #[test]
@@ -2648,7 +3177,10 @@ mod tests {
 
         // The three same-shape compile errors are the biggest group.
         assert_eq!(groups.first().unwrap().count, 3, "the biggest group leads");
-        assert_eq!(groups.first().unwrap().signature, "error[EN]: mismatched types");
+        assert_eq!(
+            groups.first().unwrap().signature,
+            "error[EN]: mismatched types"
+        );
     }
 
     // --- rendering Failures ----------------------------------------------
@@ -2665,7 +3197,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
-            parent_id: None,
+                parent_id: None,
             },
             failures: vec![failure],
         }
@@ -2689,7 +3221,10 @@ mod tests {
         );
         assert!(out.contains("[3] ✗ Bash"), "turn + failed tool: {out}");
         assert!(out.contains("cargo test"), "command shown: {out}");
-        assert!(out.contains("exit 101 · error[E0433]: failed to resolve"), "salient line with exit: {out}");
+        assert!(
+            out.contains("exit 101 · error[E0433]: failed to resolve"),
+            "salient line with exit: {out}"
+        );
     }
 
     #[test]
@@ -2705,8 +3240,14 @@ mod tests {
 
         let out = format_failures(&[s], 3, false);
 
-        assert!(out.contains(r"E:\projects\demo"), "header shows real cwd: {out}");
-        assert!(!out.contains("E--projects-demo"), "not the mangled name: {out}");
+        assert!(
+            out.contains(r"E:\projects\demo"),
+            "header shows real cwd: {out}"
+        );
+        assert!(
+            !out.contains("E--projects-demo"),
+            "not the mangled name: {out}"
+        );
     }
 
     #[test]
@@ -2721,27 +3262,49 @@ mod tests {
 
         let out = format_failures(&[s], 3, true);
 
-        assert!(out.contains("line two"), "--full shows non-salient lines too: {out}");
-        assert!(out.contains("error[E0433]: failed"), "and the salient one: {out}");
+        assert!(
+            out.contains("line two"),
+            "--full shows non-salient lines too: {out}"
+        );
+        assert!(
+            out.contains("error[E0433]: failed"),
+            "and the salient one: {out}"
+        );
     }
 
     #[test]
     fn format_failures_reports_cleanly_when_there_are_none() {
-        assert!(format_failures(&[], 3, false).to_lowercase().contains("no failures"));
+        assert!(format_failures(&[], 3, false)
+            .to_lowercase()
+            .contains("no failures"));
     }
 
     #[test]
     fn format_stats_renders_a_counts_table_of_tool_signature_and_count() {
         let groups = vec![
-            FailureGroup { tool: Some("PowerShell".into()), signature: "error[EN]: x".into(), count: 12 },
-            FailureGroup { tool: Some("Bash".into()), signature: "unexpected EOF".into(), count: 4 },
+            FailureGroup {
+                tool: Some("PowerShell".into()),
+                signature: "error[EN]: x".into(),
+                count: 12,
+            },
+            FailureGroup {
+                tool: Some("Bash".into()),
+                signature: "unexpected EOF".into(),
+                count: 4,
+            },
         ];
 
         let out = format_stats(&groups);
 
         assert!(out.contains("12"), "the count: {out}");
-        assert!(out.contains("✗ PowerShell"), "tool with the failed glyph: {out}");
-        assert!(out.contains("error[EN]: x"), "the structural signature: {out}");
+        assert!(
+            out.contains("✗ PowerShell"),
+            "tool with the failed glyph: {out}"
+        );
+        assert!(
+            out.contains("error[EN]: x"),
+            "the structural signature: {out}"
+        );
         assert!(out.contains("unexpected EOF"));
         // Counts are right-aligned to a common width, so 4 trails 12.
         let twelve = out.find("12").unwrap();
@@ -2751,14 +3314,25 @@ mod tests {
 
     #[test]
     fn format_stats_renders_the_no_marker_bucket() {
-        let groups = vec![FailureGroup { tool: Some("Read".into()), signature: "(no marker)".into(), count: 5 }];
-        assert!(format_stats(&groups).contains("(no marker)"), "names the empty-text bucket");
+        let groups = vec![FailureGroup {
+            tool: Some("Read".into()),
+            signature: "(no marker)".into(),
+            count: 5,
+        }];
+        assert!(
+            format_stats(&groups).contains("(no marker)"),
+            "names the empty-text bucket"
+        );
     }
 
     #[test]
     fn format_stats_caps_the_tool_column_so_a_long_name_does_not_sparse_out_rows() {
         let groups = vec![
-            FailureGroup { tool: Some("PowerShell".into()), signature: "error[EN]: x".into(), count: 2 },
+            FailureGroup {
+                tool: Some("PowerShell".into()),
+                signature: "error[EN]: x".into(),
+                count: 2,
+            },
             FailureGroup {
                 tool: Some("mcp__ccd_session_mgmt__search_session_transcripts".into()),
                 signature: "(no marker)".into(),
@@ -2778,32 +3352,62 @@ mod tests {
     #[test]
     fn format_stats_folds_singletons_into_a_trailer_when_recurring_rows_exist() {
         let groups = vec![
-            FailureGroup { tool: Some("Edit".into()), signature: "has not been read".into(), count: 44 },
-            FailureGroup { tool: Some("Bash".into()), signature: "=== user settings ===".into(), count: 1 },
-            FailureGroup { tool: Some("Bash".into()), signature: "---README---".into(), count: 1 },
+            FailureGroup {
+                tool: Some("Edit".into()),
+                signature: "has not been read".into(),
+                count: 44,
+            },
+            FailureGroup {
+                tool: Some("Bash".into()),
+                signature: "=== user settings ===".into(),
+                count: 1,
+            },
+            FailureGroup {
+                tool: Some("Bash".into()),
+                signature: "---README---".into(),
+                count: 1,
+            },
         ];
 
         let out = format_stats(&groups);
 
-        assert!(out.contains("has not been read"), "recurring rows stay: {out}");
-        assert!(!out.contains("=== user settings ==="), "singletons fold away: {out}");
+        assert!(
+            out.contains("has not been read"),
+            "recurring rows stay: {out}"
+        );
+        assert!(
+            !out.contains("=== user settings ==="),
+            "singletons fold away: {out}"
+        );
         assert!(!out.contains("---README---"), "singletons fold away: {out}");
-        assert!(out.contains("+2 more singleton signatures"), "the trailer counts them: {out}");
+        assert!(
+            out.contains("+2 more singleton signatures"),
+            "the trailer counts them: {out}"
+        );
     }
 
     #[test]
     fn format_stats_has_no_trailer_when_there_are_no_singletons() {
-        let groups =
-            vec![FailureGroup { tool: Some("Edit".into()), signature: "has not been read".into(), count: 2 }];
-        assert!(!format_stats(&groups).contains("more singleton"), "no trailer when N=0");
+        let groups = vec![FailureGroup {
+            tool: Some("Edit".into()),
+            signature: "has not been read".into(),
+            count: 2,
+        }];
+        assert!(
+            !format_stats(&groups).contains("more singleton"),
+            "no trailer when N=0"
+        );
     }
 
     #[test]
     fn format_stats_shows_singletons_when_every_row_is_one() {
         // An all-singleton table has no noise burying signal — folding it would
         // hide everything behind a bare trailer.
-        let groups =
-            vec![FailureGroup { tool: Some("Read".into()), signature: "does not exist".into(), count: 1 }];
+        let groups = vec![FailureGroup {
+            tool: Some("Read".into()),
+            signature: "does not exist".into(),
+            count: 1,
+        }];
         let out = format_stats(&groups);
         assert!(out.contains("does not exist"), "shown, not folded: {out}");
         assert!(!out.contains("more singleton"), "{out}");
@@ -2834,7 +3438,10 @@ mod tests {
     #[test]
     fn since_parses_an_absolute_iso_date() {
         // The absolute form ignores `now`; the cutoff is the date itself.
-        assert_eq!(since_cutoff("2026-05-01", 999), parse_iso_to_unix("2026-05-01"));
+        assert_eq!(
+            since_cutoff("2026-05-01", 999),
+            parse_iso_to_unix("2026-05-01")
+        );
     }
 
     #[test]
@@ -2846,10 +3453,22 @@ mod tests {
     #[test]
     fn timestamp_is_since_excludes_older_missing_and_unparseable() {
         let cutoff = parse_iso_to_unix("2026-05-01").unwrap();
-        assert!(timestamp_is_since(Some("2026-06-01T10:00:00.000Z"), cutoff), "newer kept");
-        assert!(!timestamp_is_since(Some("2026-04-01T10:00:00.000Z"), cutoff), "older excluded");
-        assert!(!timestamp_is_since(None, cutoff), "missing timestamp excluded");
-        assert!(!timestamp_is_since(Some("not a date"), cutoff), "unparseable excluded");
+        assert!(
+            timestamp_is_since(Some("2026-06-01T10:00:00.000Z"), cutoff),
+            "newer kept"
+        );
+        assert!(
+            !timestamp_is_since(Some("2026-04-01T10:00:00.000Z"), cutoff),
+            "older excluded"
+        );
+        assert!(
+            !timestamp_is_since(None, cutoff),
+            "missing timestamp excluded"
+        );
+        assert!(
+            !timestamp_is_since(Some("not a date"), cutoff),
+            "unparseable excluded"
+        );
     }
 
     // --- session-id prefix resolution -----------------------------------
@@ -2868,12 +3487,17 @@ mod tests {
     fn a_unique_prefix_resolves_to_one_session_across_the_whole_store() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let target = plant(root, "E--projects-a", "4c28878f-c921-4892-8d26-78df5801f301");
+        let target = plant(
+            root,
+            "E--projects-a",
+            "4c28878f-c921-4892-8d26-78df5801f301",
+        );
         // A Session in a *different* Project — prefix resolution spans the Store.
         plant(root, "C--hacking-b", "9999aaaa-0000-0000-0000-000000000000");
 
         let stores = Stores::with_claude_projects_root(root);
-        let StoreSessionRef::Unique(found) = resolve_store_session_prefix(&stores, "4c28878f") else {
+        let StoreSessionRef::Unique(found) = resolve_store_session_prefix(&stores, "4c28878f")
+        else {
             panic!("expected a unique Session");
         };
         assert_eq!(found.info.path, target);
@@ -2939,7 +3563,10 @@ mod tests {
         assert_eq!(turns.len(), 2, "only the two Messages become turns");
         assert_eq!(turns[0].number, 1);
         assert_eq!(turns[0].kind, TurnKind::Prompt);
-        assert_eq!(turns[0].blocks, vec![TurnBlock::Text("how do I borrow check".into())]);
+        assert_eq!(
+            turns[0].blocks,
+            vec![TurnBlock::Text("how do I borrow check".into())]
+        );
         assert_eq!(turns[1].number, 2);
         assert_eq!(turns[1].kind, TurnKind::Reply);
     }
@@ -2952,7 +3579,10 @@ mod tests {
 
         assert_eq!(
             turns[0].blocks,
-            vec![TurnBlock::ToolUse { name: "Read".into(), arg: Some("src/lib.rs".into()) }]
+            vec![TurnBlock::ToolUse {
+                name: "Read".into(),
+                arg: Some("src/lib.rs".into())
+            }]
         );
     }
 
@@ -2967,7 +3597,11 @@ mod tests {
 
         let turns = claude_turns(&session);
 
-        assert_eq!(turns[1].kind, TurnKind::ToolOutput, "a pure tool_result turn is header-less");
+        assert_eq!(
+            turns[1].kind,
+            TurnKind::ToolOutput,
+            "a pure tool_result turn is header-less"
+        );
         assert_eq!(
             turns[1].blocks,
             vec![TurnBlock::ToolResult {
@@ -2981,22 +3615,38 @@ mod tests {
     #[test]
     fn renders_speaker_labels_and_a_compact_tool_one_liner() {
         let turns = vec![
-            Turn { number: 1, kind: TurnKind::Prompt, blocks: vec![TurnBlock::Text("fix the build".into())] },
+            Turn {
+                number: 1,
+                kind: TurnKind::Prompt,
+                blocks: vec![TurnBlock::Text("fix the build".into())],
+            },
             Turn {
                 number: 2,
                 kind: TurnKind::Reply,
                 blocks: vec![
                     TurnBlock::Text("Let me look.".into()),
-                    TurnBlock::ToolUse { name: "Bash".into(), arg: Some("cargo build".into()) },
+                    TurnBlock::ToolUse {
+                        name: "Bash".into(),
+                        arg: Some("cargo build".into()),
+                    },
                 ],
             },
         ];
 
         let out = format_transcript_for_harness(&turns, false, Harness::Claude);
 
-        assert!(out.contains("you\n  fix the build"), "user header + prompt: {out}");
-        assert!(out.contains("claude\n  Let me look."), "assistant header + reply: {out}");
-        assert!(out.contains("→ Bash cargo build"), "compact tool one-liner: {out}");
+        assert!(
+            out.contains("you\n  fix the build"),
+            "user header + prompt: {out}"
+        );
+        assert!(
+            out.contains("claude\n  Let me look."),
+            "assistant header + reply: {out}"
+        );
+        assert!(
+            out.contains("→ Bash cargo build"),
+            "compact tool one-liner: {out}"
+        );
         assert!(!out.contains("{"), "no raw JSON in the transcript: {out}");
     }
 
@@ -3014,9 +3664,15 @@ mod tests {
 
         let out = format_transcript_for_harness(&turns, false, Harness::Claude);
 
-        assert!(out.contains("✗ Bash FAILED"), "failure flagged loudly: {out}");
+        assert!(
+            out.contains("✗ Bash FAILED"),
+            "failure flagged loudly: {out}"
+        );
         assert!(out.contains("E0433"), "error text carried through: {out}");
-        assert!(!out.starts_with("you"), "tool output has no speaker header: {out}");
+        assert!(
+            !out.starts_with("you"),
+            "tool output has no speaker header: {out}"
+        );
     }
 
     #[test]
@@ -3028,11 +3684,20 @@ mod tests {
         }];
 
         let collapsed = format_transcript_for_harness(&turns, false, Harness::Claude);
-        assert!(collapsed.contains("[thinking: 3 lines hidden"), "collapsed with a count: {collapsed}");
-        assert!(!collapsed.contains("step two"), "thinking text hidden by default: {collapsed}");
+        assert!(
+            collapsed.contains("[thinking: 3 lines hidden"),
+            "collapsed with a count: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("step two"),
+            "thinking text hidden by default: {collapsed}"
+        );
 
         let expanded = format_transcript_for_harness(&turns, true, Harness::Claude);
-        assert!(expanded.contains("step two"), "--thinking reveals the text: {expanded}");
+        assert!(
+            expanded.contains("step two"),
+            "--thinking reveals the text: {expanded}"
+        );
     }
 
     #[test]
@@ -3041,7 +3706,10 @@ mod tests {
         // `thinking` string. It must not become a turn or a misleading count.
         let session = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"abc"}]}}"#;
 
-        assert!(claude_turns(session).is_empty(), "empty thinking yields no turn");
+        assert!(
+            claude_turns(session).is_empty(),
+            "empty thinking yields no turn"
+        );
     }
 
     #[test]
@@ -3105,10 +3773,22 @@ mod tests {
 
         let out = format_windowed_for_harness(&turns, 5, 2, false, Harness::Claude);
 
-        assert!(out.contains("turn-5-text"), "the target turn is shown: {out}");
-        assert!(!out.contains("turn-2-text") && !out.contains("turn-8-text"), "outside hidden: {out}");
-        assert!(out.contains("2 earlier turns hidden"), "above indicator: {out}");
-        assert!(out.contains("3 later turns hidden"), "below indicator: {out}");
+        assert!(
+            out.contains("turn-5-text"),
+            "the target turn is shown: {out}"
+        );
+        assert!(
+            !out.contains("turn-2-text") && !out.contains("turn-8-text"),
+            "outside hidden: {out}"
+        );
+        assert!(
+            out.contains("2 earlier turns hidden"),
+            "above indicator: {out}"
+        );
+        assert!(
+            out.contains("3 later turns hidden"),
+            "below indicator: {out}"
+        );
     }
 
     proptest::proptest! {
