@@ -2208,3 +2208,374 @@ fn include_subagents_does_not_expose_claude_workers() {
         .success()
         .stdout(predicates::str::contains("No matches."));
 }
+
+/// Two Sessions in the current Project, one of which is the Current Session.
+/// Returns the Current Session's id.
+fn plant_current_and_earlier_session(
+    workdir: &std::path::Path,
+    claude: &std::path::Path,
+    current_marker: &str,
+    earlier_marker: &str,
+) -> String {
+    let current_id = "11111111-aaaa-bbbb-cccc-ddddeeee0100";
+    plant_claude_session(
+        claude,
+        workdir,
+        current_id,
+        &format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{current_marker}"}},"timestamp":"2026-08-02T10:00:00.000Z"}}"#
+        ),
+    );
+    plant_claude_session(
+        claude,
+        workdir,
+        "11111111-aaaa-bbbb-cccc-ddddeeee0101",
+        &format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{earlier_marker}"}},"timestamp":"2026-08-01T10:00:00.000Z"}}"#
+        ),
+    );
+    current_id.to_string()
+}
+
+#[test]
+fn project_search_excludes_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in earlier work"))
+        .stdout(predicates::str::contains("shared marker in the current session").not());
+}
+
+#[test]
+fn whole_store_search_excludes_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--all")
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in earlier work"))
+        .stdout(predicates::str::contains("shared marker in the current session").not());
+}
+
+#[test]
+fn search_excludes_current_family_workers_under_include_subagents() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let current_id = "c0de5001-0000-0000-0000-000000000000";
+    let worker_id = "c0de5002-0000-0000-0000-000000000000";
+    let other_id = "c0de5003-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        current_id,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"family marker from the parent"}]}}"#],
+    );
+    plant_codex_subagent(
+        codex.path(),
+        worker_id,
+        workdir.path(),
+        current_id,
+        &[r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"family marker from the worker"}]}}"#],
+    );
+    plant_codex_session(
+        codex.path(),
+        other_id,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-27T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"family marker from earlier work"}]}}"#],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CODEX_SESSION_ID", current_id)
+        .env("CODEX_THREAD_ID", current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("--include-subagents")
+        .arg("family marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("family marker from earlier work"))
+        .stdout(predicates::str::contains("family marker from the parent").not())
+        .stdout(predicates::str::contains("family marker from the worker").not());
+}
+
+/// Plant a current Session and an earlier Session, each with one failed tool
+/// call, so failure analysis has one Failure inside the family and one outside.
+fn plant_current_and_earlier_failures(
+    workdir: &std::path::Path,
+    claude: &std::path::Path,
+) -> String {
+    let current_id = "11111111-aaaa-bbbb-cccc-ddddeeee0110";
+    plant_claude_session(
+        claude,
+        workdir,
+        current_id,
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"CurrentTool","input":{"command":"cargo build"}}]},"timestamp":"2026-08-02T10:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"error: current failure"}]}}"#,
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        claude,
+        workdir,
+        "11111111-aaaa-bbbb-cccc-ddddeeee0111",
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"EarlierTool","input":{"command":"cargo test"}}]},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"error: earlier failure"}]}}"#,
+        ]
+        .join("\n"),
+    );
+    current_id.to_string()
+}
+
+#[test]
+fn failed_excludes_the_current_session_family() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("EarlierTool"))
+        .stdout(predicates::str::contains("CurrentTool").not());
+}
+
+#[test]
+fn stats_excludes_the_current_session_family() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--stats")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("EarlierTool"))
+        .stdout(predicates::str::contains("CurrentTool").not());
+}
+
+#[test]
+fn include_current_restores_the_family_for_search() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--include-current")
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in earlier work"))
+        .stdout(predicates::str::contains("shared marker in the current session"));
+}
+
+#[test]
+fn include_current_restores_the_family_for_failure_analysis() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
+
+    let command = |mode: &str| {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .env("CLAUDE_CODE_SESSION_ID", &current_id)
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--include-current")
+            .arg(mode);
+        command
+    };
+
+    command("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("EarlierTool"))
+        .stdout(predicates::str::contains("CurrentTool"));
+    command("--stats")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("EarlierTool"))
+        .stdout(predicates::str::contains("CurrentTool"));
+}
+
+#[test]
+fn include_current_restores_family_workers_under_include_subagents() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let current_id = "c0de5101-0000-0000-0000-000000000000";
+    let worker_id = "c0de5102-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        current_id,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"restored marker from the parent"}]}}"#],
+    );
+    plant_codex_subagent(
+        codex.path(),
+        worker_id,
+        workdir.path(),
+        current_id,
+        &[r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"restored marker from the worker"}]}}"#],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CODEX_SESSION_ID", current_id)
+        .env("CODEX_THREAD_ID", current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("--include-subagents")
+        .arg("--include-current")
+        .arg("restored marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("restored marker from the parent"))
+        .stdout(predicates::str::contains("restored marker from the worker"));
+}
+
+#[test]
+fn an_explicit_session_selector_searches_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--session")
+        .arg(&current_id)
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in the current session"));
+}
+
+#[test]
+fn sessions_still_lists_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]));
+}
+
+#[test]
+fn projects_still_counts_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", &current_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("projects")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 sessions"));
+}
+
+#[test]
+fn analysis_outside_a_harness_keeps_every_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    plant_current_and_earlier_session(
+        workdir.path(),
+        claude.path(),
+        "shared marker in the current session",
+        "shared marker in earlier work",
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in earlier work"))
+        .stdout(predicates::str::contains("shared marker in the current session"));
+}
