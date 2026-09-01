@@ -8,11 +8,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use agsearch::{
     failed_in_store_session, failed_in_stores, format_current, format_failures, format_paths,
     format_projects, format_results, format_session_paths, format_sessions, format_stats,
-    format_transcript_for_harness, format_windowed_for_harness, group_failures, list_store_projects,
-    list_store_sessions, parse_store_transcript, parse_transcript_path, resolve_claude_dir,
-    resolve_codex_dir, resolve_current_context, resolve_current_session, resolve_store_session_prefix,
-    search_store_session, search_stores, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
-    StoreSessionRef, Stores,
+    format_transcript_for_harness, format_windowed_for_harness, group_failures,
+    list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
+    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
+    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
+    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -357,7 +357,9 @@ fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
     };
 
     let scope = match args.project.as_deref() {
-        Some(name_substring) => Scope::Project { name_substring: name_substring.to_string() },
+        Some(name_substring) => Scope::Project {
+            name_substring: name_substring.to_string(),
+        },
         None => Scope::All,
     };
     let mut projects = list_store_projects(stores, &scope);
@@ -397,7 +399,10 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             StoreSessionRef::Ambiguous(ids) => {
-                eprintln!("agsearch: '{prefix}' is ambiguous — {} sessions match:", ids.len());
+                eprintln!(
+                    "agsearch: '{prefix}' is ambiguous — {} sessions match:",
+                    ids.len()
+                );
                 for id in ids.iter().take(10) {
                     eprintln!("  {id}");
                 }
@@ -443,7 +448,11 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     if args.failed || args.stats {
         let mut results = match &session_path {
             Some(session) => failed_in_store_session(&stores, session, matcher.as_ref()),
-            None => failed_in_stores(&stores, &build_scope(args.all, args.project.as_deref(), &cwd), matcher.as_ref()),
+            None => failed_in_stores(
+                &stores,
+                &build_scope(args.all, args.project.as_deref(), &cwd),
+                matcher.as_ref(),
+            ),
         };
         if let Some(cutoff) = cutoff {
             results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -458,7 +467,9 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     }
 
     let Some(matcher) = matcher else {
-        eprintln!("agsearch: a query is required (or use `agsearch show <session>`, or `--failed`)");
+        eprintln!(
+            "agsearch: a query is required (or use `agsearch show <session>`, or `--failed`)"
+        );
         return ExitCode::FAILURE;
     };
 
@@ -468,7 +479,12 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     };
     let mut results = match &session_path {
         Some(session) => search_store_session(&stores, session, &matcher, &content),
-        None => search_stores(&stores, &build_scope(args.all, args.project.as_deref(), &cwd), &matcher, &content),
+        None => search_stores(
+            &stores,
+            &build_scope(args.all, args.project.as_deref(), &cwd),
+            &matcher,
+            &content,
+        ),
     };
     if let Some(cutoff) = cutoff {
         results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
@@ -493,9 +509,13 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
     if all {
         Scope::All
     } else if let Some(name_substring) = project {
-        Scope::Project { name_substring: name_substring.to_string() }
+        Scope::Project {
+            name_substring: name_substring.to_string(),
+        }
     } else {
-        Scope::Current { cwd: cwd.to_string_lossy().into_owned() }
+        Scope::Current {
+            cwd: cwd.to_string_lossy().into_owned(),
+        }
     }
 }
 
@@ -547,13 +567,9 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
     // --around windows the Transcript on a turn (from a search hit); without it
     // the whole Transcript is rendered. --context only applies inside a window.
     let rendered = match args.around {
-        Some(around) => format_windowed_for_harness(
-            &turns,
-            around,
-            args.context,
-            args.thinking,
-            harness,
-        ),
+        Some(around) => {
+            format_windowed_for_harness(&turns, around, args.context, args.thinking, harness)
+        }
         None => format_transcript_for_harness(&turns, args.thinking, harness),
     };
     let _ = write!(anstream::stdout(), "{rendered}");
