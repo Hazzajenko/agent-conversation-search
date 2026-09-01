@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long, value_enum, global = true)]
     harness: Option<HarnessChoice>,
 
-    /// Include subagent threads in search, listing, and id resolution.
+    /// Include Codex subagent threads in search, listing, and id resolution.
     #[arg(long, global = true)]
     include_subagents: bool,
 
