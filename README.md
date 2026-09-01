@@ -94,7 +94,10 @@ match the prompt that asked. `--include-current` puts the family back, and
 `--session <id>` searches a Session you name even when it is the current one.
 The exclusion covers `--failed` and `--stats` too, and applies to family
 workers when `--include-subagents` is on. Outside a supported Harness nothing
-is excluded, because there is no Current Session to find.
+is excluded, because there is no Current Session to find. Where identity is
+only partly resolvable, analysis errs towards hiding: if both Harnesses
+identify a Session, both families go; if the Current Session itself is missing
+from the Store, the calling thread and its workers still go.
 
 ### `show` — read a whole conversation
 
