@@ -159,7 +159,10 @@ impl HarnessResolution {
 fn qualify_family(harness: Harness, session_ids: Vec<String>) -> Vec<SessionKey> {
     session_ids
         .into_iter()
-        .map(|session_id| SessionKey { harness, session_id })
+        .map(|session_id| SessionKey {
+            harness,
+            session_id,
+        })
         .collect()
 }
 
@@ -211,11 +214,19 @@ fn resolve(
 fn resolve_claude(stores: &Stores, session_id: &str) -> HarnessResolution {
     let thread = match lookup_required(stores, Harness::Claude, session_id) {
         Ok(thread) => thread,
-        Err(error) => return HarnessResolution { thread: None, context: Err(error) },
+        Err(error) => {
+            return HarnessResolution {
+                thread: None,
+                context: Err(error),
+            }
+        }
     };
     let context =
         walk_to_root(stores, &thread).map(|session| context_from(stores, session, thread.clone()));
-    HarnessResolution { thread: Some(thread), context }
+    HarnessResolution {
+        thread: Some(thread),
+        context,
+    }
 }
 
 fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> HarnessResolution {
@@ -226,7 +237,12 @@ fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> HarnessResolutio
         .unwrap();
     let thread = match lookup_required(stores, Harness::Codex, thread_id) {
         Ok(thread) => thread,
-        Err(error) => return HarnessResolution { thread: None, context: Err(error) },
+        Err(error) => {
+            return HarnessResolution {
+                thread: None,
+                context: Err(error),
+            }
+        }
     };
     // Codex names the top-level Session directly when it differs from the
     // calling thread; otherwise the thread's own ancestry is the only source.
@@ -237,7 +253,10 @@ fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> HarnessResolutio
         _ => walk_to_root(stores, &thread),
     };
     let context = session.map(|session| context_from(stores, session, thread.clone()));
-    HarnessResolution { thread: Some(thread), context }
+    HarnessResolution {
+        thread: Some(thread),
+        context,
+    }
 }
 
 fn lookup_required(
