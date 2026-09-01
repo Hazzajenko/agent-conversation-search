@@ -101,10 +101,28 @@ pub fn resolve_current_context(stores: &Stores) -> Result<CurrentContext, Curren
     resolve(stores, AmbientIdentity::from_env())
 }
 
-fn resolve(
+/// The Session ids multi-Session analysis excludes by default (ADR 0011): the
+/// Current Session and every known descendant.
+///
+/// Unlike [`resolve_current_context`] this never fails — analysis outside a
+/// Harness, or with an identity absent from the Stores, keeps its existing
+/// behavior. Under cross-Harness ambiguity both families are excluded: an
+/// ambiguity is a reason to hide more current work, not less.
+pub fn current_family_ids(stores: &Stores) -> Vec<String> {
+    let mut ids: Vec<String> = attempts(stores, AmbientIdentity::from_env())
+        .into_iter()
+        .filter_map(Result::ok)
+        .flat_map(|context| context.family_ids)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn attempts(
     stores: &Stores,
     ambient: AmbientIdentity,
-) -> Result<CurrentContext, CurrentContextError> {
+) -> Vec<Result<CurrentContext, CurrentContextError>> {
     let configured = stores.configured_harnesses();
     let mut attempts = Vec::new();
     if configured.contains(&Harness::Claude) && ambient.claude_present() {
@@ -116,7 +134,14 @@ fn resolve(
     if configured.contains(&Harness::Codex) && ambient.codex_present() {
         attempts.push(resolve_codex(stores, &ambient));
     }
+    attempts
+}
 
+fn resolve(
+    stores: &Stores,
+    ambient: AmbientIdentity,
+) -> Result<CurrentContext, CurrentContextError> {
+    let attempts = attempts(stores, ambient);
     if attempts.is_empty() {
         return Err(CurrentContextError::Unavailable);
     }
