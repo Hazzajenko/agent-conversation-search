@@ -54,6 +54,16 @@ you. Result trailers print the exact `show` command to run next.
   error texts; `--stats` aggregates into a counts table by tool and error
   signature.
 
+Search, `--failed`, and `--stats` cover **past** Sessions. They exclude the
+Current Session Family, which contains the Current Session and its subagent
+threads. This prevents a search from returning the Prompt that started the
+search.
+
+Add `--include-current` when the user wants to include the current work. Use
+`--session current` to search the Current Session directly. An explicit
+Session id selects that Session even when it belongs to the family. `sessions`
+and `projects` still include the Current Session.
+
 ## Scope
 
 With no flag, every verb covers the **current working directory's** project —
@@ -64,6 +74,7 @@ when the user asks about a different project, reach for a scope flag:
 | "anywhere" / "any project" | `--all` |
 | names another project | `--project <name-substr>` |
 | one known conversation | `--session <id-prefix>` |
+| "this Session too" or "including now" | `--include-current` |
 | "last week" / "since May" | `--since 1w` / `--since 2026-05-01` |
 
 `--since` composes with every scope; `--all` and `--project` conflict.
@@ -85,6 +96,13 @@ when the user asks about a different project, reach for a scope flag:
   Session. The default cross-Store search is better when the Harness is unknown.
 - Codex subagent Sessions are excluded by default. Use `--include-subagents`
   when the user asks about worker activity. The output marks those Sessions.
+- `--include-subagents` still hides the Current Session's workers because
+  historical search excludes the whole Current Session Family. Pass
+  `--include-current` to include them.
+- A search for a recent Prompt in *this* Session finds nothing by default. This
+  is the Current Session Family exclusion. Add `--include-current`, or read the
+  Current Session with
+  `agsearch show $(agsearch current --id-only)`.
 - Output is human-readable only (no JSON mode); read it directly.
 - Too many capped sessions? Raise `-m` (default 3 matches shown per session,
   `0` = unlimited) or narrow the terms.

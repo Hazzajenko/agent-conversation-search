@@ -82,9 +82,28 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `-l`, `--files` | print only matching file paths, for piping |
 | `--harness <claude\|codex>` | search only one Harness |
 | `--include-subagents` | include Codex subagent Sessions and mark them in output |
+| `--include-current` | include the Current Session Family (excluded by default) |
 
 By default only Prompts, Replies, and Titles are searched — thinking and tool
 content are opt-in.
+
+Search covers **historical** conversations. When a Harness identifies the
+Current Session, search excludes its Current Session Family. This prevents a
+search from matching the Prompt that started the search.
+
+Pass `--include-current` to include the family. Pass `--session current` to
+search the Current Session directly. A Session id selects that Session even
+when it belongs to the family.
+
+The exclusion also covers `--failed` and `--stats`. When
+`--include-subagents` is active, it hides every worker in the family. Outside a
+supported Harness, no Current Session is available and search excludes
+nothing.
+
+When identity resolves only partly, search hides every family it can identify.
+If both Harnesses identify a Session, search excludes both families. If a
+family ancestor is missing from the Store, search still excludes the calling
+thread and its workers.
 
 ### `show` — read a whole conversation
 
@@ -161,8 +180,9 @@ E:\projects\games\creature-game · 43 sessions · 2026-06-01
 
 ## Failure analysis
 
-Find and aggregate **failed tool calls** by structure — independent of any
-query — to see what's been breaking.
+Find and aggregate **failed tool calls** by structure, independent of any
+Query. Failure analysis covers historical conversations. It excludes the
+Current Session Family unless you pass `--include-current`.
 
 ```console
 $ agsearch --failed                # list failed tool calls, joined to the command
@@ -194,12 +214,15 @@ listing verbs:
 | _(default)_ | the current directory's Project | search, sessions |
 | `--all` | every Project in your history | search, sessions |
 | `--project <substr>` | Projects whose name contains the substring | search, sessions, projects |
-| `--session <prefix>` | a single Session, by id-prefix | search |
+| `--session <selector>` | one Session, selected by id-prefix or `current`. The selected Session remains included when it belongs to the Current Session Family | search |
+| `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats` |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 
 The default scope merges Sessions from both Harnesses by their encoded working
 directory. `projects` shows one row when both Harnesses used the same directory.
 Codex subagent Sessions stay excluded unless you pass `--include-subagents`.
+`sessions` and `projects` are inventory verbs. They keep listing and counting
+the Current Session.
 
 ## Output and exit codes
 

@@ -1,5 +1,6 @@
 //! Harness adapters and Store aggregation (ADR 0010).
 
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -8,10 +9,18 @@ use serde_json::Value;
 use crate::session::Session;
 use crate::{ProjectKey, Scope, SessionIdentity};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
     Claude,
     Codex,
+}
+
+/// A Session id qualified by its Harness. Session ids can coincide across
+/// Stores, so Store-wide filters must use both fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SessionKey {
+    pub harness: Harness,
+    pub session_id: String,
 }
 
 impl Harness {
@@ -606,35 +615,47 @@ pub struct SessionHandle {
 pub struct Stores {
     adapters: Vec<Box<dyn HarnessAdapter>>,
     include_subagents: bool,
+    /// Sessions hidden from scope enumeration: the Current Session Family
+    /// under multi-Session analysis (ADR 0011). Explicit lookup ignores it.
+    excluded_sessions: HashSet<SessionKey>,
 }
 
 impl Stores {
     pub fn with_claude(claude_dir: &Path) -> Self {
-        Self {
-            adapters: vec![Box::new(ClaudeAdapter::discover(claude_dir))],
-            include_subagents: false,
-        }
+        Self::from_adapters(vec![Box::new(ClaudeAdapter::discover(claude_dir))])
     }
 
     pub fn with_codex(codex_dir: &Path) -> Self {
-        Self {
-            adapters: vec![Box::new(CodexAdapter::discover(codex_dir))],
-            include_subagents: false,
-        }
+        Self::from_adapters(vec![Box::new(CodexAdapter::discover(codex_dir))])
     }
 
     pub fn with_claude_and_codex(claude_dir: &Path, codex_dir: &Path) -> Self {
+        Self::from_adapters(vec![
+            Box::new(ClaudeAdapter::discover(claude_dir)),
+            Box::new(CodexAdapter::discover(codex_dir)),
+        ])
+    }
+
+    fn from_adapters(adapters: Vec<Box<dyn HarnessAdapter>>) -> Self {
         Self {
-            adapters: vec![
-                Box::new(ClaudeAdapter::discover(claude_dir)),
-                Box::new(CodexAdapter::discover(codex_dir)),
-            ],
+            adapters,
             include_subagents: false,
+            excluded_sessions: HashSet::new(),
         }
     }
 
     pub fn including_subagents(mut self, include: bool) -> Self {
         self.include_subagents = include;
+        self
+    }
+
+    /// Hide the Current Session Family from scope enumeration, so multi-Session
+    /// analysis cannot return the conversation that asked for it (ADR 0011).
+    /// Outside a supported Harness this hides nothing. Explicit Session lookup
+    /// (`matching_sessions`, `lookup_session`) stays unfiltered: naming a
+    /// Session is intent to include it.
+    pub fn excluding_current_family(mut self) -> Self {
+        self.excluded_sessions = crate::current::current_family_keys(&self);
         self
     }
 
@@ -645,6 +666,12 @@ impl Stores {
                 adapter
                     .enumerate(self.include_subagents)
                     .into_iter()
+                    .filter(|info| {
+                        !self.excluded_sessions.contains(&SessionKey {
+                            harness: info.harness,
+                            session_id: info.session_id.clone(),
+                        })
+                    })
                     .filter(|info| in_scope(info, scope))
                     .map(|info| SessionHandle {
                         info,
@@ -738,12 +765,9 @@ impl Stores {
 
     #[cfg(test)]
     pub(crate) fn with_claude_projects_root(projects_root: &Path) -> Self {
-        Self {
-            adapters: vec![Box::new(ClaudeAdapter {
-                projects_root: projects_root.to_path_buf(),
-            })],
-            include_subagents: false,
-        }
+        Self::from_adapters(vec![Box::new(ClaudeAdapter {
+            projects_root: projects_root.to_path_buf(),
+        })])
     }
 }
 
