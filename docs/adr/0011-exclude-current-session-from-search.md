@@ -1,0 +1,3 @@
+# Exclude the Current Session family from analysis
+
+When a Harness identifies the Current Session, text search, failure listings, and failure statistics exclude its Current Session Family by default. This prevents a request to recall or analyse earlier work from matching the conversation that caused the request, including its spawned workers. An explicit `--include-current` includes the family, while `--session current` selects the Current Session directly. Inventory commands such as `sessions` remain complete. Outside a Harness, where no Current Session is available, analysis behavior is unchanged; operations that explicitly select `current` fail rather than guessing from recency.
