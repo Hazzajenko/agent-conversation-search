@@ -10,9 +10,9 @@ use agsearch::{
     format_projects, format_results, format_session_paths, format_sessions, format_stats,
     format_transcript_for_harness, format_windowed_for_harness, group_failures,
     list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
-    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_store_session_prefix,
-    search_store_session, search_stores, since_cutoff, timestamp_is_since, ContentSet, Matcher,
-    Scope, StoreSessionRef, Stores,
+    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
+    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
+    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -93,9 +93,9 @@ struct SearchArgs {
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
 
-    /// Search within a single Session, resolved by git-style id-prefix across
-    /// the whole Store (the "where in this conversation" scope).
-    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["all", "project"])]
+    /// Search within one Session. Pass `current` for the Current Session, or a
+    /// git-style id-prefix resolved across the whole Store.
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["all", "project"])]
     session: Option<String>,
 
     /// Treat the query as a regular expression instead of a literal substring.
@@ -146,6 +146,12 @@ struct SearchArgs {
     /// or an absolute ISO date (2026-05-01). Composes with every scope.
     #[arg(long, value_name = "WHEN")]
     since: Option<String>,
+
+    /// Include the Current Session Family, which multi-Session analysis
+    /// excludes by default so a search cannot return the conversation that
+    /// asked for it. Applies to text search, --failed, and --stats.
+    #[arg(long)]
+    include_current: bool,
 }
 
 /// Arguments for the `show` verb.
@@ -260,11 +266,11 @@ fn main() -> ExitCode {
 
     match cli.command {
         Some(Command::Show(args)) => run_show(&stores, &args),
-        Some(Command::Search(args)) => run_search(&stores, &args),
+        Some(Command::Search(args)) => run_search(stores, &args),
         Some(Command::Sessions(args)) => run_sessions(&stores, &args),
         Some(Command::Projects(args)) => run_projects(&stores, &args),
         Some(Command::Current(args)) => run_current(&stores, &args),
-        None => run_search(&stores, &cli.search),
+        None => run_search(stores, &cli.search),
     }
 }
 
@@ -367,7 +373,7 @@ fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
 
 /// Run the `search` verb: resolve the scope, then either list Failures by
 /// structure (`--failed`, Query optional) or search text (Query required).
-fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
+fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
@@ -379,7 +385,14 @@ fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
     // --session resolves to one Session file; otherwise we operate over the
     // Project scope. (--session conflicts with --all / --project.)
     let session_path = match &args.session {
-        Some(prefix) => match resolve_store_session_prefix(stores, prefix) {
+        Some(selector) if selector == "current" => match resolve_current_session(&stores) {
+            Ok(session) => Some(session),
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some(prefix) => match resolve_store_session_prefix(&stores, prefix) {
             StoreSessionRef::Unique(session) => Some(session),
             StoreSessionRef::NotFound => {
                 eprintln!("agsearch: no session matches '{prefix}'");
@@ -421,12 +434,22 @@ fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
         Err(()) => return ExitCode::FAILURE,
     };
 
+    // Multi-Session analysis hides the Current Session Family so a request to
+    // recall earlier work cannot match the conversation that made it (ADR
+    // 0011). Naming a Session is intent to include it, so --session skips the
+    // exclusion, as does --include-current.
+    let stores = if args.include_current || session_path.is_some() {
+        stores
+    } else {
+        stores.excluding_current_family()
+    };
+
     // --stats and --failed share one scan; --stats aggregates, --failed lists.
     if args.failed || args.stats {
         let mut results = match &session_path {
-            Some(session) => failed_in_store_session(stores, session, matcher.as_ref()),
+            Some(session) => failed_in_store_session(&stores, session, matcher.as_ref()),
             None => failed_in_stores(
-                stores,
+                &stores,
                 &build_scope(args.all, args.project.as_deref(), &cwd),
                 matcher.as_ref(),
             ),
@@ -455,9 +478,9 @@ fn run_search(stores: &Stores, args: &SearchArgs) -> ExitCode {
         tools: args.tools || args.all_content,
     };
     let mut results = match &session_path {
-        Some(session) => search_store_session(stores, session, &matcher, &content),
+        Some(session) => search_store_session(&stores, session, &matcher, &content),
         None => search_stores(
-            stores,
+            &stores,
             &build_scope(args.all, args.project.as_deref(), &cwd),
             &matcher,
             &content,

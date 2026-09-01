@@ -12,7 +12,10 @@ use regex::RegexBuilder;
 
 use session::{AssistantBlock, Record, RecordKind, UserBlock};
 
-pub use current::{format_current, resolve_current_context, CurrentContext, CurrentContextError};
+pub use current::{
+    format_current, resolve_current_context, resolve_current_session, CurrentContext,
+    CurrentContextError,
+};
 pub use harness::{Harness, SessionHandle, Stores};
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
