@@ -30,6 +30,14 @@ pub(crate) trait HarnessAdapter: Send + Sync {
     fn enumerate(&self, include_subagents: bool) -> Vec<SessionIdentity>;
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity>;
 
+    fn enumerate_including_subagents(&self) -> Vec<SessionIdentity> {
+        self.enumerate(true)
+    }
+
+    fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
+        self.matching(prefix, true)
+    }
+
     fn parse(&self, path: &Path) -> Option<Session> {
         let text = std::fs::read_to_string(path).ok()?;
         self.recognizes(&text).then(|| self.parse_text(&text)).flatten()
@@ -45,7 +53,7 @@ impl ClaudeAdapter {
         Self { projects_root: claude_dir.join("projects") }
     }
 
-    fn session_paths(&self) -> Vec<(String, String, PathBuf)> {
+    fn session_paths(&self, include_subagents: bool) -> Vec<(String, String, PathBuf)> {
         let Ok(projects) = std::fs::read_dir(&self.projects_root) else {
             return Vec::new();
         };
@@ -55,13 +63,24 @@ impl ClaudeAdapter {
             let Ok(files) = std::fs::read_dir(project.path()) else {
                 continue;
             };
-            for path in files.flatten().map(|entry| entry.path()) {
-                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            for entry in files.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                    let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    if !session_id.is_empty() {
+                        sessions.push((project_name.clone(), session_id, path));
+                    }
                     continue;
                 }
-                let session_id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-                if !session_id.is_empty() {
-                    sessions.push((project_name.clone(), session_id, path));
+                if include_subagents && entry.file_type().is_ok_and(|ty| ty.is_dir()) {
+                    let mut nested = Vec::new();
+                    visit_jsonl(&path.join("subagents"), &mut nested);
+                    for nested_path in nested {
+                        let session_id = nested_path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                        if !session_id.is_empty() {
+                            sessions.push((project_name.clone(), session_id, nested_path));
+                        }
+                    }
                 }
             }
         }
@@ -70,6 +89,7 @@ impl ClaudeAdapter {
 
     fn session_info(&self, project: String, session_id: String, path: PathBuf) -> Option<SessionIdentity> {
         let parsed = self.parse(&path)?;
+        let parent_id = claude_parent_id(&path);
         Some(SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
@@ -80,11 +100,12 @@ impl ClaudeAdapter {
             timestamp: parsed.meta.timestamp,
             branch: parsed.meta.branch,
             cwd: parsed.meta.cwd,
+            parent_id,
         })
     }
 
-    fn sessions(&self, prefix: Option<&str>) -> Vec<SessionIdentity> {
-        self.session_paths()
+    fn sessions(&self, prefix: Option<&str>, include_subagents: bool) -> Vec<SessionIdentity> {
+        self.session_paths(include_subagents)
             .into_iter()
             .filter(|(_, session_id, _)| prefix.is_none_or(|prefix| session_id.starts_with(prefix)))
             .filter_map(|(project, session_id, path)| self.session_info(project, session_id, path))
@@ -106,11 +127,19 @@ impl HarnessAdapter for ClaudeAdapter {
     }
 
     fn enumerate(&self, _include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(None)
+        self.sessions(None, false)
     }
 
     fn matching(&self, prefix: &str, _include_subagents: bool) -> Vec<SessionIdentity> {
-        self.sessions(Some(prefix))
+        self.sessions(Some(prefix), false)
+    }
+
+    fn enumerate_including_subagents(&self) -> Vec<SessionIdentity> {
+        self.sessions(None, true)
+    }
+
+    fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
+        self.sessions(Some(prefix), true)
     }
 }
 
@@ -237,6 +266,7 @@ fn codex_session_info(
         timestamp: parsed.meta.timestamp,
         branch: parsed.meta.branch,
         cwd,
+        parent_id: codex_parent_id(&meta),
     })
 }
 
@@ -253,6 +283,21 @@ fn codex_titles(path: &Path) -> std::collections::HashMap<String, String> {
             ))
         })
         .collect()
+}
+
+fn claude_parent_id(path: &Path) -> Option<String> {
+    let subagents = path.parent()?;
+    if subagents.file_name()?.to_str()? != "subagents" {
+        return None;
+    }
+    Some(subagents.parent()?.file_name()?.to_string_lossy().into_owned())
+}
+
+fn codex_parent_id(meta: &Value) -> Option<String> {
+    meta.pointer("/payload/parent_thread_id")
+        .or_else(|| meta.pointer("/payload/source/subagent/thread_spawn/parent_thread_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn visit_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -546,6 +591,50 @@ impl Stores {
 
     pub(crate) fn parse(&self, session: &SessionHandle) -> Option<Session> {
         self.adapters.get(session.adapter_index)?.parse(&session.info.path)
+    }
+
+    pub(crate) fn configured_harnesses(&self) -> Vec<Harness> {
+        self.adapters.iter().map(|adapter| adapter.harness()).collect()
+    }
+
+    /// Look up a Session by exact id, including subagent threads that ordinary
+    /// listing hides. Current-context resolution uses this so a worker can
+    /// name its calling thread without `--include-subagents`.
+    pub(crate) fn lookup_session(&self, harness: Harness, id: &str) -> Option<SessionHandle> {
+        let mut matches = Vec::new();
+        for (adapter_index, adapter) in self
+            .adapters
+            .iter()
+            .enumerate()
+            .filter(|(_, adapter)| adapter.harness() == harness)
+        {
+            matches.extend(
+                adapter
+                    .matching_including_subagents(id)
+                    .into_iter()
+                    .filter(|info| info.session_id == id)
+                    .map(|info| SessionHandle { info, adapter_index }),
+            );
+        }
+        matches.into_iter().next()
+    }
+
+    pub(crate) fn sessions_including_subagents(&self, harness: Harness) -> Vec<SessionHandle> {
+        let mut sessions = Vec::new();
+        for (adapter_index, adapter) in self
+            .adapters
+            .iter()
+            .enumerate()
+            .filter(|(_, adapter)| adapter.harness() == harness)
+        {
+            sessions.extend(
+                adapter
+                    .enumerate_including_subagents()
+                    .into_iter()
+                    .map(|info| SessionHandle { info, adapter_index }),
+            );
+        }
+        sessions
     }
 
     #[cfg(test)]

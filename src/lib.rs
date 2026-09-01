@@ -1,5 +1,6 @@
 //! `agsearch` searches local coding conversation history across Harnesses.
 
+mod current;
 mod harness;
 mod session;
 
@@ -11,6 +12,7 @@ use regex::RegexBuilder;
 
 use session::{AssistantBlock, Record, RecordKind, UserBlock};
 
+pub use current::{format_current, resolve_current_context, CurrentContext, CurrentContextError};
 pub use harness::{Harness, SessionHandle, Stores};
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
@@ -334,6 +336,8 @@ pub struct SessionIdentity {
     /// The real working directory the Session was recorded in (`cwd`), if any —
     /// the human-readable name the `projects` verb shows for a Project.
     pub cwd: Option<String>,
+    /// Immediate parent Session id when this Session is a spawned worker.
+    pub parent_id: Option<String>,
 }
 
 impl SessionIdentity {
@@ -634,6 +638,7 @@ pub fn format_results(
 // --- show: resolving a Session and rendering it as a Transcript ---------
 
 /// Result of resolving a Session id across every configured Store.
+#[allow(clippy::large_enum_variant)]
 pub enum StoreSessionRef {
     Unique(SessionHandle),
     Ambiguous(Vec<String>),
@@ -1751,6 +1756,7 @@ mod tests {
             timestamp: Some("2026-06-01T10:00:00.000Z".into()),
             branch: Some("main".into()),
             cwd: None,
+            parent_id: None,
         };
         let out = format_sessions(std::slice::from_ref(&info));
         // Byte-identical to a search Session header (ADR 0004): short-id leads,
@@ -1776,6 +1782,7 @@ mod tests {
             timestamp: Some("2026-06-01T10:00:00.000Z".into()),
             branch: Some("main".into()),
             cwd: Some(r"E:\projects\demo".into()),
+            parent_id: None,
         };
         let out = format_sessions(std::slice::from_ref(&info));
         assert_eq!(out, "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n");
@@ -1794,6 +1801,7 @@ mod tests {
             timestamp: timestamp.map(Into::into),
             branch: None,
             cwd: cwd.map(Into::into),
+            parent_id: None,
         }
     }
 
@@ -1864,6 +1872,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
+            parent_id: None,
             },
             matches,
         }
@@ -1979,6 +1988,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
+            parent_id: None,
             },
             matches: vec![Match {
                 turn: None,
@@ -2546,6 +2556,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
+            parent_id: None,
             },
             failures,
         }
@@ -2654,6 +2665,7 @@ mod tests {
                 timestamp: None,
                 branch: None,
                 cwd: None,
+            parent_id: None,
             },
             failures: vec![failure],
         }
