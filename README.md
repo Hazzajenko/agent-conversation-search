@@ -87,17 +87,23 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 By default only Prompts, Replies, and Titles are searched — thinking and tool
 content are opt-in.
 
-Search looks at **historical** conversations: when a Harness identifies the
-Current Session, that Session and every subagent thread descended from it — the
-Current Session Family — are left out, so asking "did we discuss X?" cannot
-match the prompt that asked. `--include-current` puts the family back, and
-`--session <id>` searches a Session you name even when it is the current one.
-The exclusion covers `--failed` and `--stats` too, and applies to family
-workers when `--include-subagents` is on. Outside a supported Harness nothing
-is excluded, because there is no Current Session to find. Where identity is
-only partly resolvable, analysis errs towards hiding: if both Harnesses
-identify a Session, both families go; if the Current Session itself is missing
-from the Store, the calling thread and its workers still go.
+Search covers **historical** conversations. When a Harness identifies the
+Current Session, search excludes its Current Session Family. This prevents a
+search from matching the Prompt that started the search.
+
+Pass `--include-current` to include the family. Pass `--session current` to
+search the Current Session directly. A Session id selects that Session even
+when it belongs to the family.
+
+The exclusion also covers `--failed` and `--stats`. When
+`--include-subagents` is active, it hides every worker in the family. Outside a
+supported Harness, no Current Session is available and search excludes
+nothing.
+
+When identity resolves only partly, search hides every family it can identify.
+If both Harnesses identify a Session, search excludes both families. If a
+family ancestor is missing from the Store, search still excludes the calling
+thread and its workers.
 
 ### `show` — read a whole conversation
 
@@ -174,10 +180,9 @@ E:\projects\games\creature-game · 43 sessions · 2026-06-01
 
 ## Failure analysis
 
-Find and aggregate **failed tool calls** by structure — independent of any
-query — to see what's been breaking. Like text search, this covers historical
-conversations: the Current Session Family is excluded unless you pass
-`--include-current`.
+Find and aggregate **failed tool calls** by structure, independent of any
+Query. Failure analysis covers historical conversations. It excludes the
+Current Session Family unless you pass `--include-current`.
 
 ```console
 $ agsearch --failed                # list failed tool calls, joined to the command
@@ -209,14 +214,14 @@ listing verbs:
 | _(default)_ | the current directory's Project | search, sessions |
 | `--all` | every Project in your history | search, sessions |
 | `--project <substr>` | Projects whose name contains the substring | search, sessions, projects |
-| `--session <prefix>` | a single Session, by id-prefix (includes it even when it is the Current Session) | search |
+| `--session <selector>` | one Session, selected by id-prefix or `current`. The selected Session remains included when it belongs to the Current Session Family | search |
 | `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats` |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 
 The default scope merges Sessions from both Harnesses by their encoded working
 directory. `projects` shows one row when both Harnesses used the same directory.
 Codex subagent Sessions stay excluded unless you pass `--include-subagents`.
-`sessions` and `projects` are inventory verbs: they keep listing and counting
+`sessions` and `projects` are inventory verbs. They keep listing and counting
 the Current Session.
 
 ## Output and exit codes

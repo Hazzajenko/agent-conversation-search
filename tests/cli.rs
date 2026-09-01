@@ -2482,6 +2482,56 @@ fn an_explicit_session_selector_searches_the_current_session() {
 }
 
 #[test]
+fn current_session_selector_searches_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
+
+    agsearch_as_current(workdir.path(), claude.path(), &current_id)
+        .arg("--session")
+        .arg("current")
+        .arg("shared marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared marker in the current session"))
+        .stdout(predicates::str::contains("shared marker in earlier work").not());
+}
+
+#[test]
+fn current_family_exclusion_is_qualified_by_harness() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let shared_id = "11111111-aaaa-bbbb-cccc-ddddeeee0130";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        shared_id,
+        r#"{"type":"user","message":{"role":"user","content":"collision marker in current Claude work"},"timestamp":"2026-08-02T10:00:00.000Z"}"#,
+    );
+    plant_codex_session(
+        codex.path(),
+        shared_id,
+        workdir.path(),
+        "user",
+        &[r#"{"timestamp":"2026-08-01T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"collision marker in unrelated Codex work"}]}}"#],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", shared_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("collision marker")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("collision marker in unrelated Codex work"))
+        .stdout(predicates::str::contains("collision marker in current Claude work").not());
+}
+
+#[test]
 fn sessions_still_lists_the_current_session() {
     let workdir = tempfile::tempdir().unwrap();
     let claude = tempfile::tempdir().unwrap();

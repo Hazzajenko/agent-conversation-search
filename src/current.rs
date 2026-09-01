@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{Harness, SessionIdentity, Stores};
+use crate::harness::SessionKey;
+use crate::{Harness, SessionHandle, SessionIdentity, Stores};
 
 /// The resolved Current Session, the calling thread, and the IDs that form
 /// the Current Session Family.
@@ -101,8 +102,20 @@ pub fn resolve_current_context(stores: &Stores) -> Result<CurrentContext, Curren
     resolve(stores, AmbientIdentity::from_env())
 }
 
-/// The Session ids multi-Session analysis excludes by default (ADR 0011): the
-/// Current Session and every known descendant.
+/// Resolve the Current Session to its exact Store handle.
+pub fn resolve_current_session(stores: &Stores) -> Result<SessionHandle, CurrentContextError> {
+    let context = resolve_current_context(stores)?;
+    stores
+        .lookup_session(context.session.harness, &context.session.session_id)
+        .ok_or(CurrentContextError::NotInStore {
+            harness: context.session.harness,
+            session_id: context.session.session_id,
+        })
+}
+
+/// The Sessions multi-Session analysis excludes by default (ADR 0011): the
+/// Current Session and every known descendant. Each key includes its Harness
+/// because Session ids can coincide across Stores.
 ///
 /// Unlike [`resolve_current_context`] this never fails — analysis outside a
 /// Harness, or with an identity absent from the Stores, keeps its existing
@@ -112,65 +125,72 @@ pub fn resolve_current_context(stores: &Stores) -> Result<CurrentContext, Curren
 /// * an ancestor missing from the Store falls back to the calling thread and
 ///   its descendants, so a pruned parent cannot leave the thread searchable;
 /// * cross-Harness ambiguity excludes both families.
-pub fn current_family_ids(stores: &Stores) -> Vec<String> {
-    let mut ids: Vec<String> = harness_attempts(stores, AmbientIdentity::from_env())
+pub(crate) fn current_family_keys(stores: &Stores) -> HashSet<SessionKey> {
+    harness_resolutions(stores, AmbientIdentity::from_env())
         .into_iter()
-        .filter_map(|attempt| attempt.family(stores))
+        .filter_map(|resolution| resolution.family(stores))
         .flatten()
-        .collect();
-    ids.sort();
-    ids.dedup();
-    ids
+        .collect()
 }
 
-/// One Harness's shot at current context: the calling thread, resolved on its
-/// own, plus the full context, which also needs the thread's ancestry.
-struct Attempt {
+/// One Harness's current-context result and the calling thread used when only
+/// part of that context resolves.
+struct HarnessResolution {
     thread: Option<SessionIdentity>,
     context: Result<CurrentContext, CurrentContextError>,
 }
 
-impl Attempt {
-    /// The ids this attempt contributes to the exclusion set, falling back to
+impl HarnessResolution {
+    /// The keys this resolution contributes to the exclusion set, falling back to
     /// the calling thread's family when only the ancestry was unresolvable.
-    fn family(self, stores: &Stores) -> Option<Vec<String>> {
+    fn family(self, stores: &Stores) -> Option<Vec<SessionKey>> {
         match self.context {
-            Ok(context) => Some(context.family_ids),
-            Err(_) => self
-                .thread
-                .map(|thread| collect_family(stores, thread.harness, &thread.session_id)),
+            Ok(context) => Some(qualify_family(context.session.harness, context.family_ids)),
+            Err(_) => self.thread.map(|thread| {
+                qualify_family(
+                    thread.harness,
+                    collect_family(stores, thread.harness, &thread.session_id),
+                )
+            }),
         }
     }
 }
 
-fn harness_attempts(stores: &Stores, ambient: AmbientIdentity) -> Vec<Attempt> {
+fn qualify_family(harness: Harness, session_ids: Vec<String>) -> Vec<SessionKey> {
+    session_ids
+        .into_iter()
+        .map(|session_id| SessionKey { harness, session_id })
+        .collect()
+}
+
+fn harness_resolutions(stores: &Stores, ambient: AmbientIdentity) -> Vec<HarnessResolution> {
     let configured = stores.configured_harnesses();
-    let mut attempts = Vec::new();
+    let mut resolutions = Vec::new();
     if configured.contains(&Harness::Claude) && ambient.claude_present() {
-        attempts.push(resolve_claude(
+        resolutions.push(resolve_claude(
             stores,
             ambient.claude_session_id.as_deref().unwrap(),
         ));
     }
     if configured.contains(&Harness::Codex) && ambient.codex_present() {
-        attempts.push(resolve_codex(stores, &ambient));
+        resolutions.push(resolve_codex(stores, &ambient));
     }
-    attempts
+    resolutions
 }
 
 fn resolve(
     stores: &Stores,
     ambient: AmbientIdentity,
 ) -> Result<CurrentContext, CurrentContextError> {
-    let attempts = harness_attempts(stores, ambient);
-    if attempts.is_empty() {
+    let resolutions = harness_resolutions(stores, ambient);
+    if resolutions.is_empty() {
         return Err(CurrentContextError::Unavailable);
     }
 
     let mut contexts = Vec::new();
     let mut errors = Vec::new();
-    for attempt in attempts {
-        match attempt.context {
+    for resolution in resolutions {
+        match resolution.context {
             Ok(context) => contexts.push(context),
             Err(error) => errors.push(error),
         }
@@ -188,17 +208,17 @@ fn resolve(
     }
 }
 
-fn resolve_claude(stores: &Stores, session_id: &str) -> Attempt {
+fn resolve_claude(stores: &Stores, session_id: &str) -> HarnessResolution {
     let thread = match lookup_required(stores, Harness::Claude, session_id) {
         Ok(thread) => thread,
-        Err(error) => return Attempt { thread: None, context: Err(error) },
+        Err(error) => return HarnessResolution { thread: None, context: Err(error) },
     };
     let context =
         walk_to_root(stores, &thread).map(|session| context_from(stores, session, thread.clone()));
-    Attempt { thread: Some(thread), context }
+    HarnessResolution { thread: Some(thread), context }
 }
 
-fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> Attempt {
+fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> HarnessResolution {
     let thread_id = ambient
         .codex_thread_id
         .as_deref()
@@ -206,7 +226,7 @@ fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> Attempt {
         .unwrap();
     let thread = match lookup_required(stores, Harness::Codex, thread_id) {
         Ok(thread) => thread,
-        Err(error) => return Attempt { thread: None, context: Err(error) },
+        Err(error) => return HarnessResolution { thread: None, context: Err(error) },
     };
     // Codex names the top-level Session directly when it differs from the
     // calling thread; otherwise the thread's own ancestry is the only source.
@@ -217,7 +237,7 @@ fn resolve_codex(stores: &Stores, ambient: &AmbientIdentity) -> Attempt {
         _ => walk_to_root(stores, &thread),
     };
     let context = session.map(|session| context_from(stores, session, thread.clone()));
-    Attempt { thread: Some(thread), context }
+    HarnessResolution { thread: Some(thread), context }
 }
 
 fn lookup_required(

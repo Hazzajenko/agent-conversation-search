@@ -9,10 +9,18 @@ use serde_json::Value;
 use crate::session::Session;
 use crate::{ProjectKey, Scope, SessionIdentity};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
     Claude,
     Codex,
+}
+
+/// A Session id qualified by its Harness. Session ids can coincide across
+/// Stores, so Store-wide filters must use both fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SessionKey {
+    pub harness: Harness,
+    pub session_id: String,
 }
 
 impl Harness {
@@ -531,9 +539,9 @@ pub struct SessionHandle {
 pub struct Stores {
     adapters: Vec<Box<dyn HarnessAdapter>>,
     include_subagents: bool,
-    /// Session ids hidden from scope enumeration — the Current Session Family
+    /// Sessions hidden from scope enumeration: the Current Session Family
     /// under multi-Session analysis (ADR 0011). Explicit lookup ignores it.
-    excluded_ids: HashSet<String>,
+    excluded_sessions: HashSet<SessionKey>,
 }
 
 impl Stores {
@@ -553,7 +561,7 @@ impl Stores {
     }
 
     fn from_adapters(adapters: Vec<Box<dyn HarnessAdapter>>) -> Self {
-        Self { adapters, include_subagents: false, excluded_ids: HashSet::new() }
+        Self { adapters, include_subagents: false, excluded_sessions: HashSet::new() }
     }
 
     pub fn including_subagents(mut self, include: bool) -> Self {
@@ -567,7 +575,7 @@ impl Stores {
     /// (`matching_sessions`, `lookup_session`) stays unfiltered: naming a
     /// Session is intent to include it.
     pub fn excluding_current_family(mut self) -> Self {
-        self.excluded_ids = crate::current::current_family_ids(&self).into_iter().collect();
+        self.excluded_sessions = crate::current::current_family_keys(&self);
         self
     }
 
@@ -578,7 +586,12 @@ impl Stores {
                 adapter
                     .enumerate(self.include_subagents)
                     .into_iter()
-                    .filter(|info| !self.excluded_ids.contains(&info.session_id))
+                    .filter(|info| {
+                        !self.excluded_sessions.contains(&SessionKey {
+                            harness: info.harness,
+                            session_id: info.session_id.clone(),
+                        })
+                    })
                     .filter(|info| in_scope(info, scope))
                     .map(|info| SessionHandle { info, adapter_index }),
             );
