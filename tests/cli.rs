@@ -18,7 +18,11 @@ fn agsearch_command() -> Command {
 /// Build a fixture Store under `store_root` containing one Session for the given
 /// working directory, then return a `Command` ready to run from that cwd with
 /// `--claude-dir` pointed at the fixture.
-fn agsearch_in(cwd: &std::path::Path, store_root: &std::path::Path, session_lines: &str) -> Command {
+fn agsearch_in(
+    cwd: &std::path::Path,
+    store_root: &std::path::Path,
+    session_lines: &str,
+) -> Command {
     let projects = store_root.join("projects");
     let encoded = agsearch::encode_project_dir(&cwd.to_string_lossy());
     let project_dir = projects.join(encoded);
@@ -150,7 +154,11 @@ fn write_codex_rollout(
     meta: serde_json::Value,
     records: &[&str],
 ) -> std::path::PathBuf {
-    let dir = codex_dir.join("sessions").join("2026").join("08").join("28");
+    let dir = codex_dir
+        .join("sessions")
+        .join("2026")
+        .join("08")
+        .join("28");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-08-28T10-00-00-{id}.jsonl"));
     let text = std::iter::once(meta.to_string())
@@ -206,7 +214,9 @@ fn search_spans_both_stores_and_harness_narrows_to_codex() {
         "c0de0002-0000-0000-0000-000000000000",
         workdir.path(),
         "user",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared needle from Codex"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared needle from Codex"}]}}"#,
+        ],
     );
 
     let command = || {
@@ -260,7 +270,9 @@ fn codex_subagents_are_excluded_and_forked_sessions_remain_independent() {
         "c0de0005-0000-0000-0000-000000000000",
         workdir.path(),
         "subagent",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent marker"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent marker"}]}}"#,
+        ],
     );
 
     agsearch_command()
@@ -286,7 +298,9 @@ fn include_subagents_makes_workers_searchable_listable_and_showable() {
         "c0de0015-0000-0000-0000-000000000000",
         workdir.path(),
         "subagent",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker-only marker"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker-only marker"}]}}"#,
+        ],
     );
     let command = || {
         let mut command = agsearch_command();
@@ -330,7 +344,9 @@ fn codex_home_override_and_missing_stores_are_silent() {
         "c0de0006-0000-0000-0000-000000000000",
         workdir.path(),
         "user",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"environment marker"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"environment marker"}]}}"#,
+        ],
     );
 
     agsearch_command()
@@ -401,7 +417,9 @@ fn codex_show_and_session_search_use_the_transparent_id_handoff() {
         .arg("c0de0010")
         .assert()
         .success()
-        .stdout(predicates::str::contains("[2] assistant: handoff reply marker"));
+        .stdout(predicates::str::contains(
+            "[2] assistant: handoff reply marker",
+        ));
 
     command()
         .arg("show")
@@ -493,25 +511,33 @@ fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
         titled,
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-08-28T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"new"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"new"}]}}"#,
+        ],
     );
     let old_path = plant_codex_session(
         codex.path(),
         untitled,
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-01-01T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-01-01T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]}}"#,
+        ],
     );
-    let old_text = fs::read_to_string(&old_path)
-        .unwrap()
-        .replacen("2026-08-28T10:00:00.000Z", "2026-01-01T09:00:00.000Z", 1);
+    let old_text = fs::read_to_string(&old_path).unwrap().replacen(
+        "2026-08-28T10:00:00.000Z",
+        "2026-01-01T09:00:00.000Z",
+        1,
+    );
     fs::write(old_path, old_text).unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0014-0000-0000-0000-000000000000",
         workdir.path(),
         "subagent",
-        &[r#"{"timestamp":"2026-08-28T11:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T11:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker"}]}}"#,
+        ],
     );
     fs::write(
         codex.path().join("session_index.jsonl"),
@@ -580,7 +606,9 @@ fn projects_merge_harnesses_and_cwdless_codex_sessions_stay_unscoped() {
         "c0de0016-0000-0000-0000-000000000000",
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-08-28T12:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex project marker"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T12:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex project marker"}]}}"#,
+        ],
     );
     let cwdless_dir = codex.path().join("sessions/2026/08/28");
     let cwdless_path = cwdless_dir.join("rollout-cwdless.jsonl");
@@ -982,7 +1010,9 @@ fn failed_lists_failures_by_structure_with_the_handoff_shape() {
         .success()
         .stdout(predicates::str::contains("✗ Bash"))
         .stdout(predicates::str::contains("cargo test"))
-        .stdout(predicates::str::contains("exit 101 · error[E0433]: failed to resolve"));
+        .stdout(predicates::str::contains(
+            "exit 101 · error[E0433]: failed to resolve",
+        ));
 }
 
 #[test]
@@ -1041,7 +1071,9 @@ fn since_excludes_sessions_older_than_an_absolute_date() {
     let project = store
         .path()
         .join("projects")
-        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(
+            &workdir.path().to_string_lossy(),
+        ));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("newish.jsonl"),
@@ -1171,7 +1203,10 @@ fn an_empty_query_errors_like_a_missing_one() {
 
     // "" is a substring of everything — a shell variable that expands to empty
     // must fail fast, not dump the whole Project.
-    cmd.arg("").assert().failure().stderr(predicates::str::contains("query is required"));
+    cmd.arg("")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("query is required"));
 }
 
 #[test]
@@ -1185,7 +1220,10 @@ fn a_one_character_query_still_searches() {
     );
 
     // Only "" is rejected — the shortest real query is untouched.
-    cmd.arg("z").assert().success().stdout(predicates::str::contains("zebra"));
+    cmd.arg("z")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("zebra"));
 }
 
 #[test]
@@ -1200,7 +1238,10 @@ fn a_whitespace_only_query_still_searches() {
 
     // A user who quotes a space may mean it; only the truly empty string is
     // rejected.
-    cmd.arg(" ").assert().success().stdout(predicates::str::contains("one two"));
+    cmd.arg(" ")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("one two"));
 }
 
 #[test]
@@ -1218,7 +1259,11 @@ fn an_empty_failed_filter_means_no_filter() {
     );
 
     // The --failed query is an optional *filter*; empty filter = unfiltered.
-    cmd.arg("").arg("--failed").assert().success().stdout(predicates::str::contains("✗ Bash"));
+    cmd.arg("")
+        .arg("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("✗ Bash"));
 }
 
 #[test]
@@ -1376,10 +1421,19 @@ fn show_around_windows_the_transcript_on_a_turn() {
     let store = tempfile::tempdir().unwrap();
     // Six user prompts → turns 1..=6, each with a unique marker.
     let lines: String = (1..=6)
-        .map(|i| format!(r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#))
+        .map(|i| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    let id = plant_session(store.path(), "E--projects-demo", "feed0001-0000-0000-0000-000000000000", &lines);
+    let id = plant_session(
+        store.path(),
+        "E--projects-demo",
+        "feed0001-0000-0000-0000-000000000000",
+        &lines,
+    );
 
     agsearch_command()
         .arg("--claude-dir")
@@ -1406,10 +1460,19 @@ fn show_around_windows_the_transcript_on_a_turn() {
 fn bare_show_is_unaffected_by_the_default_context() {
     let store = tempfile::tempdir().unwrap();
     let lines: String = (1..=6)
-        .map(|i| format!(r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#))
+        .map(|i| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"prompt number {i}"}}}}"#
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    let id = plant_session(store.path(), "E--projects-demo", "feed0002-0000-0000-0000-000000000000", &lines);
+    let id = plant_session(
+        store.path(),
+        "E--projects-demo",
+        "feed0002-0000-0000-0000-000000000000",
+        &lines,
+    );
 
     agsearch_command()
         .arg("--claude-dir")
@@ -1464,7 +1527,9 @@ fn sessions_lists_the_current_projects_sessions_newest_first() {
     let project = store
         .path()
         .join("projects")
-        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(
+            &workdir.path().to_string_lossy(),
+        ));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("aaaa1111-0000-0000-0000-000000000000.jsonl"),
@@ -1510,7 +1575,9 @@ fn sessions_renders_untitled_and_omits_no_content_filter() {
     let project = store
         .path()
         .join("projects")
-        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(
+            &workdir.path().to_string_lossy(),
+        ));
     fs::create_dir_all(&project).unwrap();
     // A Session with no ai-title Record and no Message at all (only a noise
     // Record). search would never surface it; `sessions` must still list it.
@@ -1595,7 +1662,9 @@ fn sessions_files_prints_paths_for_piping_into_show() {
     let project = store
         .path()
         .join("projects")
-        .join(agsearch::encode_project_dir(&workdir.path().to_string_lossy()));
+        .join(agsearch::encode_project_dir(
+            &workdir.path().to_string_lossy(),
+        ));
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("eeee5555-0000-0000-0000-000000000000.jsonl"),
@@ -1612,7 +1681,9 @@ fn sessions_files_prints_paths_for_piping_into_show() {
         .assert()
         .success()
         // Only the path, not a header line (no " · " separators).
-        .stdout(predicates::str::contains("eeee5555-0000-0000-0000-000000000000.jsonl"))
+        .stdout(predicates::str::contains(
+            "eeee5555-0000-0000-0000-000000000000.jsonl",
+        ))
         .stdout(predicates::str::contains(" · ").not());
 }
 
@@ -1666,8 +1737,12 @@ fn projects_lists_projects_by_real_cwd_with_counts_newest_first() {
         .assert()
         .success()
         // Real cwd as the name, with a Session count.
-        .stdout(predicates::str::contains("E:\\projects\\recent · 2 sessions · 2026-06-02"))
-        .stdout(predicates::str::contains("E:\\projects\\ancient · 1 session · 2026-01-01"))
+        .stdout(predicates::str::contains(
+            "E:\\projects\\recent · 2 sessions · 2026-06-02",
+        ))
+        .stdout(predicates::str::contains(
+            "E:\\projects\\ancient · 1 session · 2026-01-01",
+        ))
         // Newest-touched first.
         .stdout(predicates::function::function(|out: &str| {
             out.find("recent").unwrap() < out.find("ancient").unwrap()
@@ -1862,7 +1937,10 @@ fn current_prints_claude_session_metadata() {
         .stdout(predicates::str::contains(format!("Session: {session_id}")))
         .stdout(predicates::str::contains("Project: E:\\projects\\demo"))
         .stdout(predicates::str::contains("Title: Borrow checker chat"))
-        .stdout(predicates::str::contains(format!("Path: {}", path.display())))
+        .stdout(predicates::str::contains(format!(
+            "Path: {}",
+            path.display()
+        )))
         .stdout(predicates::str::contains("Caller: top-level"));
 }
 
@@ -1901,7 +1979,10 @@ fn current_resolves_a_claude_worker_to_the_top_level_session() {
         .stdout(predicates::str::contains("Harness: claude"))
         .stdout(predicates::str::contains(format!("Session: {parent_id}")))
         .stdout(predicates::str::contains("Title: Parent conversation"))
-        .stdout(predicates::str::contains(format!("Path: {}", parent_path.display())))
+        .stdout(predicates::str::contains(format!(
+            "Path: {}",
+            parent_path.display()
+        )))
         .stdout(predicates::str::contains("Caller: worker"));
 }
 
@@ -1964,7 +2045,9 @@ fn current_prints_codex_session_metadata_at_the_top_level() {
         session_id,
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex current"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex current"}]}}"#,
+        ],
     );
     plant_codex_title(codex.path(), session_id, "Codex current chat");
 
@@ -1982,7 +2065,10 @@ fn current_prints_codex_session_metadata_at_the_top_level() {
         .stdout(predicates::str::contains("Harness: codex"))
         .stdout(predicates::str::contains(format!("Session: {session_id}")))
         .stdout(predicates::str::contains("Title: Codex current chat"))
-        .stdout(predicates::str::contains(format!("Path: {}", path.display())))
+        .stdout(predicates::str::contains(format!(
+            "Path: {}",
+            path.display()
+        )))
         .stdout(predicates::str::contains("Caller: top-level"));
 }
 
@@ -1998,14 +2084,18 @@ fn current_resolves_a_codex_worker_to_the_top_level_session() {
         parent_id,
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent prompt"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent prompt"}]}}"#,
+        ],
     );
     plant_codex_subagent(
         codex.path(),
         worker_id,
         workdir.path(),
         parent_id,
-        &[r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker prompt"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"worker prompt"}]}}"#,
+        ],
     );
     plant_codex_title(codex.path(), parent_id, "Parent conversation");
 
@@ -2029,7 +2119,10 @@ fn current_resolves_a_codex_worker_to_the_top_level_session() {
         .stdout(predicates::str::contains("Harness: codex"))
         .stdout(predicates::str::contains(format!("Session: {parent_id}")))
         .stdout(predicates::str::contains("Title: Parent conversation"))
-        .stdout(predicates::str::contains(format!("Path: {}", parent_path.display())))
+        .stdout(predicates::str::contains(format!(
+            "Path: {}",
+            parent_path.display()
+        )))
         .stdout(predicates::str::contains("Caller: worker"));
     command()
         .arg("--id-only")
@@ -2051,13 +2144,18 @@ fn current_fails_when_the_identity_is_absent_from_the_store() {
 
     agsearch_command()
         .current_dir(workdir.path())
-        .env("CLAUDE_CODE_SESSION_ID", "bbbbbbbb-1111-1111-1111-111111111111")
+        .env(
+            "CLAUDE_CODE_SESSION_ID",
+            "bbbbbbbb-1111-1111-1111-111111111111",
+        )
         .arg("--claude-dir")
         .arg(claude.path())
         .arg("current")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("bbbbbbbb-1111-1111-1111-111111111111"))
+        .stderr(predicates::str::contains(
+            "bbbbbbbb-1111-1111-1111-111111111111",
+        ))
         .stderr(predicates::str::contains("was not found"));
 }
 
@@ -2079,7 +2177,9 @@ fn current_reports_ambiguity_when_both_harnesses_identify_a_session() {
         codex_id,
         workdir.path(),
         "user",
-        &[r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex current"}]}}"#],
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex current"}]}}"#,
+        ],
     );
 
     let command = || {
@@ -2129,7 +2229,9 @@ fn current_ignores_a_stale_identity_when_the_other_harness_resolves() {
         codex_id,
         workdir.path(),
         "user",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"valid codex current"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"valid codex current"}]}}"#,
+        ],
     );
 
     agsearch_command()
@@ -2162,7 +2264,9 @@ fn current_does_not_resolve_an_identity_from_the_other_harness_store() {
         shared_id,
         workdir.path(),
         "user",
-        &[r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex only"}]}}"#],
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex only"}]}}"#,
+        ],
     );
 
     agsearch_command()
