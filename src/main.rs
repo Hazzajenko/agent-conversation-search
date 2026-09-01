@@ -10,9 +10,9 @@ use agsearch::{
     format_projects, format_results, format_session_paths, format_sessions, format_stats,
     format_transcript_for_harness, format_windowed_for_harness, group_failures, list_store_projects,
     list_store_sessions, parse_store_transcript, parse_transcript_path, resolve_claude_dir,
-    resolve_current_context, resolve_store_session_prefix, search_store_session, search_stores,
-    resolve_codex_dir, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef,
-    Stores,
+    resolve_codex_dir, resolve_current_context, resolve_current_session, resolve_store_session_prefix,
+    search_store_session, search_stores, since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope,
+    StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -93,9 +93,9 @@ struct SearchArgs {
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
 
-    /// Search within a single Session, resolved by git-style id-prefix across
-    /// the whole Store (the "where in this conversation" scope).
-    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["all", "project"])]
+    /// Search within one Session. Pass `current` for the Current Session, or a
+    /// git-style id-prefix resolved across the whole Store.
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["all", "project"])]
     session: Option<String>,
 
     /// Treat the query as a regular expression instead of a literal substring.
@@ -383,6 +383,13 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     // --session resolves to one Session file; otherwise we operate over the
     // Project scope. (--session conflicts with --all / --project.)
     let session_path = match &args.session {
+        Some(selector) if selector == "current" => match resolve_current_session(&stores) {
+            Ok(session) => Some(session),
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
         Some(prefix) => match resolve_store_session_prefix(&stores, prefix) {
             StoreSessionRef::Unique(session) => Some(session),
             StoreSessionRef::NotFound => {
