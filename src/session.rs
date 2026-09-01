@@ -22,13 +22,24 @@ use serde_json::Value;
 /// Keys whose value, if present, is the most informative one-liner argument for a
 /// tool call. Tried in order; the first string value wins. A fixed list (rather
 /// than dumping raw JSON) is what makes a tool call readable.
-const TOOL_ARG_KEYS: &[&str] = &["command", "cmd", "file_path", "pattern", "path", "url", "query", "prompt"];
+const TOOL_ARG_KEYS: &[&str] = &[
+    "command",
+    "cmd",
+    "file_path",
+    "pattern",
+    "path",
+    "url",
+    "query",
+    "prompt",
+];
 
 /// The single most informative argument of a `tool_use` input object, or `None`
 /// if it carries none of the known keys. Tool-format knowledge, so it lives with
 /// the parser and is shared by every projection that renders a tool call.
 pub(crate) fn tool_key_arg(input: &Value) -> Option<String> {
-    TOOL_ARG_KEYS.iter().find_map(|key| input.get(*key).and_then(|v| v.as_str()).map(str::to_string))
+    TOOL_ARG_KEYS
+        .iter()
+        .find_map(|key| input.get(*key).and_then(|v| v.as_str()).map(str::to_string))
 }
 
 /// A Session's header metadata, accumulated in the same pass as its Records.
@@ -68,7 +79,11 @@ pub(crate) enum UserBlock {
 pub(crate) enum AssistantBlock {
     Text(String),
     Thinking(String),
-    ToolUse { id: Option<String>, name: String, input: Value },
+    ToolUse {
+        id: Option<String>,
+        name: String,
+        input: Value,
+    },
 }
 
 /// What a [`Record`] is. Only Message and Title Records are kept; noise Records
@@ -117,7 +132,10 @@ impl RecordBuilder {
     pub(crate) fn message(&mut self, kind: Option<RecordKind>) {
         self.turn += 1;
         for kind in self.attached.drain(..) {
-            self.records.push(Record { turn: Some(self.turn), kind });
+            self.records.push(Record {
+                turn: Some(self.turn),
+                kind,
+            });
         }
         self.push(kind, Some(self.turn));
     }
@@ -198,7 +216,10 @@ pub(crate) fn read(text: &str) -> Session {
         }
     }
 
-    Session { meta, records: records.finish() }
+    Session {
+        meta,
+        records: records.finish(),
+    }
 }
 
 /// Index every `tool_use` in the Records by its id, mapping to `(tool name,
@@ -212,7 +233,12 @@ pub(crate) fn tool_index(records: &[Record]) -> HashMap<String, (String, Option<
             continue;
         };
         for block in blocks {
-            if let AssistantBlock::ToolUse { id: Some(id), name, input } = block {
+            if let AssistantBlock::ToolUse {
+                id: Some(id),
+                name,
+                input,
+            } = block
+            {
                 index.insert(id.clone(), (name.clone(), tool_key_arg(input)));
             }
         }
@@ -226,9 +252,13 @@ pub(crate) fn tool_index(records: &[Record]) -> HashMap<String, (String, Option<
 fn user_kind(value: &Value) -> Option<RecordKind> {
     match value.pointer("/message/content") {
         Some(c) if c.is_string() => Some(RecordKind::Prompt(c.as_str().unwrap().to_string())),
-        Some(c) if c.is_array() => {
-            Some(RecordKind::UserBlocks(c.as_array().unwrap().iter().filter_map(user_block).collect()))
-        }
+        Some(c) if c.is_array() => Some(RecordKind::UserBlocks(
+            c.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(user_block)
+                .collect(),
+        )),
         _ => None,
     }
 }
@@ -237,11 +267,20 @@ fn user_kind(value: &Value) -> Option<RecordKind> {
 /// `text` and `tool_result` — even though `search` only matches the latter.
 fn user_block(block: &Value) -> Option<UserBlock> {
     match block.get("type").and_then(|t| t.as_str()) {
-        Some("text") => block.get("text").and_then(|t| t.as_str()).map(|t| UserBlock::Text(t.to_string())),
+        Some("text") => block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| UserBlock::Text(t.to_string())),
         Some("tool_result") => Some(UserBlock::ToolResult {
-            is_error: block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false),
+            is_error: block
+                .get("is_error")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
             exit_code: None,
-            tool_use_id: block.get("tool_use_id").and_then(|i| i.as_str()).map(str::to_string),
+            tool_use_id: block
+                .get("tool_use_id")
+                .and_then(|i| i.as_str())
+                .map(str::to_string),
             text: tool_result_text(block),
         }),
         _ => None,
@@ -267,8 +306,12 @@ fn tool_result_text(block: &Value) -> String {
 /// Classify an `assistant` Record's content into its Blocks, in order. A missing
 /// or non-array content yields no Record (its turn is already counted).
 fn assistant_kind(value: &Value) -> Option<RecordKind> {
-    let blocks = value.pointer("/message/content").and_then(|c| c.as_array())?;
-    Some(RecordKind::Assistant(blocks.iter().filter_map(assistant_block).collect()))
+    let blocks = value
+        .pointer("/message/content")
+        .and_then(|c| c.as_array())?;
+    Some(RecordKind::Assistant(
+        blocks.iter().filter_map(assistant_block).collect(),
+    ))
 }
 
 /// Parse one Block of an assistant Message's `content` array. Kept losslessly,
@@ -276,13 +319,21 @@ fn assistant_kind(value: &Value) -> Option<RecordKind> {
 /// projections, not the parser, decide whether to drop empties (ADR 0006).
 fn assistant_block(block: &Value) -> Option<AssistantBlock> {
     match block.get("type").and_then(|t| t.as_str()) {
-        Some("text") => block.get("text").and_then(|t| t.as_str()).map(|t| AssistantBlock::Text(t.to_string())),
-        Some("thinking") => {
-            block.get("thinking").and_then(|t| t.as_str()).map(|t| AssistantBlock::Thinking(t.to_string()))
-        }
+        Some("text") => block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| AssistantBlock::Text(t.to_string())),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(|t| t.as_str())
+            .map(|t| AssistantBlock::Thinking(t.to_string())),
         Some("tool_use") => Some(AssistantBlock::ToolUse {
             id: block.get("id").and_then(|i| i.as_str()).map(str::to_string),
-            name: block.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+            name: block
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string(),
             input: block.get("input").cloned().unwrap_or(Value::Null),
         }),
         _ => None,
@@ -354,8 +405,14 @@ mod tests {
         let session = read(r#"{"type":"ai-title","aiTitle":"Borrow chat"}"#);
 
         assert_eq!(session.meta.title.as_deref(), Some("Borrow chat"));
-        assert_eq!(session.records[0].kind, RecordKind::Title("Borrow chat".into()));
-        assert_eq!(session.records[0].turn, None, "a Title is metadata, not a turn");
+        assert_eq!(
+            session.records[0].kind,
+            RecordKind::Title("Borrow chat".into())
+        );
+        assert_eq!(
+            session.records[0].turn, None,
+            "a Title is metadata, not a turn"
+        );
     }
 
     #[test]
@@ -368,7 +425,11 @@ mod tests {
 
         let meta = read(&text).meta;
 
-        assert_eq!(meta.timestamp.as_deref(), Some("2026-06-01T00:00:00.000Z"), "newest wins");
+        assert_eq!(
+            meta.timestamp.as_deref(),
+            Some("2026-06-01T00:00:00.000Z"),
+            "newest wins"
+        );
         assert_eq!(meta.branch.as_deref(), Some("main"), "first branch wins");
         assert_eq!(meta.cwd.as_deref(), Some("E:\\proj"), "first cwd wins");
     }
@@ -401,6 +462,9 @@ mod tests {
 
         let index = tool_index(&records);
 
-        assert_eq!(index.get("t1"), Some(&("Bash".to_string(), Some("cargo test".to_string()))));
+        assert_eq!(
+            index.get("t1"),
+            Some(&("Bash".to_string(), Some("cargo test".to_string())))
+        );
     }
 }
