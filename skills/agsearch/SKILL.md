@@ -48,6 +48,16 @@ you. Result trailers print the exact `show` command to run next.
   `--path` prints the source file. Fails outside a supported Harness, when
   the identity is missing from the configured Stores, or when Claude and Codex
   both identify a Session unless `--harness` is passed.
+- `agsearch export <SESSION> <DEST>` — write one Session snapshot to one
+  destination. `<SESSION>` accepts a short id-prefix, `current` (top-level
+  only, never a family bundle), or `current-thread`. Markdown is the default:
+  a readable document with provenance (title, full id, Harness, Project,
+  source timestamp, export timestamp, snapshot status) plus the Transcript.
+  `--format raw` copies the Harness Session file exactly, with no added
+  metadata and no prompt. `-` writes to stdout. Every Export is a
+  point-in-time snapshot that finishes without waiting; Markdown ignores an
+  incomplete trailing record and marks itself as a snapshot. An existing file
+  is rejected unless `--force` is passed.
 - `agsearch sessions` / `agsearch projects` — list sessions in scope /
   projects in the store, newest first. Use these to orient before searching.
 - `agsearch --failed [query]` — list failed tool calls by structure; the
@@ -83,9 +93,11 @@ when the user asks about a different project, reach for a scope flag:
 
 ## Gotchas `--help` won't tell you
 
-- Exit `0` **even with no matches**; `1` only on invalid regex or an
-  unresolvable config dir. Empty output means "searched fine, found nothing" —
-  say that rather than retrying blindly.
+- Exit `0` **even with no matches**; `1` on invalid regex, an unresolvable
+  config dir, an unresolvable Session selector, unavailable or ambiguous
+  current context, or an existing Export destination without `--force`. Empty
+  output means "searched fine, found nothing" — say that rather than retrying
+  blindly.
 - Default search covers user/assistant text and titles. When a plain search
   comes up empty, retry with `--thinking`, `--tools`, or `--all-content` — the
   topic may live in a reasoning block or a tool call.
