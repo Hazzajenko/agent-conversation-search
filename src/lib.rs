@@ -1051,6 +1051,86 @@ pub fn format_windowed_for_harness(
     out
 }
 
+// --- export: one Session snapshot as Markdown or raw ---------------------
+
+/// Convert Unix seconds to an ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+/// Hand-rolled (the inverse of [`days_from_civil`'s date part) so `agsearch`
+/// stays free of a date-library dependency. Used for the Export provenance
+/// `Exported` field.
+pub fn unix_to_iso8601_utc(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs_of_day = unix.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3_600;
+    let min = (secs_of_day % 3_600) / 60;
+    let sec = secs_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// Inverse of [`days_from_civil`]: days since the Unix epoch to
+/// `(year, month, day)` (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    (y, m, d)
+}
+
+/// The current UTC time as an ISO 8601 timestamp for Export provenance.
+/// A thin wrapper over [`unix_to_iso8601_utc`] so the clock read lives in one
+/// place and unit tests can pin `format_export_markdown` with a fixed string.
+pub fn export_timestamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    unix_to_iso8601_utc(now)
+}
+
+/// Render one Session as a portable Markdown Export document: provenance
+/// followed by the readable Transcript (see CONTEXT.md Export).
+///
+/// Provenance carries the title, full Session ID, Harness, Project, source
+/// timestamp, export timestamp, and snapshot status, so the document identifies
+/// its origin without `agsearch`. The Transcript body reuses
+/// [`format_transcript_for_harness`], preserving its content rules (Messages
+/// only, compact tool one-liners, flagged Failures, hidden thinking unless
+/// `show_thinking`).
+pub fn format_export_markdown(
+    session: &SessionIdentity,
+    turns: &[Turn],
+    show_thinking: bool,
+    export_timestamp: &str,
+) -> String {
+    let title = session.title.as_deref().unwrap_or("(untitled)");
+    let source_timestamp = session.timestamp.as_deref().unwrap_or("(unknown)");
+    let mut out = String::new();
+    out.push_str(&format!("# {title}\n\n"));
+    out.push_str(&format!("- Session: {}\n", session.session_id));
+    out.push_str(&format!("- Harness: {}\n", session.harness.as_str()));
+    out.push_str(&format!("- Project: {}\n", session.display_project()));
+    out.push_str(&format!("- Source: {}\n", session.path.display()));
+    out.push_str(&format!("- Source timestamp: {source_timestamp}\n"));
+    out.push_str(&format!("- Exported: {export_timestamp}\n"));
+    out.push_str("- Snapshot: point-in-time snapshot (the Session may still be active)\n");
+    out.push_str("\n## Transcript\n\n");
+    out.push_str(&format_transcript_for_harness(
+        turns,
+        show_thinking,
+        session.harness,
+    ));
+    out
+}
+
 /// Render one [`TurnBlock`] into the Transcript.
 fn render_block(out: &mut String, block: &TurnBlock, show_thinking: bool) {
     match block {
@@ -3792,6 +3872,107 @@ mod tests {
             out.contains("3 later turns hidden"),
             "below indicator: {out}"
         );
+    }
+
+    // --- export snapshots --------------------------------------------------
+
+    fn export_session() -> SessionIdentity {
+        SessionIdentity {
+            harness: Harness::Claude,
+            subagent: None,
+            project: Some(ProjectKey::from_encoded("E--projects-demo")),
+            session_id: "abcd1234-0000-0000-0000-000000000000".into(),
+            path: PathBuf::from(
+                "/store/E--projects-demo/abcd1234-0000-0000-0000-000000000000.jsonl",
+            ),
+            title: Some("Borrow checker chat".into()),
+            timestamp: Some("2026-08-01T10:00:00.000Z".into()),
+            branch: None,
+            cwd: Some(r"E:\projects\demo".into()),
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn export_markdown_contains_provenance_and_transcript() {
+        let session = export_session();
+        let turns = vec![Turn {
+            number: 1,
+            kind: TurnKind::Prompt,
+            blocks: vec![TurnBlock::Text("fix the build".into())],
+        }];
+
+        let out = format_export_markdown(&session, &turns, false, "2026-09-08T12:00:00Z");
+
+        assert!(out.contains("# Borrow checker chat"), "title: {out}");
+        assert!(
+            out.contains("abcd1234-0000-0000-0000-000000000000"),
+            "full Session ID: {out}"
+        );
+        assert!(out.contains("claude"), "Harness: {out}");
+        assert!(
+            out.contains(r"E:\projects\demo"),
+            "Project prefers real cwd: {out}"
+        );
+        assert!(
+            out.contains("2026-08-01T10:00:00.000Z"),
+            "source timestamp: {out}"
+        );
+        assert!(
+            out.contains("2026-09-08T12:00:00Z"),
+            "export timestamp: {out}"
+        );
+        assert!(
+            out.to_lowercase().contains("snapshot"),
+            "snapshot status: {out}"
+        );
+        assert!(out.contains("fix the build"), "Transcript body: {out}");
+    }
+
+    #[test]
+    fn export_markdown_falls_back_when_title_and_timestamp_are_missing() {
+        let mut session = export_session();
+        session.title = None;
+        session.timestamp = None;
+        let out = format_export_markdown(&session, &[], false, "2026-09-08T12:00:00Z");
+
+        assert!(out.contains("(untitled)"), "untitled fallback: {out}");
+        assert!(out.contains("(unknown)"), "unknown source timestamp: {out}");
+        assert!(out.contains("(no messages)"), "empty Transcript: {out}");
+    }
+
+    #[test]
+    fn export_markdown_preserves_transcript_thinking_rules() {
+        let session = export_session();
+        let turns = vec![Turn {
+            number: 1,
+            kind: TurnKind::Reply,
+            blocks: vec![TurnBlock::Thinking("secret rumination".into())],
+        }];
+
+        let collapsed = format_export_markdown(&session, &turns, false, "2026-09-08T12:00:00Z");
+        assert!(
+            collapsed.contains("[thinking:"),
+            "collapsed by default: {collapsed}"
+        );
+        assert!(!collapsed.contains("secret rumination"));
+
+        let expanded = format_export_markdown(&session, &turns, true, "2026-09-08T12:00:00Z");
+        assert!(
+            expanded.contains("secret rumination"),
+            "--thinking expands: {expanded}"
+        );
+    }
+
+    #[test]
+    fn unix_to_iso8601_utc_formats_known_instants() {
+        assert_eq!(unix_to_iso8601_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_to_iso8601_utc(86_400), "1970-01-02T00:00:00Z");
+        assert_eq!(unix_to_iso8601_utc(3_600), "1970-01-01T01:00:00Z");
+        // Round-trips through the existing parser.
+        let unix = parse_iso_to_unix("2026-08-15T00:00:00Z").unwrap();
+        assert_eq!(unix_to_iso8601_utc(unix), "2026-08-15T00:00:00Z");
+        assert!(parse_iso_to_unix(&unix_to_iso8601_utc(unix)).is_some());
     }
 
     proptest::proptest! {

@@ -6,13 +6,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use agsearch::{
-    failed_in_store_session, failed_in_stores, format_current, format_failures, format_paths,
-    format_projects, format_results, format_session_paths, format_sessions, format_stats,
-    format_transcript_for_harness, format_windowed_for_harness, group_failures,
-    list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
-    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
-    resolve_current_thread, resolve_store_session_prefix, search_store_session, search_stores,
-    since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
+    export_timestamp_now, failed_in_store_session, failed_in_stores, format_current,
+    format_export_markdown, format_failures, format_paths, format_projects, format_results,
+    format_session_paths, format_sessions, format_stats, format_transcript_for_harness,
+    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
+    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
+    resolve_current_context, resolve_current_session, resolve_current_thread,
+    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
+    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -72,6 +73,22 @@ enum Command {
     /// not in the configured Stores, or if both Harnesses identify a Session
     /// and `--harness` is omitted. Never guesses from the newest Session.
     Current(CurrentArgs),
+    /// Export one Session snapshot to a file or standard output.
+    ///
+    /// Writes a point-in-time snapshot of one Session to one destination.
+    /// Markdown (the default) is a readable document with provenance followed
+    /// by the Transcript; `--format raw` copies the Harness Session file
+    /// exactly. `current` exports only the top-level Session. An existing
+    /// destination is rejected unless `--force` is passed.
+    Export(ExportArgs),
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportFormat {
+    /// Readable document with provenance plus the Transcript.
+    Markdown,
+    /// Exact copy of the Harness Session file, no added metadata.
+    Raw,
 }
 
 /// Arguments for the `search` verb. Flattened into [`Cli`] so bare
@@ -230,6 +247,33 @@ struct CurrentArgs {
     path: bool,
 }
 
+/// Arguments for the `export` verb: write one Session snapshot to one
+/// destination. The Session selector accepts a unique id prefix, `current`
+/// for the top-level Current Session, or `current-thread` for the calling
+/// thread. The destination is a file path, or `-` for standard output.
+#[derive(Args)]
+struct ExportArgs {
+    /// A git-style unique prefix of a session-id, `current` for the top-level
+    /// Current Session, or `current-thread` for the calling thread.
+    session: String,
+
+    /// Destination file path, or `-` to write the Export to standard output.
+    destination: String,
+
+    /// Export format: readable Markdown (the default) or an exact raw copy.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Markdown)]
+    format: ExportFormat,
+
+    /// Overwrite the destination when it already exists.
+    #[arg(long)]
+    force: bool,
+
+    /// Expand assistant thinking blocks in Markdown Export (collapsed by
+    /// default, like `show`).
+    #[arg(long)]
+    thinking: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -272,6 +316,7 @@ fn main() -> ExitCode {
         Some(Command::Sessions(args)) => run_sessions(&stores, &args),
         Some(Command::Projects(args)) => run_projects(&stores, &args),
         Some(Command::Current(args)) => run_current(&stores, &args),
+        Some(Command::Export(args)) => run_export(&stores, &args),
         None => run_search(stores, &cli.search),
     }
 }
@@ -614,6 +659,130 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
     };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
+}
+
+/// Run the `export` verb: resolve one Session (by prefix or current-context
+/// selector), then write one point-in-time snapshot to one destination.
+///
+/// Markdown (the default) renders provenance plus the Transcript via the
+/// existing renderer; raw copies the Harness Session file byte-for-byte.
+/// Destination `-` writes to standard output. An existing file destination is
+/// rejected unless `--force` is passed. Every Export captures the content
+/// available when the command runs and finishes without waiting for the
+/// Harness.
+fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
+    let handle = if args.session == "current" {
+        match resolve_current_session(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if args.session == "current-thread" {
+        match resolve_current_thread(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match resolve_store_session_prefix(stores, &args.session) {
+            StoreSessionRef::Unique(session) => session,
+            StoreSessionRef::NotFound => {
+                eprintln!("agsearch: no session matches '{}'", args.session);
+                return ExitCode::FAILURE;
+            }
+            StoreSessionRef::Ambiguous(ids) => {
+                eprintln!(
+                    "agsearch: '{}' is ambiguous — {} sessions match:",
+                    args.session,
+                    ids.len()
+                );
+                for id in ids.iter().take(10) {
+                    eprintln!("  {id}");
+                }
+                if ids.len() > 10 {
+                    eprintln!("  … and {} more", ids.len() - 10);
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    match args.format {
+        ExportFormat::Raw => {
+            let bytes = match std::fs::read(&handle.info.path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!(
+                        "agsearch: cannot read {}: {err}",
+                        handle.info.path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            if args.destination == "-" {
+                let mut stdout = std::io::stdout();
+                if stdout.write_all(&bytes).is_err() {
+                    eprintln!("agsearch: cannot write to standard output");
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
+            let dest = PathBuf::from(&args.destination);
+            if dest.is_dir() {
+                eprintln!("agsearch: destination '{}' is a directory", dest.display());
+                return ExitCode::FAILURE;
+            }
+            if dest.exists() && !args.force {
+                eprintln!(
+                    "agsearch: destination '{}' already exists (pass --force to overwrite)",
+                    dest.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            if let Err(err) = std::fs::write(&dest, &bytes) {
+                eprintln!("agsearch: cannot write {}: {err}", dest.display());
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        ExportFormat::Markdown => {
+            let Some(turns) = parse_store_transcript(stores, &handle) else {
+                eprintln!("agsearch: cannot read {}", handle.info.path.display());
+                return ExitCode::FAILURE;
+            };
+            let rendered = format_export_markdown(
+                &handle.info,
+                &turns,
+                args.thinking,
+                &export_timestamp_now(),
+            );
+            if args.destination == "-" {
+                let _ = write!(anstream::stdout(), "{rendered}");
+                return ExitCode::SUCCESS;
+            }
+            let dest = PathBuf::from(&args.destination);
+            if dest.is_dir() {
+                eprintln!("agsearch: destination '{}' is a directory", dest.display());
+                return ExitCode::FAILURE;
+            }
+            if dest.exists() && !args.force {
+                eprintln!(
+                    "agsearch: destination '{}' already exists (pass --force to overwrite)",
+                    dest.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            if let Err(err) = std::fs::write(&dest, rendered.as_bytes()) {
+                eprintln!("agsearch: cannot write {}: {err}", dest.display());
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 /// Read the first non-empty line of stdin as a Session file path (for
