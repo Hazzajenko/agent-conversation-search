@@ -20,11 +20,12 @@ $ agsearch current             # inspect the Session that invoked this command
 ## Why
 
 The transcripts use Harness-specific layouts and JSON formats. `agsearch`
-turns them into four jobs:
+turns them into five jobs:
 
 - **find** a conversation — `agsearch <query>`
 - **read** a conversation — `agsearch show <id>`
 - **inspect** the Current Session — `agsearch current`
+- **preserve** a conversation — `agsearch export <id> <file>`
 - **analyse** what went wrong — `agsearch --failed` / `--stats`
 
 ## Install
@@ -157,6 +158,48 @@ $ agsearch current --id-only
 11111111-aaaa-bbbb-cccc-ddddeeee0001
 ```
 
+### `export` — preserve a Session snapshot
+
+`agsearch export <SESSION> <DEST>` writes one point-in-time snapshot of one
+Session to one destination. The Session accepts a unique id prefix, `current`
+for the top-level Current Session, or `current-thread` for the calling thread.
+`current` exports only the top-level Session, never a combined family document.
+The destination is required; `-` writes the Export to standard output.
+
+| Flag | Effect |
+|------|--------|
+| `--format markdown\|raw` | readable document (the default) or an exact raw copy |
+| `--force` | overwrite the destination when it already exists |
+| `--thinking` | expand assistant thinking blocks in Markdown Export |
+
+Readable Export (Markdown) is a portable document with provenance followed by
+the Transcript. Provenance carries the title, full Session ID, Harness,
+Project, source timestamp, export timestamp, and snapshot status, so the file
+identifies its origin without `agsearch`. The Transcript body uses the same
+renderer as `show` — Messages only, tool calls as compact one-liners, failed
+tool results flagged, thinking hidden unless `--thinking` is passed.
+
+Raw Export (`--format raw`) copies the Harness Session file exactly, with no
+added metadata and no interactive confirmation beyond the explicit format
+option. It is the way to preserve the source data.
+
+Every Export is a snapshot: it captures the content available when the command
+runs and finishes without waiting for the Harness. A Markdown snapshot renders
+every complete Record and ignores an incomplete trailing JSONL record; the
+document identifies itself as a snapshot so nobody mistakes it for a final
+transcript. A raw snapshot contains the source bytes captured by the operation.
+
+An existing destination file is rejected unless `--force` is passed, so an
+earlier snapshot is never destroyed silently.
+
+```console
+$ agsearch export 4c28878f transcript.md        # readable snapshot
+$ agsearch export current transcript.md         # preserve the Current Session
+$ agsearch export current-thread worker.md      # preserve only the calling thread
+$ agsearch export 4c28878f - | less             # pipe through stdout
+$ agsearch export 4c28878f raw.jsonl --format raw --force
+```
+
 ### `sessions` — list conversations
 
 `agsearch sessions` lists the Sessions in scope, newest first, one per line —
@@ -233,8 +276,8 @@ the Current Session.
 - "No matches" / "No sessions" / "No projects" exit **0** — an empty result is
   not an error.
 - Bad input (unparseable regex, unparseable `--since`, an ambiguous id, a
-  missing Session, unavailable or ambiguous current context) exits **non-zero**
-  with a readable message.
+  missing Session, unavailable or ambiguous current context, an existing Export
+  destination without `--force`) exits **non-zero** with a readable message.
 
 ## As a Claude Code plugin
 

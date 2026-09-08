@@ -3061,3 +3061,649 @@ fn session_current_selectors_report_ambiguity_like_current() {
         .success()
         .stdout(predicates::str::contains("codex ambiguity marker"));
 }
+
+// --- export: one Session snapshot (issue 19, ADR 0012) ---
+
+#[test]
+fn export_markdown_writes_claude_provenance_and_transcript() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0300";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        &[
+            r#"{"type":"ai-title","aiTitle":"Export readable chat"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"export marker prompt"},"timestamp":"2026-08-01T10:00:00.000Z","cwd":"E:\\projects\\demo","gitBranch":"main"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"export marker reply"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"error[E0433]: failed to resolve"}]}}"#,
+        ]
+        .join("\n"),
+    );
+    let dest = output.path().join("export.md");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(text.contains("# Export readable chat"), "title: {text}");
+    assert!(
+        text.contains(session_id),
+        "full Session ID, not just the prefix: {text}"
+    );
+    assert!(text.contains("Harness: claude"), "Harness: {text}");
+    assert!(
+        text.contains(r"E:\projects\demo"),
+        "Project shows real cwd: {text}"
+    );
+    assert!(
+        text.contains("2026-08-01T10:00:00.000Z"),
+        "source timestamp: {text}"
+    );
+    assert!(text.contains("Exported:"), "export timestamp: {text}");
+    assert!(
+        text.to_lowercase().contains("snapshot"),
+        "snapshot status: {text}"
+    );
+    assert!(text.contains("## Transcript"), "transcript section: {text}");
+    assert!(text.contains("export marker prompt"), "prompt: {text}");
+    assert!(text.contains("export marker reply"), "reply: {text}");
+    assert!(
+        text.contains("→ Bash cargo test"),
+        "compact tool one-liner: {text}"
+    );
+    assert!(
+        text.contains("✗ Bash FAILED"),
+        "failed tool flagged: {text}"
+    );
+}
+
+#[test]
+fn export_markdown_writes_codex_provenance_and_transcript() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "c0de7001-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex export marker prompt"}]}}"#,
+            r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex export marker reply"}]}}"#,
+        ],
+    );
+    plant_codex_title(codex.path(), session_id, "Codex export chat");
+    let dest = output.path().join("codex.md");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(text.contains("# Codex export chat"), "title: {text}");
+    assert!(text.contains(session_id), "full Session ID: {text}");
+    assert!(text.contains("Harness: codex"), "Harness: {text}");
+    assert!(
+        text.contains(&workdir.path().to_string_lossy().to_string()),
+        "Project: {text}"
+    );
+    assert!(
+        text.contains("2026-08-28T10:02:00.000Z"),
+        "source timestamp is the newest record: {text}"
+    );
+    assert!(text.contains("Exported:"), "export timestamp: {text}");
+    assert!(
+        text.to_lowercase().contains("snapshot"),
+        "snapshot status: {text}"
+    );
+    assert!(
+        text.contains("codex export marker prompt"),
+        "prompt: {text}"
+    );
+    assert!(text.contains("codex export marker reply"), "reply: {text}");
+    assert!(text.contains("codex\n"), "codex speaker: {text}");
+}
+
+#[test]
+fn export_raw_copies_claude_bytes_exactly() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0310";
+    let source = plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        &[
+            r#"{"type":"ai-title","aiTitle":"Raw chat"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"raw marker"},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+        ]
+        .join("\n"),
+    );
+    let dest = output.path().join("raw.jsonl");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .arg("--format")
+        .arg("raw")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(&dest).unwrap(),
+        fs::read(&source).unwrap(),
+        "raw Export is byte-identical, no added metadata"
+    );
+}
+
+#[test]
+fn export_raw_copies_codex_bytes_exactly() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "c0de7002-0000-0000-0000-000000000000";
+    let source = plant_codex_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex raw marker"}]}}"#,
+        ],
+    );
+    let dest = output.path().join("codex-raw.jsonl");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .arg("--format")
+        .arg("raw")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(&dest).unwrap(),
+        fs::read(&source).unwrap(),
+        "raw Codex Export is byte-identical"
+    );
+}
+
+#[test]
+fn export_to_stdout_writes_markdown_without_a_file() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0320";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        &[
+            r#"{"type":"ai-title","aiTitle":"Stdout chat"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"stdout marker"},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg("-")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("# Stdout chat"))
+        .stdout(predicates::str::contains(session_id))
+        .stdout(predicates::str::contains("stdout marker"));
+}
+
+#[test]
+fn export_raw_to_stdout_writes_exact_source_bytes() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0321";
+    let source = plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        r#"{"type":"user","message":{"role":"user","content":"raw stdout marker"}}"#,
+    );
+    let expected = fs::read_to_string(&source).unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg("-")
+        .arg("--format")
+        .arg("raw")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("raw stdout marker"))
+        .stdout(predicates::str::contains(expected.trim()));
+}
+
+#[test]
+fn export_markdown_snapshot_ignores_an_incomplete_trailing_record() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0330";
+    let source = plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        r#"{"type":"user","message":{"role":"user","content":"complete marker"},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+    );
+    // An active Harness may be mid-write: a truncated final line with no
+    // closing braces. Export must finish and render only complete Records.
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&source).unwrap();
+        writeln!(
+            file,
+            "\n{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"incomplete"
+        )
+        .unwrap();
+    }
+    let dest = output.path().join("snapshot.md");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(
+        text.contains("complete marker"),
+        "complete Records are exported: {text}"
+    );
+    assert!(
+        !text.contains("incomplete"),
+        "the truncated trailing record is ignored: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("snapshot"),
+        "the document identifies itself as a snapshot: {text}"
+    );
+}
+
+#[test]
+fn export_codex_snapshot_ignores_an_incomplete_trailing_record() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "c0de7003-0000-0000-0000-000000000000";
+    let source = plant_codex_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex complete marker"}]}}"#,
+        ],
+    );
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&source).unwrap();
+        writeln!(
+            file,
+            "\n{{\"timestamp\":\"2026-08-28T10:02:00.000Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\""
+        )
+        .unwrap();
+    }
+    let dest = output.path().join("codex-snapshot.md");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(
+        text.contains("codex complete marker"),
+        "complete Records are exported: {text}"
+    );
+}
+
+#[test]
+fn export_refuses_to_overwrite_without_force_and_replaces_with_force() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0340";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        r#"{"type":"user","message":{"role":"user","content":"overwrite marker"},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+    );
+    let dest = output.path().join("existing.md");
+    fs::write(&dest, "earlier snapshot\n").unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already exists"))
+        .stderr(predicates::str::contains("--force"));
+    assert_eq!(
+        fs::read_to_string(&dest).unwrap(),
+        "earlier snapshot\n",
+        "the existing file is left untouched"
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg(&session_id[..8])
+        .arg(&dest)
+        .arg("--force")
+        .assert()
+        .success();
+    let replaced = fs::read_to_string(&dest).unwrap();
+    assert!(
+        replaced.contains("overwrite marker"),
+        "explicit --force replaces the file: {replaced}"
+    );
+}
+
+#[test]
+fn export_current_exports_only_the_top_level_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0350";
+    let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0351";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        r#"{"type":"user","message":{"role":"user","content":"parent export marker"}}"#,
+    );
+    plant_claude_subagent(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        r#"{"type":"user","message":{"role":"user","content":"worker export marker"}}"#,
+    );
+    let dest = output.path().join("current.md");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg("current")
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(
+        text.contains("parent export marker"),
+        "current selects the top-level Session: {text}"
+    );
+    assert!(
+        !text.contains("worker export marker"),
+        "it does not bundle the worker family: {text}"
+    );
+    assert!(text.contains(parent_id), "full top-level ID: {text}");
+}
+
+#[test]
+fn export_current_thread_exports_the_calling_worker() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0360";
+    let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0361";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        r#"{"type":"user","message":{"role":"user","content":"parent thread marker"}}"#,
+    );
+    plant_claude_subagent(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        r#"{"type":"user","message":{"role":"user","content":"worker thread marker"}}"#,
+    );
+    let dest = output.path().join("thread.md");
+
+    // Explicit current-thread reaches the worker without --include-subagents.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg("current-thread")
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&dest).unwrap();
+    assert!(
+        text.contains("worker thread marker"),
+        "current-thread selects the calling thread: {text}"
+    );
+    assert!(
+        !text.contains("parent thread marker"),
+        "only the calling thread: {text}"
+    );
+}
+
+#[test]
+fn export_codex_thread_selectors_export_the_intended_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let parent_id = "c0de7101-0000-0000-0000-000000000000";
+    let worker_id = "c0de7102-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        parent_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex parent export marker"}]}}"#,
+        ],
+    );
+    plant_codex_subagent(
+        codex.path(),
+        worker_id,
+        workdir.path(),
+        parent_id,
+        &[
+            r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex worker export marker"}]}}"#,
+        ],
+    );
+
+    let current_dest = output.path().join("codex-current.md");
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CODEX_SESSION_ID", parent_id)
+        .env("CODEX_THREAD_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg("current")
+        .arg(&current_dest)
+        .assert()
+        .success();
+    let current_text = fs::read_to_string(&current_dest).unwrap();
+    assert!(
+        current_text.contains("codex parent export marker"),
+        "current selects the top-level Codex Session: {current_text}"
+    );
+    assert!(
+        !current_text.contains("codex worker export marker"),
+        "not the worker family: {current_text}"
+    );
+
+    let thread_dest = output.path().join("codex-thread.md");
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CODEX_SESSION_ID", parent_id)
+        .env("CODEX_THREAD_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg("current-thread")
+        .arg(&thread_dest)
+        .assert()
+        .success();
+    let thread_text = fs::read_to_string(&thread_dest).unwrap();
+    assert!(
+        thread_text.contains("codex worker export marker"),
+        "current-thread selects the worker: {thread_text}"
+    );
+    assert!(
+        !thread_text.contains("codex parent export marker"),
+        "only the worker: {thread_text}"
+    );
+}
+
+#[test]
+fn export_reports_unresolved_selectors_and_missing_current_context() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        r#"{"type":"user","message":{"role":"user","content":"unrelated"}}"#,
+    );
+
+    // Unknown prefix.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg("zzz")
+        .arg(output.path().join("missing.md"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session matches"));
+
+    // No Harness identity for `current`.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("export")
+        .arg("current")
+        .arg(output.path().join("current.md"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no current Session"));
+}
+
+#[test]
+fn export_reports_ambiguity_like_current() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0370";
+    let codex_id = "c0de7201-0000-0000-0000-000000000000";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        claude_id,
+        r#"{"type":"user","message":{"role":"user","content":"claude export ambiguity"}}"#,
+    );
+    plant_codex_session(
+        codex.path(),
+        codex_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex export ambiguity"}]}}"#,
+        ],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", claude_id)
+        .env("CODEX_SESSION_ID", codex_id)
+        .env("CODEX_THREAD_ID", codex_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("export")
+        .arg("current")
+        .arg(output.path().join("ambiguous.md"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"))
+        .stderr(predicates::str::contains("--harness"));
+}
