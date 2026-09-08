@@ -13,8 +13,8 @@ use regex::RegexBuilder;
 use session::{AssistantBlock, Record, RecordKind, UserBlock};
 
 pub use current::{
-    format_current, resolve_current_context, resolve_current_session, CurrentContext,
-    CurrentContextError,
+    format_current, resolve_current_context, resolve_current_session, resolve_current_thread,
+    CurrentContext, CurrentContextError,
 };
 pub use harness::{Harness, SessionHandle, Stores};
 

@@ -41,7 +41,8 @@ you. Result trailers print the exact `show` command to run next.
 - `agsearch "<terms>"` — search (the default verb; case-insensitive literal
   substring). `-e` for regex, `-s` for case-sensitive.
 - `agsearch show <id>` — render a session as a transcript; `--around N`
-  windows it.
+  windows it. `<id>` accepts a short id-prefix, `current` for the top-level
+  Current Session, or `current-thread` for the calling thread.
 - `agsearch current` — print the Current Session (Harness, full id, Project,
   title, path, caller kind). `--id-only` prints the full top-level id;
   `--path` prints the source file. Fails outside a supported Harness, when
@@ -60,7 +61,8 @@ threads. This prevents a search from returning the Prompt that started the
 search.
 
 Add `--include-current` when the user wants to include the current work. Use
-`--session current` to search the Current Session directly. An explicit
+`--session current` to search the top-level Current Session directly, or
+`--session current-thread` to search the calling thread. An explicit
 Session id selects that Session even when it belongs to the family. `sessions`
 and `projects` still include the Current Session.
 
@@ -73,7 +75,7 @@ when the user asks about a different project, reach for a scope flag:
 | --- | --- |
 | "anywhere" / "any project" | `--all` |
 | names another project | `--project <name-substr>` |
-| one known conversation | `--session <id-prefix>` |
+| one known conversation | `--session <id-prefix\|current\|current-thread>` |
 | "this Session too" or "including now" | `--include-current` |
 | "last week" / "since May" | `--since 1w` / `--since 2026-05-01` |
 

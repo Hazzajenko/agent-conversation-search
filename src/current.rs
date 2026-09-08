@@ -113,6 +113,23 @@ pub fn resolve_current_session(stores: &Stores) -> Result<SessionHandle, Current
         })
 }
 
+/// Resolve the calling thread to its exact Store handle.
+///
+/// At the top level this identifies the same Session as
+/// [`resolve_current_session`]; from a spawned worker it identifies the
+/// worker's own subagent thread. Like [`resolve_current_session`] the lookup
+/// includes subagent threads, so an explicit `current-thread` selector can
+/// access a worker without `--include-subagents`.
+pub fn resolve_current_thread(stores: &Stores) -> Result<SessionHandle, CurrentContextError> {
+    let context = resolve_current_context(stores)?;
+    stores
+        .lookup_session(context.thread.harness, &context.thread.session_id)
+        .ok_or(CurrentContextError::NotInStore {
+            harness: context.thread.harness,
+            session_id: context.thread.session_id,
+        })
+}
+
 /// The Sessions multi-Session analysis excludes by default (ADR 0011): the
 /// Current Session and every known descendant. Each key includes its Harness
 /// because Session ids can coincide across Stores.
