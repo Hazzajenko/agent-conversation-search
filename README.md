@@ -92,8 +92,10 @@ Current Session, search excludes its Current Session Family. This prevents a
 search from matching the Prompt that started the search.
 
 Pass `--include-current` to include the family. Pass `--session current` to
-search the Current Session directly. A Session id selects that Session even
-when it belongs to the family.
+search the top-level Current Session directly, or `--session current-thread`
+to search the calling thread (the same Session at the top level, the worker's
+own thread when called from a spawned worker). A Session id selects that
+Session even when it belongs to the family.
 
 The exclusion also covers `--failed` and `--stats`. When
 `--include-subagents` is active, it hides every worker in the family. Outside a
@@ -116,8 +118,9 @@ collapse to one-liners; failed tool calls are flagged; thinking is hidden).
 | `--around <turn>` | show only the turns around this turn (e.g. a search hit) |
 | `--context <N>` | turns of context on either side of `--around` (default 3) |
 
-`<id>` is a git-style prefix resolved across your whole history; `-` reads a
-file path from stdin.
+`<id>` is a git-style prefix resolved across your whole history; `current`
+renders the top-level Current Session and `current-thread` renders the calling
+thread (the same Session at the top level); `-` reads a file path from stdin.
 
 ### `current` — inspect the invoking Session
 
@@ -214,7 +217,7 @@ listing verbs:
 | _(default)_ | the current directory's Project | search, sessions |
 | `--all` | every Project in your history | search, sessions |
 | `--project <substr>` | Projects whose name contains the substring | search, sessions, projects |
-| `--session <selector>` | one Session, selected by id-prefix or `current`. The selected Session remains included when it belongs to the Current Session Family | search |
+| `--session <selector>` | one Session, selected by id-prefix, `current`, or `current-thread`. The selected Session remains included when it belongs to the Current Session Family | search |
 | `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats` |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 

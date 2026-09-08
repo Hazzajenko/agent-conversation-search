@@ -2779,3 +2779,285 @@ fn search_excludes_both_families_when_the_harnesses_disagree() {
         .stdout(predicates::str::contains("ambiguous marker in the claude session").not())
         .stdout(predicates::str::contains("ambiguous marker in the codex session").not());
 }
+
+// --- current-context selectors in Session commands (issue 18) ---
+
+#[test]
+fn show_current_renders_the_top_level_claude_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0200";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        session_id,
+        r#"{"type":"user","message":{"role":"user","content":"top-level marker for show current"}}"#,
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", session_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("show")
+        .arg("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "top-level marker for show current",
+        ));
+}
+
+#[test]
+fn show_current_thread_renders_the_calling_claude_worker_without_subagents() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0210";
+    let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0211";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        r#"{"type":"user","message":{"role":"user","content":"parent marker for show selectors"}}"#,
+    );
+    plant_claude_subagent(
+        claude.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        r#"{"type":"user","message":{"role":"user","content":"worker marker for show current-thread"}}"#,
+    );
+
+    // `current` selects the top-level Session even when invoked from a worker.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("show")
+        .arg("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "parent marker for show selectors",
+        ))
+        .stdout(predicates::str::contains("worker marker for show current-thread").not());
+
+    // `current-thread` selects the calling thread without --include-subagents.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("show")
+        .arg("current-thread")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "worker marker for show current-thread",
+        ))
+        .stdout(predicates::str::contains("parent marker for show selectors").not());
+}
+
+#[test]
+fn show_current_and_current_thread_select_the_same_codex_session_at_the_top_level() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de6001-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"top-level marker for codex show selectors"}]}}"#,
+        ],
+    );
+
+    for selector in ["current", "current-thread"] {
+        agsearch_command()
+            .current_dir(workdir.path())
+            .env("CODEX_SESSION_ID", session_id)
+            .env("CODEX_THREAD_ID", session_id)
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--codex-dir")
+            .arg(codex.path())
+            .arg("show")
+            .arg(selector)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(
+                "top-level marker for codex show selectors",
+            ));
+    }
+}
+
+#[test]
+fn session_selectors_search_only_the_selected_codex_thread() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let parent_id = "c0de6101-0000-0000-0000-000000000000";
+    let worker_id = "c0de6102-0000-0000-0000-000000000000";
+    plant_codex_session(
+        codex.path(),
+        parent_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared selector marker in the parent"}]}}"#,
+        ],
+    );
+    plant_codex_subagent(
+        codex.path(),
+        worker_id,
+        workdir.path(),
+        parent_id,
+        &[
+            r#"{"timestamp":"2026-08-28T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared selector marker in the worker"}]}}"#,
+        ],
+    );
+
+    let command = |selector: &str| {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .env("CODEX_SESSION_ID", parent_id)
+            .env("CODEX_THREAD_ID", worker_id)
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--codex-dir")
+            .arg(codex.path())
+            .arg("--session")
+            .arg(selector)
+            .arg("shared selector marker");
+        command
+    };
+
+    // `current` searches only the top-level Session.
+    command("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "shared selector marker in the parent",
+        ))
+        .stdout(predicates::str::contains("shared selector marker in the worker").not());
+
+    // `current-thread` searches only the calling thread, without
+    // --include-subagents.
+    command("current-thread")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "shared selector marker in the worker",
+        ))
+        .stdout(predicates::str::contains("shared selector marker in the parent").not());
+}
+
+#[test]
+fn session_current_selectors_fail_with_the_resolver_error_when_unavailable() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        r#"{"type":"user","message":{"role":"user","content":"unrelated"}}"#,
+    );
+
+    // No Harness identity: `show` and `--session` report the resolver error.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("show")
+        .arg("current")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no current Session"));
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("show")
+        .arg("current-thread")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no current Session"));
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--session")
+        .arg("current-thread")
+        .arg("unrelated")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no current Session"));
+}
+
+#[test]
+fn session_current_selectors_report_ambiguity_like_current() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0220";
+    let codex_id = "c0de6201-0000-0000-0000-000000000000";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        claude_id,
+        r#"{"type":"user","message":{"role":"user","content":"claude ambiguity marker"}}"#,
+    );
+    plant_codex_session(
+        codex.path(),
+        codex_id,
+        workdir.path(),
+        "user",
+        &[
+            r#"{"timestamp":"2026-08-28T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex ambiguity marker"}]}}"#,
+        ],
+    );
+
+    let base = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .env("CLAUDE_CODE_SESSION_ID", claude_id)
+            .env("CODEX_SESSION_ID", codex_id)
+            .env("CODEX_THREAD_ID", codex_id)
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--codex-dir")
+            .arg(codex.path());
+        command
+    };
+
+    base()
+        .arg("show")
+        .arg("current-thread")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"))
+        .stderr(predicates::str::contains("--harness"));
+    base()
+        .arg("--session")
+        .arg("current")
+        .arg("ambiguity marker")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"))
+        .stderr(predicates::str::contains("--harness"));
+
+    // --harness resolves the ambiguity for explicit selectors, as for `current`.
+    base()
+        .arg("--harness")
+        .arg("codex")
+        .arg("show")
+        .arg("current-thread")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("codex ambiguity marker"));
+}

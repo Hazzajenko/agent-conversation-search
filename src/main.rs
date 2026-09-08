@@ -11,8 +11,8 @@ use agsearch::{
     format_transcript_for_harness, format_windowed_for_harness, group_failures,
     list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
     resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
-    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
-    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
+    resolve_current_thread, resolve_store_session_prefix, search_store_session, search_stores,
+    since_cutoff, timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -93,8 +93,9 @@ struct SearchArgs {
     #[arg(long, value_name = "SUBSTR")]
     project: Option<String>,
 
-    /// Search within one Session. Pass `current` for the Current Session, or a
-    /// git-style id-prefix resolved across the whole Store.
+    /// Search within one Session. Pass `current` for the top-level Current
+    /// Session, `current-thread` for the calling thread, or a git-style
+    /// id-prefix resolved across the whole Store.
     #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["all", "project"])]
     session: Option<String>,
 
@@ -158,7 +159,8 @@ struct SearchArgs {
 #[derive(Args)]
 struct ShowArgs {
     /// A git-style unique prefix of a session-id (resolved across the whole
-    /// Store), or `-` to read a Session file path from stdin.
+    /// Store), `current` for the top-level Current Session, `current-thread`
+    /// for the calling thread, or `-` to read a Session file path from stdin.
     session: String,
 
     /// Expand assistant thinking blocks (collapsed to a count by default).
@@ -384,8 +386,20 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
 
     // --session resolves to one Session file; otherwise we operate over the
     // Project scope. (--session conflicts with --all / --project.)
+    // `current` selects the top-level Current Session, `current-thread`
+    // selects the calling thread (the same Session at the top level). Both
+    // resolve through the current-context module, so unavailable and ambiguous
+    // context fails with the resolver's error and a worker thread is
+    // accessible without --include-subagents.
     let session_path = match &args.session {
         Some(selector) if selector == "current" => match resolve_current_session(&stores) {
+            Ok(session) => Some(session),
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some(selector) if selector == "current-thread" => match resolve_current_thread(&stores) {
             Ok(session) => Some(session),
             Err(err) => {
                 eprintln!("agsearch: {err}");
@@ -519,8 +533,8 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
     }
 }
 
-/// Run the `show` verb: resolve the Session (by prefix, or a path from stdin),
-/// then render it as a Transcript.
+/// Run the `show` verb: resolve the Session (by prefix, current-context
+/// selector, or a path from stdin), then render it as a Transcript.
 fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
     let (turns, harness) = if args.session == "-" {
         match read_path_from_stdin() {
@@ -536,6 +550,32 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    } else if args.session == "current" {
+        let session = match resolve_current_session(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(turns) = parse_store_transcript(stores, &session) else {
+            eprintln!("agsearch: cannot read {}", session.info.path.display());
+            return ExitCode::FAILURE;
+        };
+        (turns, session.info.harness)
+    } else if args.session == "current-thread" {
+        let session = match resolve_current_thread(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(turns) = parse_store_transcript(stores, &session) else {
+            eprintln!("agsearch: cannot read {}", session.info.path.display());
+            return ExitCode::FAILURE;
+        };
+        (turns, session.info.harness)
     } else {
         let session = match resolve_store_session_prefix(stores, &args.session) {
             StoreSessionRef::Unique(session) => session,
