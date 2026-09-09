@@ -80,6 +80,14 @@ _Avoid_: backup, dump.
 A tool call that errored. Detected per Harness: Claude Code marks it structurally (`tool_result` with `is_error: true`, joined via `tool_use_id` to the `tool_use` that names the tool and command); Codex has no such flag, so failure is inferred from the tool-output payload. The unit that failure-analysis lists and counts; distinct from a Match (a Failure is found by structure, not by a Query).
 _Avoid_: error, crash, exception, bug.
 
+**Touch**:
+A tool call in a Session that reads or writes a specific file. Has a kind: `read` (Read) or `write` (Edit, Write, MultiEdit, NotebookEdit; Codex `apply_patch`). Found by structure, like a Failure, not by a Query. A file injected into the conversation by the Harness (for example `CLAUDE.md` in a system reminder) is not a Touch. Shell commands that open a file are not a Touch.
+_Avoid_: access, hit, reference, usage.
+
+**File Selector**:
+The path fragment a user passes to select Touches. Matches when its segments equal the trailing segments of the Touch's path, case-insensitive, with `/` and `\` treated as equal. `CLAUDE.md` matches every `CLAUDE.md` in every Project; `docs/adr/0001-x.md` matches only that trailing path.
+_Avoid_: file filter, glob, pattern.
+
 ## Example dialogue
 
 > **Dev:** When I run a search, does a hit mean the Query matched a whole Session?
