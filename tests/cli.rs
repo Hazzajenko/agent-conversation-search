@@ -4330,3 +4330,158 @@ fn file_project_flag_targets_a_named_project() {
         .stdout(predicates::str::contains("E--projects-wanted"))
         .stdout(predicates::str::contains("E--projects-other").not());
 }
+
+// --- --written narrows --file to write Touches (issue 26) ---
+
+#[test]
+fn written_drops_read_rows_but_keeps_write_tools() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("r1", "Read", r#"{"file_path":"x.md"}"#),
+        touch_use("e1", "Edit", r#"{"file_path":"x.md"}"#),
+        touch_use("w1", "Write", r#"{"file_path":"x.md"}"#),
+        touch_use("m1", "MultiEdit", r#"{"file_path":"x.md"}"#),
+        touch_use("n1", "NotebookEdit", r#"{"notebook_path":"x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("-m")
+        .arg("0")
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("read Read").not())
+        .stdout(predicates::str::contains("write Edit"))
+        .stdout(predicates::str::contains("write Write"))
+        .stdout(predicates::str::contains("write MultiEdit"))
+        .stdout(predicates::str::contains("write NotebookEdit"));
+}
+
+#[test]
+fn written_drops_sessions_left_with_no_rows() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &touch_use("t1", "Edit", r#"{"file_path":"x.md"}"#),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bbbbbbbb"))
+        .stdout(predicates::str::contains("aaaaaaaa").not());
+}
+
+#[test]
+fn written_without_file_errors_clearly() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let _ = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--written")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--written"));
+}
+
+#[test]
+fn written_composes_with_files_flag_and_max_per_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // One read-only session (drops out under --written) plus one session
+    // with a read and two writes (read drops, writes cap at 1).
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+            touch_use("t2", "Edit", r#"{"file_path":"x.md"}"#),
+            touch_use("t3", "Write", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    // -l lists only the session left with writes.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("-l")
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bbbbbbbb"))
+        .stdout(predicates::str::contains("aaaaaaaa").not())
+        .stdout(predicates::str::contains("[2]").not());
+
+    // -m caps the surviving write rows with the standard hint.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("-m")
+        .arg("1")
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("read Read").not())
+        .stdout(predicates::str::contains("+1 more"))
+        .stdout(predicates::str::contains("agsearch show"));
+}
+
+#[test]
+fn written_composes_with_session_current() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
+
+    // The current session's only Touch is a read, so --written finds nothing
+    // there while --file alone lists it.
+    agsearch_as_current(workdir.path(), claude.path(), &current_id)
+        .arg("--session")
+        .arg("current")
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}

@@ -1791,18 +1791,20 @@ impl std::ops::DerefMut for SessionTouches {
 }
 
 /// Scan Sessions enumerated by every configured Harness adapter for Touches of
-/// the selected file.
+/// the selected file. When `written_only` is set, only write Touches are
+/// returned (Sessions left with no rows are omitted).
 pub fn touches_in_stores(
     stores: &Stores,
     scope: &Scope,
     selector: &FileSelector,
+    written_only: bool,
 ) -> Vec<SessionTouches> {
     let sessions = stores.sessions(scope);
     let mut results: Vec<SessionTouches> = sessions
         .par_iter()
         .filter_map(|handle| {
             let parsed = stores.parse(handle)?;
-            touches_in_parsed_session(&handle.info, parsed, selector)
+            touches_in_parsed_session(&handle.info, parsed, selector, written_only)
         })
         .collect();
     results.sort_by(|a, b| {
@@ -1817,10 +1819,11 @@ pub fn touches_in_store_session(
     stores: &Stores,
     handle: &SessionHandle,
     selector: &FileSelector,
+    written_only: bool,
 ) -> Vec<SessionTouches> {
     stores
         .parse(handle)
-        .and_then(|parsed| touches_in_parsed_session(&handle.info, parsed, selector))
+        .and_then(|parsed| touches_in_parsed_session(&handle.info, parsed, selector, written_only))
         .into_iter()
         .collect()
 }
@@ -1829,6 +1832,7 @@ fn touches_in_parsed_session(
     info: &SessionIdentity,
     session: session::Session,
     selector: &FileSelector,
+    written_only: bool,
 ) -> Option<SessionTouches> {
     use std::collections::HashSet;
 
@@ -1862,6 +1866,9 @@ fn touches_in_parsed_session(
             let Some(kind) = touch_kind_for_tool(name) else {
                 continue;
             };
+            if written_only && kind != TouchKind::Write {
+                continue;
+            }
             let Some(path) = touch_path_for_tool(name, input) else {
                 continue;
             };
