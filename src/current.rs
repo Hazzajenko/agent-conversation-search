@@ -338,18 +338,9 @@ fn collect_family(stores: &Stores, harness: Harness, root_id: &str) -> Vec<Strin
 }
 
 fn walks_to(id: &str, root: &str, parents: &HashMap<String, Option<String>>) -> bool {
-    let mut seen = HashSet::new();
-    let mut current = id;
-    while let Some(parent) = parents.get(current).and_then(|parent| parent.as_deref()) {
-        if !seen.insert(current.to_string()) {
-            return false;
-        }
-        if parent == root {
-            return true;
-        }
-        current = parent;
-    }
-    false
+    crate::walks_to_ancestor(id, root, |current| {
+        parents.get(current).and_then(|p| p.clone())
+    })
 }
 
 /// Human-readable Current Session metadata for `agsearch current`.

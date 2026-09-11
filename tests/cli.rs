@@ -5089,3 +5089,1791 @@ fn codex_failed_apply_patch_is_listed_and_flagged() {
         .stdout(predicates::str::contains("write apply_patch"))
         .stdout(predicates::str::contains("FAILED"));
 }
+
+// --- usage: per-call breakdown for one Claude Code Session (issue 30) ---
+
+/// Build one Claude `assistant` line carrying Usage, for usage-breakdown fixtures.
+fn claude_usage_assistant(
+    message_id: &str,
+    timestamp: &str,
+    text: &str,
+    input: u64,
+    cache_create: u64,
+    cache_read: u64,
+    output: u64,
+) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": message_id,
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "input_tokens": input,
+                "cache_creation_input_tokens": cache_create,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": output
+            }
+        }
+    })
+    .to_string()
+}
+
+fn claude_user_prompt(text: &str, timestamp: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "timestamp": timestamp,
+        "message": {"role": "user", "content": text}
+    })
+    .to_string()
+}
+
+#[test]
+fn usage_breakdown_lists_calls_in_turn_order_with_total() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "aaaaaaaa-1111-2222-3333-444444444444";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("first prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_0001",
+                "2026-08-20T04:00:10.000Z",
+                "first call preview alpha",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+            claude_user_prompt("second prompt", "2026-08-20T04:00:15.000Z"),
+            claude_usage_assistant(
+                "msg_0002",
+                "2026-08-20T04:00:20.000Z",
+                "second call preview beta",
+                5,
+                500,
+                40000,
+                12000,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        // Header plus both previews and the total line.
+        .stdout(predicates::str::contains("turn"))
+        .stdout(predicates::str::contains("first call preview alpha"))
+        .stdout(predicates::str::contains("second call preview beta"))
+        .stdout(predicates::str::contains("total"))
+        .stdout(predicates::str::contains("2 calls"))
+        // Thousands separators on the large counts.
+        .stdout(predicates::str::contains("30,000"))
+        .stdout(predicates::str::contains("40,000"))
+        .stdout(predicates::str::contains("12,000"))
+        // Totals: input 15, cache-write 2,500, cache-read 70,000,
+        // output 12,050, total 84,565.
+        .stdout(predicates::str::contains("2,500"))
+        .stdout(predicates::str::contains("70,000"))
+        .stdout(predicates::str::contains("84,565"))
+        // Default is turn order: the first call precedes the second.
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("first call preview alpha").unwrap()
+                < out.find("second call preview beta").unwrap()
+        }));
+}
+
+#[test]
+fn usage_breakdown_counts_shared_message_id_once() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "bbbbbbbb-1111-2222-3333-444444444444";
+    // One API call written as three Records sharing one message.id (thinking,
+    // text, tool_use) with identical Usage, plus a second distinct call.
+    let shared_id = "msg_shared_0001";
+    let thinking = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:10.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "thinking", "thinking": "planning the fix"}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    let text = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:11.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "text", "text": "shared call preview gamma"}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    let tool = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:12.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo test"}}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            thinking,
+            text,
+            tool,
+            claude_usage_assistant(
+                "msg_0002",
+                "2026-08-20T04:00:20.000Z",
+                "other call preview delta",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        // The shared call appears once (its first text block wins the preview).
+        .stdout(predicates::str::contains("shared call preview gamma"))
+        .stdout(predicates::str::contains("other call preview delta"))
+        .stdout(predicates::str::contains("2 calls"))
+        // Counted once: input 5+10=15, cache-write 500+2000=2,500,
+        // cache-read 40000+30000=70,000, output 12000+50=12,050.
+        // Triple-counting would give 25 / 3,500 / 150,000 / 36,050.
+        .stdout(predicates::str::contains("2,500"))
+        .stdout(predicates::str::contains("70,000"))
+        .stdout(predicates::str::contains("84,565"))
+        .stdout(predicates::function::function(|out: &str| {
+            out.matches("shared call preview gamma").count() == 1
+        }));
+}
+
+#[test]
+fn usage_breakdown_shows_blank_cells_for_calls_without_usage() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "cccccccc-1111-2222-3333-444444444444";
+    let no_usage = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:30.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": "msg_no_usage",
+            "content": [{"type": "text", "text": "no usage marker epsilon"}]
+        }
+    })
+    .to_string();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_0001",
+                "2026-08-20T04:00:10.000Z",
+                "usage marker zeta",
+                12345,
+                2000,
+                30000,
+                50,
+            ),
+            no_usage,
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("usage marker zeta"))
+        .stdout(predicates::str::contains("no usage marker epsilon"))
+        // The usage-bearing call uses thousands separators.
+        .stdout(predicates::str::contains("12,345"))
+        // Totals sum only the usage-bearing call.
+        .stdout(predicates::str::contains("2 calls"))
+        // The no-usage row shows its model and preview but no comma-formatted
+        // numbers: its line carries no ',' (timestamps, turns and model names
+        // never contain commas; only thousands separators do).
+        .stdout(predicates::function::function(|out: &str| {
+            out.lines()
+                .find(|line| line.contains("no usage marker epsilon"))
+                .is_some_and(|line| !line.contains(','))
+        }));
+}
+
+#[test]
+fn usage_breakdown_sort_total_orders_biggest_first() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "dddddddd-1111-2222-3333-444444444444";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_small",
+                "2026-08-20T04:00:10.000Z",
+                "small call preview",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+            claude_usage_assistant(
+                "msg_big",
+                "2026-08-20T04:00:20.000Z",
+                "big call preview",
+                5,
+                500,
+                40000,
+                12000,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    // Default: turn order (small before big).
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("small call preview").unwrap() < out.find("big call preview").unwrap()
+        }));
+
+    // --sort total: biggest first (big before small).
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .arg("--sort")
+        .arg("total")
+        .assert()
+        .success()
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("big call preview").unwrap() < out.find("small call preview").unwrap()
+        }));
+}
+
+#[test]
+fn usage_current_and_current_thread_resolve_through_the_central_resolver() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0200";
+    let worker_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0201";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        &[
+            claude_user_prompt("parent prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_parent",
+                "2026-08-20T04:00:10.000Z",
+                "parent usage marker",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+        ]
+        .join("\n"),
+    );
+    plant_claude_subagent(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        &[
+            claude_user_prompt("worker prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_worker",
+                "2026-08-20T04:00:10.000Z",
+                "worker usage marker",
+                7,
+                1000,
+                20000,
+                30,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    // `current` selects the top-level Session even when invoked from a worker.
+    // Since issue 33 the parent breakdown folds its workers: both markers
+    // appear, the worker row is marked in the `subagent` column, and the total
+    // sums the family (32,060 + 21,037 = 53,097, 2 calls).
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("parent usage marker"))
+        .stdout(predicates::str::contains("worker usage marker"))
+        .stdout(predicates::str::contains("subagent"))
+        .stdout(predicates::str::contains("53,097"))
+        .stdout(predicates::str::contains("2 calls"));
+
+    // `current-thread` selects the calling thread without --include-subagents.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("current-thread")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("worker usage marker"))
+        .stdout(predicates::str::contains("parent usage marker").not());
+}
+
+#[test]
+fn usage_without_a_selector_ranks_instead_of_erroring() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No sessions with usage."));
+}
+
+// --- usage: Codex token_count Records feed the breakdown (issue 31) ---
+
+/// Build one Codex `event_msg` `token_count` line. `last_*` is the per-call
+/// usage; `total_*` is the cumulative running total carried by that Record
+/// (for non-final Records, pass the same as `last_*`; for the final Record,
+/// pass the sums to avoid a mismatch warning, or differing values to trigger
+/// one). `total_tokens` is derived as `input + output` (cached and
+/// cache-write are subsets of input, matching real Codex files), so callers
+/// need not compute it.
+fn codex_token_count(
+    timestamp: &str,
+    last_input: u64,
+    last_cache_write: u64,
+    last_cached: u64,
+    last_output: u64,
+    total_input: u64,
+    total_cache_write: u64,
+    total_cached: u64,
+    total_output: u64,
+) -> String {
+    let last_total = last_input.saturating_add(last_output);
+    let total_total = total_input.saturating_add(total_output);
+    serde_json::json!({
+        "timestamp": timestamp,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": total_input,
+                    "cache_write_input_tokens": total_cache_write,
+                    "cached_input_tokens": total_cached,
+                    "output_tokens": total_output,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": total_total
+                },
+                "last_token_usage": {
+                    "input_tokens": last_input,
+                    "cache_write_input_tokens": last_cache_write,
+                    "cached_input_tokens": last_cached,
+                    "output_tokens": last_output,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": last_total
+                },
+                "model_context_window": null
+            },
+            "rate_limits": null
+        }
+    })
+    .to_string()
+}
+
+/// Plant a Codex Session whose `session_meta` carries `model` when `Some`,
+/// for usage-breakdown fixtures. Uses the same rollout layout as
+/// [`plant_codex_session`] but includes the model name the breakdown shows.
+fn plant_codex_usage_session(
+    codex_dir: &std::path::Path,
+    id: &str,
+    cwd: &std::path::Path,
+    model: Option<&str>,
+    records: &[&str],
+) -> std::path::PathBuf {
+    let mut payload = serde_json::json!({
+        "id": id,
+        "session_id": id,
+        "cwd": cwd.to_string_lossy(),
+        "thread_source": "user",
+        "source": "cli"
+    });
+    if let Some(model) = model {
+        payload["model"] = serde_json::Value::String(model.to_string());
+    }
+    let meta = serde_json::json!({
+        "timestamp": "2026-08-28T10:00:00.000Z",
+        "type": "session_meta",
+        "payload": payload
+    });
+    write_codex_rollout(codex_dir, id, meta, records)
+}
+
+fn codex_user_message(text: &str, timestamp: &str) -> String {
+    serde_json::json!({
+        "timestamp": timestamp,
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}]
+        }
+    })
+    .to_string()
+}
+
+fn codex_assistant_message(text: &str, timestamp: &str) -> String {
+    serde_json::json!({
+        "timestamp": timestamp,
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}]
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn usage_breakdown_codex_sums_token_counts_with_same_columns() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de0001-1111-2222-3333-444444444444";
+    // Two calls. Input column shows non-cached input for cross-Harness
+    // comparability (raw input minus cached minus cache-write), so:
+    // call 1: 12345-2000-500=9845, total 9845+500+2000+50=12395;
+    // call 2: 40000-30000-2000=8000, total 8000+2000+30000+12000=52000.
+    // Sums: input 17845, cache-write 2500, cache-read 32000, output 12050,
+    // total 64395. Final total_token_usage carries those sums (no warning).
+    // Messages are planted to prove they are ignored when token_counts exist.
+    let tc1 = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        12345,
+        500,
+        2000,
+        50,
+        12345,
+        500,
+        2000,
+        50,
+    );
+    let tc2 = codex_token_count(
+        "2026-08-28T10:02:00.000Z",
+        40000,
+        2000,
+        30000,
+        12000,
+        52345,
+        2500,
+        32000,
+        12050,
+    );
+    plant_codex_usage_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[
+            &codex_user_message("codex prompt", "2026-08-28T10:00:10.000Z"),
+            &codex_assistant_message("codex reply", "2026-08-28T10:00:20.000Z"),
+            &tc1,
+            &tc2,
+        ],
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        // Same columns as the Claude Code breakdown.
+        .stdout(predicates::str::contains("turn"))
+        .stdout(predicates::str::contains("timestamp"))
+        .stdout(predicates::str::contains("model"))
+        .stdout(predicates::str::contains("input"))
+        .stdout(predicates::str::contains("cache-write"))
+        .stdout(predicates::str::contains("cache-read"))
+        .stdout(predicates::str::contains("output"))
+        .stdout(predicates::str::contains("total"))
+        .stdout(predicates::str::contains("preview"))
+        // Model from the session meta, timestamps from the token_counts.
+        .stdout(predicates::str::contains("codex-fable-7"))
+        .stdout(predicates::str::contains("2026-08-28T10:01:00"))
+        .stdout(predicates::str::contains("2026-08-28T10:02:00"))
+        // Only token_counts become calls (Messages ignored): 2 calls, not 3+.
+        .stdout(predicates::str::contains("2 calls"))
+        // Thousands separators on the summed totals.
+        .stdout(predicates::str::contains("17,845"))
+        .stdout(predicates::str::contains("2,500"))
+        .stdout(predicates::str::contains("32,000"))
+        .stdout(predicates::str::contains("12,050"))
+        .stdout(predicates::str::contains("64,395"))
+        // Default is turn order (file order): first token_count first.
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("2026-08-28T10:01:00").unwrap() < out.find("2026-08-28T10:02:00").unwrap()
+        }));
+}
+
+#[test]
+fn usage_breakdown_codex_mismatch_warns_and_keeps_sum() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de0002-1111-2222-3333-444444444444";
+    let tc1 = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        12345,
+        500,
+        2000,
+        50,
+        12345,
+        500,
+        2000,
+        50,
+    );
+    // Final total disagrees with the sums (input 99999 vs 52345): warn and
+    // keep the sums.
+    let tc2 = codex_token_count(
+        "2026-08-28T10:02:00.000Z",
+        40000,
+        2000,
+        30000,
+        12000,
+        99999,
+        2500,
+        32000,
+        12050,
+    );
+    plant_codex_usage_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&tc1, &tc2],
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning"))
+        .stderr(predicates::str::contains("total_token_usage"))
+        // Sums kept, not the mismatched final (52345 -> 17845 displayed).
+        .stdout(predicates::str::contains("64,395"))
+        .stdout(predicates::str::contains("17,845"))
+        .stdout(predicates::str::contains("2 calls"));
+}
+
+#[test]
+fn usage_breakdown_codex_empty_with_no_token_counts() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de0003-1111-2222-3333-444444444444";
+    // Messages only: no token_count Records -> empty table, zero total (unlike
+    // Claude, whose Messages become blank-usage rows).
+    plant_codex_usage_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[
+            &codex_user_message("prompt without usage", "2026-08-28T10:00:10.000Z"),
+            &codex_assistant_message("reply without usage", "2026-08-28T10:00:20.000Z"),
+        ],
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("turn"))
+        .stdout(predicates::str::contains("total"))
+        .stdout(predicates::str::contains("0 calls"));
+}
+
+// --- usage: rank Sessions by Usage with scope, sort and limit (issue 32) ---
+
+/// Plant a Claude Session with one usage-bearing call and an ai-title, for
+/// ranking fixtures. Returns the session id prefix assertion helper data via
+/// the planted file; the caller keeps the id.
+fn plant_ranking_claude(
+    store: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    title: &str,
+    message_id: &str,
+    timestamp: &str,
+    input: u64,
+    cache_create: u64,
+    cache_read: u64,
+    output: u64,
+) {
+    let title_line = serde_json::json!({"type":"ai-title","aiTitle":title}).to_string();
+    plant_claude_session(
+        store,
+        cwd,
+        session_id,
+        &[
+            title_line,
+            claude_user_prompt("prompt", timestamp),
+            claude_usage_assistant(
+                message_id,
+                timestamp,
+                "preview",
+                input,
+                cache_create,
+                cache_read,
+                output,
+            ),
+        ]
+        .join("\n"),
+    );
+}
+
+#[test]
+fn usage_ranking_orders_both_harnesses_by_total_descending() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    // Claude: 10 + 2000 + 30000 + 50 = 32060.
+    let claude_id = "aaaaaaaa-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        claude.path(),
+        workdir.path(),
+        claude_id,
+        "Claude chat",
+        "msg_claude_rank",
+        "2026-08-20T04:00:10.000Z",
+        10,
+        2000,
+        30000,
+        50,
+    );
+    // Codex: input 50000 (no cache), output 12000 -> total 62000, bigger.
+    let codex_id = "c0de0101-1111-2222-3333-444444444444";
+    let tc = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        50000,
+        0,
+        0,
+        12000,
+        50000,
+        0,
+        0,
+        12000,
+    );
+    plant_codex_usage_session(codex.path(), codex_id, workdir.path(), None, &[&tc]);
+    plant_codex_title(codex.path(), codex_id, "Codex chat");
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .assert()
+        .success()
+        // Header columns.
+        .stdout(predicates::str::contains("session"))
+        .stdout(predicates::str::contains("project"))
+        .stdout(predicates::str::contains("harness"))
+        .stdout(predicates::str::contains("title"))
+        .stdout(predicates::str::contains("subagents"))
+        .stdout(predicates::str::contains("calls"))
+        .stdout(predicates::str::contains("input"))
+        .stdout(predicates::str::contains("cache-write"))
+        .stdout(predicates::str::contains("cache-read"))
+        .stdout(predicates::str::contains("output"))
+        .stdout(predicates::str::contains("total"))
+        // Both Harnesses listed with titles and harness names.
+        .stdout(predicates::str::contains("claude"))
+        .stdout(predicates::str::contains("codex"))
+        .stdout(predicates::str::contains("Claude chat"))
+        .stdout(predicates::str::contains("Codex chat"))
+        .stdout(predicates::str::contains(&claude_id[..8]))
+        .stdout(predicates::str::contains(&codex_id[..8]))
+        // Thousands separators.
+        .stdout(predicates::str::contains("30,000"))
+        .stdout(predicates::str::contains("50,000"))
+        .stdout(predicates::str::contains("62,000"))
+        // Biggest total first: Codex (62000) before Claude (32060).
+        .stdout(predicates::function::function(|out: &str| {
+            out.find(&codex_id[..8]).unwrap() < out.find(&claude_id[..8]).unwrap()
+        }));
+}
+
+#[test]
+fn usage_ranking_sort_output_input_calls_reorder() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // big: 1 call, input 50000, output 1000 -> total 51000.
+    let big_id = "bbbbbbbb-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        big_id,
+        "big total",
+        "msg_big",
+        "2026-08-20T04:00:10.000Z",
+        50000,
+        0,
+        0,
+        1000,
+    );
+    // out: 1 call, input 100, output 40000 -> total 40100.
+    let out_id = "cccccccc-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        out_id,
+        "high output",
+        "msg_out",
+        "2026-08-20T04:00:11.000Z",
+        100,
+        0,
+        0,
+        40000,
+    );
+    // many: 5 calls each input 1000 output 100 -> total 5500, calls 5.
+    let many_id = "dddddddd-1111-2222-3333-444444444444";
+    let mut lines = vec![
+        serde_json::json!({"type":"ai-title","aiTitle":"many calls"}).to_string(),
+        claude_user_prompt("prompt", "2026-08-20T04:00:12.000Z"),
+    ];
+    for i in 0..5 {
+        lines.push(claude_usage_assistant(
+            &format!("msg_many_{i}"),
+            "2026-08-20T04:00:13.000Z",
+            "preview",
+            1000,
+            0,
+            0,
+            100,
+        ));
+    }
+    plant_claude_session(store.path(), workdir.path(), many_id, &lines.join("\n"));
+
+    let ranking = |args: &[&str]| {
+        let mut cmd = agsearch_command();
+        cmd.current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path())
+            .arg("usage");
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.assert().success().get_output().stdout.clone()
+    };
+
+    // Default total: big (51000) > out (40100) > many (5500).
+    let out = String::from_utf8(ranking(&[])).unwrap();
+    assert!(
+        out.find(&big_id[..8]).unwrap() < out.find(&out_id[..8]).unwrap()
+            && out.find(&out_id[..8]).unwrap() < out.find(&many_id[..8]).unwrap(),
+        "default total order wrong:\n{out}"
+    );
+    // --sort output: out (40000) > big (1000) > many (500).
+    let out = String::from_utf8(ranking(&["--sort", "output"])).unwrap();
+    assert!(
+        out.find(&out_id[..8]).unwrap() < out.find(&big_id[..8]).unwrap()
+            && out.find(&big_id[..8]).unwrap() < out.find(&many_id[..8]).unwrap(),
+        "--sort output order wrong:\n{out}"
+    );
+    // --sort input: big (50000) > many (5000) > out (100).
+    let out = String::from_utf8(ranking(&["--sort", "input"])).unwrap();
+    assert!(
+        out.find(&big_id[..8]).unwrap() < out.find(&many_id[..8]).unwrap()
+            && out.find(&many_id[..8]).unwrap() < out.find(&out_id[..8]).unwrap(),
+        "--sort input order wrong:\n{out}"
+    );
+    // --sort calls: many (5) > big (1, total 51000) > out (1, total 40100).
+    let out = String::from_utf8(ranking(&["--sort", "calls"])).unwrap();
+    assert!(
+        out.find(&many_id[..8]).unwrap() < out.find(&big_id[..8]).unwrap()
+            && out.find(&big_id[..8]).unwrap() < out.find(&out_id[..8]).unwrap(),
+        "--sort calls order wrong:\n{out}"
+    );
+}
+
+#[test]
+fn usage_ranking_limit_truncates() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    for (id, total_out) in [
+        ("eeeeeee1-1111-2222-3333-444444444444", 50000u64),
+        ("eeeeeee2-1111-2222-3333-444444444444", 40000u64),
+        ("eeeeeee3-1111-2222-3333-444444444444", 30000u64),
+    ] {
+        plant_ranking_claude(
+            store.path(),
+            workdir.path(),
+            id,
+            "chat",
+            &format!("msg_{}", &id[..8]),
+            "2026-08-20T04:00:10.000Z",
+            100,
+            0,
+            0,
+            total_out,
+        );
+    }
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--limit")
+        .arg("2")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("eeeeeee1"))
+        .stdout(predicates::str::contains("eeeeeee2"))
+        .stdout(predicates::str::contains("eeeeeee3").not());
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--limit")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("eeeeeee1"))
+        .stdout(predicates::str::contains("eeeeeee2").not());
+}
+
+#[test]
+fn usage_ranking_all_and_project_scope_like_sessions() {
+    let workdir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let current_id = "f0f0f0f0-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        current_id,
+        "current project chat",
+        "msg_current",
+        "2026-08-20T04:00:10.000Z",
+        1000,
+        0,
+        0,
+        100,
+    );
+    let other_id = "e1e1e1e1-aaaa-bbbb-cccc-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        other.path(),
+        other_id,
+        "other project chat",
+        "msg_other",
+        "2026-08-20T04:00:10.000Z",
+        2000,
+        0,
+        0,
+        200,
+    );
+
+    // Default: only the current directory's Project.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]))
+        .stdout(predicates::str::contains(&other_id[..8]).not());
+
+    // --all: every Project.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]))
+        .stdout(predicates::str::contains(&other_id[..8]));
+
+    // --project: substring of the other cwd's encoded key. Tempdir names are
+    // random (`-tmpXXXXXX` after encoding), so use the trailing random suffix
+    // (no leading dash, distinctive from the current Project).
+    let other_name = other
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .replace(['.', '_'], "-");
+    let substr = other_name[other_name.len().saturating_sub(6)..].to_string();
+    assert!(substr.len() >= 4 && !substr.starts_with('-'));
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--project")
+        .arg(&substr)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&other_id[..8]));
+}
+
+#[test]
+fn usage_ranking_harness_narrows_like_sessions() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let claude_id = "11112222-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        claude.path(),
+        workdir.path(),
+        claude_id,
+        "claude chat",
+        "msg_harness_claude",
+        "2026-08-20T04:00:10.000Z",
+        5000,
+        0,
+        0,
+        500,
+    );
+    let codex_id = "c0de0202-1111-2222-3333-444444444444";
+    let tc = codex_token_count("2026-08-28T10:01:00.000Z", 6000, 0, 0, 600, 6000, 0, 0, 600);
+    plant_codex_usage_session(codex.path(), codex_id, workdir.path(), None, &[&tc]);
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("--harness")
+        .arg("claude")
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&claude_id[..8]))
+        .stdout(predicates::str::contains(&codex_id[..8]).not());
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("--harness")
+        .arg("codex")
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&codex_id[..8]))
+        .stdout(predicates::str::contains(&claude_id[..8]).not());
+}
+
+#[test]
+fn usage_ranking_since_filters_like_sessions() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let old_id = "22223333-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        old_id,
+        "old chat",
+        "msg_old",
+        "2026-01-01T00:00:00.000Z",
+        9000,
+        0,
+        0,
+        900,
+    );
+    let new_id = "33334444-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        new_id,
+        "new chat",
+        "msg_new",
+        "2026-08-20T04:00:10.000Z",
+        1000,
+        0,
+        0,
+        100,
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--since")
+        .arg("2026-06-01")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&new_id[..8]))
+        .stdout(predicates::str::contains(&old_id[..8]).not());
+}
+
+#[test]
+fn usage_ranking_excludes_current_family_by_default() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let current_id = "44445555-aaaa-bbbb-cccc-ddddeeee0100";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        current_id,
+        "current chat",
+        "msg_current_rank",
+        "2026-08-20T04:00:10.000Z",
+        90000,
+        0,
+        0,
+        9000,
+    );
+    let earlier_id = "55556666-aaaa-bbbb-cccc-ddddeeee0101";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        earlier_id,
+        "earlier chat",
+        "msg_earlier_rank",
+        "2026-08-19T04:00:10.000Z",
+        1000,
+        0,
+        0,
+        100,
+    );
+
+    // Excluded by default even though it is the biggest.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", current_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&earlier_id[..8]))
+        .stdout(predicates::str::contains(&current_id[..8]).not());
+
+    // --include-current puts it back, biggest first.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", current_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("--include-current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&earlier_id[..8]))
+        .stdout(predicates::str::contains(&current_id[..8]))
+        .stdout(predicates::function::function(|out: &str| {
+            out.find(current_id.get(..8).unwrap()).unwrap()
+                < out.find(earlier_id.get(..8).unwrap()).unwrap()
+        }));
+}
+
+#[test]
+fn usage_ranking_omits_sessions_without_usage_and_reports_skipped() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let used_id = "66667777-1111-2222-3333-444444444444";
+    plant_ranking_claude(
+        store.path(),
+        workdir.path(),
+        used_id,
+        "used chat",
+        "msg_used",
+        "2026-08-20T04:00:10.000Z",
+        7000,
+        0,
+        0,
+        700,
+    );
+    // No assistant Records at all: zero calls carrying Usage.
+    let unused_id = "77778888-1111-2222-3333-444444444444";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        unused_id,
+        &[
+            serde_json::json!({"type":"ai-title","aiTitle":"unused chat"}).to_string(),
+            claude_user_prompt("prompt without usage", "2026-08-20T04:00:10.000Z"),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&used_id[..8]))
+        .stdout(predicates::str::contains(&unused_id[..8]).not())
+        .stdout(predicates::str::contains("skipped"))
+        .stdout(predicates::str::contains("1 session"))
+        .stdout(predicates::str::contains("no usage"));
+}
+
+// --- usage: fold subagent threads into the parent Session (issue 33) ---
+
+/// Plant a Claude parent Session plus one worker thread with distinct previews
+/// and Usage, for fold fixtures. Returns (parent_id, worker_id).
+fn plant_claude_parent_with_worker(
+    store: &std::path::Path,
+    cwd: &std::path::Path,
+    parent_id: &str,
+    worker_id: &str,
+    parent_preview: &str,
+    worker_preview: &str,
+) {
+    plant_claude_session(
+        store,
+        cwd,
+        parent_id,
+        &[
+            serde_json::json!({"type":"ai-title","aiTitle":"parent chat"}).to_string(),
+            claude_user_prompt("parent prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_parent_fold",
+                "2026-08-20T04:00:10.000Z",
+                parent_preview,
+                10,
+                2000,
+                30000,
+                50,
+            ),
+        ]
+        .join("\n"),
+    );
+    plant_claude_subagent(
+        store,
+        cwd,
+        parent_id,
+        worker_id,
+        &[
+            claude_user_prompt("worker prompt", "2026-08-20T04:00:05.000Z"),
+            claude_usage_assistant(
+                "msg_worker_fold",
+                "2026-08-20T04:00:15.000Z",
+                worker_preview,
+                7,
+                1000,
+                20000,
+                30,
+            ),
+        ]
+        .join("\n"),
+    );
+}
+
+#[test]
+fn usage_ranking_folds_claude_worker_into_parent() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Distinct prefixes so parent and worker rows are distinguishable.
+    let parent_id = "a1a1a1a1-1111-2222-3333-444444444444";
+    let worker_id = "b2b2b2b2-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "claude parent fold marker",
+        "claude worker fold marker",
+    );
+
+    // Parent 10+2000+30000+50=32,060; worker 7+1000+20000+30=21,037;
+    // folded 17+3000+50000+80=53,097, 2 calls, 1 subagent.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&parent_id[..8]))
+        .stdout(predicates::str::contains(&worker_id[..8]).not())
+        .stdout(predicates::str::contains("53,097"))
+        .stdout(predicates::str::contains("subagents"))
+        // The folded row carries subagents=1 and calls=2: find the parent's
+        // line and check it shows both alongside the folded total.
+        .stdout(predicates::function::function(|out: &str| {
+            out.lines().any(|line| {
+                line.contains(&parent_id[..8]) && line.contains("53,097") && line.contains("2")
+            })
+        }));
+}
+
+#[test]
+fn usage_ranking_include_subagents_lists_claude_workers_separately() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "a3a3a3a3-1111-2222-3333-444444444444";
+    let worker_id = "b4b4b4b4-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "claude parent separate marker",
+        "claude worker separate marker",
+    );
+
+    // With --include-subagents there is no folding: both rows appear with
+    // their own totals (32,060 and 21,037), never the folded 53,097.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--include-subagents")
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&parent_id[..8]))
+        .stdout(predicates::str::contains(&worker_id[..8]))
+        .stdout(predicates::str::contains("32,060"))
+        .stdout(predicates::str::contains("21,037"))
+        .stdout(predicates::str::contains("53,097").not());
+}
+
+#[test]
+fn usage_breakdown_claude_parent_includes_marked_worker_and_matches_ranking() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "a5a5a5a5-1111-2222-3333-444444444444";
+    let worker_id = "b6b6b6b6-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "claude parent breakdown marker",
+        "claude worker breakdown marker",
+    );
+
+    // Breakdown of the parent includes both calls, the worker row marked with
+    // its short id in the subagent column, and the family total.
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&parent_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude parent breakdown marker"))
+        .stdout(predicates::str::contains("claude worker breakdown marker"))
+        .stdout(predicates::str::contains("subagent"))
+        .stdout(predicates::str::contains(&worker_id[..8]))
+        .stdout(predicates::str::contains("53,097"))
+        .stdout(predicates::str::contains("2 calls"))
+        // The worker's line carries its subagent id; the parent's line does not.
+        .stdout(predicates::function::function(|out: &str| {
+            let worker_line = out
+                .lines()
+                .find(|line| line.contains("claude worker breakdown marker"));
+            let parent_line = out
+                .lines()
+                .find(|line| line.contains("claude parent breakdown marker"));
+            match (worker_line, parent_line) {
+                (Some(w), Some(p)) => w.contains(&worker_id[..8]) && !p.contains(&worker_id[..8]),
+                _ => false,
+            }
+        }));
+
+    // The breakdown total matches the ranking row's folded total.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("53,097"));
+}
+
+#[test]
+fn usage_breakdown_resolves_a_claude_worker_id_directly() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "a7a7a7a7-1111-2222-3333-444444444444";
+    let worker_id = "b8b8b8b8-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "claude parent handoff marker",
+        "claude worker handoff marker",
+    );
+
+    // A worker row from `usage --include-subagents` hands off to its own
+    // breakdown, even though search/show keep hiding Claude workers.
+    // Worker total: 7+1000+20000+30=21,037, 1 call.
+    for extra in [vec!["--include-subagents"], vec![]] {
+        let mut cmd = agsearch_command();
+        cmd.current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path());
+        for flag in extra {
+            cmd.arg(flag);
+        }
+        cmd.arg("usage").arg(&worker_id[..8]);
+        cmd.assert()
+            .success()
+            .stdout(predicates::str::contains("claude worker handoff marker"))
+            .stdout(predicates::str::contains("21,037"))
+            .stdout(predicates::str::contains("1 call"));
+    }
+}
+
+#[test]
+fn usage_breakdown_codex_malformed_final_disables_the_check() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de0009-1111-2222-3333-444444444444";
+    // One valid call, but the final total is not an object: no usable counts,
+    // so the mismatch check disables itself instead of warning on zeros.
+    let malformed = serde_json::json!({
+        "timestamp": "2026-08-28T10:01:00.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 12345,
+                    "cache_write_input_tokens": 500,
+                    "cached_input_tokens": 2000,
+                    "output_tokens": 50,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 12395
+                },
+                "total_token_usage": "not-an-object",
+                "model_context_window": null
+            },
+            "rate_limits": null
+        }
+    })
+    .to_string();
+    plant_codex_usage_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&malformed],
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning").not())
+        .stdout(predicates::str::contains("12,395"))
+        .stdout(predicates::str::contains("1 call"));
+}
+
+#[test]
+fn usage_ranking_folds_codex_worker_into_parent() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let parent_id = "c0de1111-0000-0000-0000-000000000000";
+    let worker_id = "c0de2222-0000-0000-0000-000000000000";
+    // Parent: raw 10000-2000-500=7500 input, total 7500+500+2000+100=10,100.
+    let parent_tc = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        10000,
+        500,
+        2000,
+        100,
+        10000,
+        500,
+        2000,
+        100,
+    );
+    // Worker: raw 5000-1000-200=3800 input, total 3800+200+1000+50=5,050.
+    let worker_tc = codex_token_count(
+        "2026-08-28T10:02:00.000Z",
+        5000,
+        200,
+        1000,
+        50,
+        5000,
+        200,
+        1000,
+        50,
+    );
+    plant_codex_usage_session(
+        codex.path(),
+        parent_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&parent_tc],
+    );
+    plant_codex_title(codex.path(), parent_id, "Codex parent chat");
+    // Worker rollout with parent link.
+    {
+        let meta = serde_json::json!({
+            "timestamp": "2026-08-28T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": worker_id,
+                "cwd": workdir.path().to_string_lossy(),
+                "thread_source": "subagent",
+                "parent_thread_id": parent_id,
+                "model": "codex-fable-7",
+                "agent_nickname": "fixture-worker",
+                "source": {"subagent": {"thread_spawn": {"agent_nickname": "nested-worker", "parent_thread_id": parent_id}}}
+            }
+        });
+        write_codex_rollout(codex.path(), worker_id, meta, &[&worker_tc]);
+    }
+    // Folded: input 11,300, cache-write 700, cache-read 3,000, output 150,
+    // total 15,150, 2 calls, 1 subagent.
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&parent_id[..8]))
+        .stdout(predicates::str::contains(&worker_id[..8]).not())
+        .stdout(predicates::str::contains("15,150"))
+        .stdout(predicates::str::contains("11,300"));
+}
+
+#[test]
+fn usage_ranking_include_subagents_lists_codex_workers_separately() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let parent_id = "c0de3333-0000-0000-0000-000000000000";
+    let worker_id = "c0de4444-0000-0000-0000-000000000000";
+    let parent_tc = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        10000,
+        500,
+        2000,
+        100,
+        10000,
+        500,
+        2000,
+        100,
+    );
+    let worker_tc = codex_token_count(
+        "2026-08-28T10:02:00.000Z",
+        5000,
+        200,
+        1000,
+        50,
+        5000,
+        200,
+        1000,
+        50,
+    );
+    plant_codex_usage_session(
+        codex.path(),
+        parent_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&parent_tc],
+    );
+    {
+        let meta = serde_json::json!({
+            "timestamp": "2026-08-28T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": worker_id,
+                "cwd": workdir.path().to_string_lossy(),
+                "thread_source": "subagent",
+                "parent_thread_id": parent_id,
+                "model": "codex-fable-7",
+                "agent_nickname": "fixture-worker",
+                "source": {"subagent": {"thread_spawn": {"agent_nickname": "nested-worker", "parent_thread_id": parent_id}}}
+            }
+        });
+        write_codex_rollout(codex.path(), worker_id, meta, &[&worker_tc]);
+    }
+
+    // No folding: both rows with own totals (10,100 and 5,050), never 15,150.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("--include-subagents")
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&parent_id[..8]))
+        .stdout(predicates::str::contains(&worker_id[..8]))
+        .stdout(predicates::str::contains("10,100"))
+        .stdout(predicates::str::contains("5,050"))
+        .stdout(predicates::str::contains("15,150").not());
+}
+
+#[test]
+fn usage_breakdown_codex_parent_includes_marked_worker_and_matches_ranking() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let parent_id = "c0de5555-0000-0000-0000-000000000000";
+    let worker_id = "c0de6666-0000-0000-0000-000000000000";
+    let parent_tc = codex_token_count(
+        "2026-08-28T10:01:00.000Z",
+        10000,
+        500,
+        2000,
+        100,
+        10000,
+        500,
+        2000,
+        100,
+    );
+    let worker_tc = codex_token_count(
+        "2026-08-28T10:02:00.000Z",
+        5000,
+        200,
+        1000,
+        50,
+        5000,
+        200,
+        1000,
+        50,
+    );
+    plant_codex_usage_session(
+        codex.path(),
+        parent_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&parent_tc],
+    );
+    {
+        let meta = serde_json::json!({
+            "timestamp": "2026-08-28T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": worker_id,
+                "cwd": workdir.path().to_string_lossy(),
+                "thread_source": "subagent",
+                "parent_thread_id": parent_id,
+                "model": "codex-fable-7",
+                "agent_nickname": "fixture-worker",
+                "source": {"subagent": {"thread_spawn": {"agent_nickname": "nested-worker", "parent_thread_id": parent_id}}}
+            }
+        });
+        write_codex_rollout(codex.path(), worker_id, meta, &[&worker_tc]);
+    }
+
+    // Breakdown shows both token_counts (2 calls), the worker row marked with
+    // its short id in the subagent column (preview is empty for Codex), and
+    // the family total 15,150.
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&parent_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("subagent"))
+        .stdout(predicates::str::contains(&worker_id[..8]))
+        .stdout(predicates::str::contains("15,150"))
+        .stdout(predicates::str::contains("11,300"))
+        .stdout(predicates::str::contains("2 calls"));
+
+    // Ranking row matches the breakdown total.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("15,150"));
+}
+
+#[test]
+fn usage_ranking_folds_transitive_claude_grandchild_into_root() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Three-level family: parent -> worker -> grandchild. Every descendant's
+    // Usage folds into the root (spec: "every descendant thread").
+    let parent_id = "c1c1c1c1-1111-2222-3333-444444444444";
+    let worker_id = "d2d2d2d2-1111-2222-3333-444444444444";
+    let grandchild_id = "e3e3e3e3-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "transitive parent marker",
+        "transitive worker marker",
+    );
+    // Grandchild nested under the worker: <parent>/subagents/<worker>/subagents/.
+    // File and dir share the worker stem (<worker>.jsonl vs <worker>/) so both
+    // coexist; `claude_parent_id` reads the grandparent dir name as the parent.
+    let encoded = agsearch::encode_project_dir(&workdir.path().to_string_lossy());
+    let grandchild_dir = store
+        .path()
+        .join("projects")
+        .join(encoded)
+        .join(parent_id)
+        .join("subagents")
+        .join(worker_id)
+        .join("subagents");
+    std::fs::create_dir_all(&grandchild_dir).unwrap();
+    std::fs::write(
+        grandchild_dir.join(format!("{grandchild_id}.jsonl")),
+        [
+            claude_user_prompt("grandchild prompt", "2026-08-20T04:00:07.000Z"),
+            claude_usage_assistant(
+                "msg_grandchild_fold",
+                "2026-08-20T04:00:18.000Z",
+                "transitive grandchild marker",
+                3,
+                500,
+                10000,
+                20,
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    // Parent 32,060 + worker 21,037 + grandchild 10,523 = 63,620, 3 calls,
+    // 2 subagents. Only the root lists; workers never appear as own rows.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&parent_id[..8]))
+        .stdout(predicates::str::contains(&worker_id[..8]).not())
+        .stdout(predicates::str::contains(&grandchild_id[..8]).not())
+        .stdout(predicates::str::contains("63,620"))
+        .stdout(predicates::function::function(|out: &str| {
+            out.lines()
+                .any(|line| line.contains(&parent_id[..8]) && line.contains("63,620"))
+        }));
+
+    // Breakdown of the root includes all three, both workers marked, total matches.
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&parent_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("transitive parent marker"))
+        .stdout(predicates::str::contains("transitive worker marker"))
+        .stdout(predicates::str::contains("transitive grandchild marker"))
+        .stdout(predicates::str::contains(&worker_id[..8]))
+        .stdout(predicates::str::contains(&grandchild_id[..8]))
+        .stdout(predicates::str::contains("63,620"))
+        .stdout(predicates::str::contains("3 calls"));
+}

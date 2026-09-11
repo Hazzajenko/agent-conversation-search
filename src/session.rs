@@ -55,6 +55,11 @@ pub(crate) struct SessionMeta {
     pub branch: Option<String>,
     /// The real working directory (`cwd`), first one seen.
     pub cwd: Option<String>,
+    /// The final cumulative totals, for the usage-breakdown mismatch
+    /// check (issue 31). Normalized like per-call Usage (non-cached input),
+    /// model and call id unset. `None` when the Session has no `token_count`
+    /// Records or the final one carries no totals.
+    pub final_total: Option<Usage>,
 }
 
 /// One Block of a user Message's `content` array. User array content is
@@ -86,9 +91,10 @@ pub(crate) enum AssistantBlock {
     },
 }
 
-/// What a [`Record`] is. Only Message and Title Records are kept; noise Records
-/// (`queue-operation`, `mode`, `attachment`, unparseable lines) are skipped —
-/// but the turn counter still ticks past every `user` / `assistant` line.
+/// What a [`Record`] is. Only Message, Title, and Codex usage Records are
+/// kept; noise Records (`queue-operation`, `mode`, `attachment`, unparseable
+/// lines) are skipped — but the turn counter still ticks past every `user` /
+/// `assistant` line.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RecordKind {
     /// A user Message the person typed (string content).
@@ -99,6 +105,40 @@ pub(crate) enum RecordKind {
     Assistant(Vec<AssistantBlock>),
     /// An `ai-title` Record (session metadata, not a turn).
     Title(String),
+    /// A `token_count` event: one model call's token counts, no text.
+    /// Carries [`Usage`] on the Record; ignored by search/show/Transcript
+    /// (like Title), used only by the usage breakdown. Turn is always `None`
+    /// (it never consumes a Transcript turn); the breakdown numbers Codex
+    /// calls by file order instead.
+    TokenCount,
+}
+
+/// Token Usage for one model call (see CONTEXT.md Usage). Carried on each
+/// assistant [`Record`] (Claude Code) or [`RecordKind::TokenCount`]
+/// Record (Codex), so every projection sees the same numbers. Claude Code
+/// attaches it to each assistant Message (`message.usage` plus `message.model`
+/// and `message.id`); Codex `token_count` Records carry `last_token_usage`
+/// with the model from the session meta. Token counts are `None` when the
+/// Harness recorded no Usage for the call — the breakdown then shows blank
+/// numeric cells but still lists the call with its model and preview. Tokens
+/// only, no money.
+///
+/// For Codex, `input` is the *non-cached* input (raw `input_tokens` minus
+/// `cached_input_tokens` minus `cache_write_input_tokens`) so Codex and Claude
+/// totals are comparable for cross-Harness ranking: both sum to
+/// input + cache-write + cache-read + output, matching Codex `total_tokens`
+/// (`input_tokens + output_tokens`, cached subsets). `cache_write` is
+/// `Some(0)` when the file predates `cache_write_input_tokens`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Usage {
+    pub input: Option<u64>,
+    pub cache_create: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub output: Option<u64>,
+    pub model: Option<String>,
+    /// The Harness's call id (`message.id` for Claude Code). Several Records
+    /// sharing one id are one call and its Usage is counted once.
+    pub call_id: Option<String>,
 }
 
 /// One parsed Record, tagged with its turn number (Message order, the ADR 0002
@@ -106,6 +146,13 @@ pub(crate) enum RecordKind {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Record {
     pub turn: Option<usize>,
+    /// Raw ISO 8601 timestamp from the envelope, if present. Powers the usage
+    /// breakdown's per-call timestamp column; recency filtering keeps using
+    /// [`SessionMeta::timestamp`] (the max).
+    pub timestamp: Option<String>,
+    /// Token Usage for this call, if the Harness recorded it. `None` renders
+    /// blank numeric cells in the usage breakdown but the call still appears.
+    pub usage: Option<Usage>,
     pub kind: RecordKind,
 }
 
@@ -120,46 +167,94 @@ pub(crate) struct Session {
 /// Assign the shared Message-order coordinate while a Harness parser builds a
 /// Session. `message` advances it; adapter-normalized Blocks use `attached` to
 /// buffer until their following Message and receive that coordinate; metadata
-/// has no coordinate.
+/// has no coordinate. Timestamp and Usage travel with the kind so the usage
+/// breakdown sees the same per-call data every projection shares.
 #[derive(Default)]
 pub(crate) struct RecordBuilder {
     turn: usize,
     records: Vec<Record>,
-    attached: Vec<RecordKind>,
+    attached: Vec<PendingRecord>,
+}
+
+/// One not-yet-placed Record: its kind plus the per-call timestamp and Usage
+/// that travel with it. Groups the `(kind, timestamp, usage)` triple so the
+/// builder threads one value instead of three.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingRecord {
+    pub kind: RecordKind,
+    pub timestamp: Option<String>,
+    pub usage: Option<Usage>,
 }
 
 impl RecordBuilder {
-    pub(crate) fn message(&mut self, kind: Option<RecordKind>) {
+    pub(crate) fn message(
+        &mut self,
+        kind: Option<RecordKind>,
+        timestamp: Option<String>,
+        usage: Option<Usage>,
+    ) {
         self.turn += 1;
-        for kind in self.attached.drain(..) {
+        for pending in self.attached.drain(..) {
             self.records.push(Record {
                 turn: Some(self.turn),
-                kind,
+                timestamp: pending.timestamp,
+                usage: pending.usage,
+                kind: pending.kind,
             });
         }
-        self.push(kind, Some(self.turn));
+        self.push(kind, Some(self.turn), timestamp, usage);
     }
 
-    pub(crate) fn attached(&mut self, kind: Option<RecordKind>) {
+    pub(crate) fn attached(
+        &mut self,
+        kind: Option<RecordKind>,
+        timestamp: Option<String>,
+        usage: Option<Usage>,
+    ) {
         if let Some(kind) = kind {
-            self.attached.push(kind);
+            self.attached.push(PendingRecord {
+                kind,
+                timestamp,
+                usage,
+            });
         }
     }
 
-    pub(crate) fn metadata(&mut self, kind: Option<RecordKind>) {
-        self.push(kind, None);
+    pub(crate) fn metadata(
+        &mut self,
+        kind: Option<RecordKind>,
+        timestamp: Option<String>,
+        usage: Option<Usage>,
+    ) {
+        self.push(kind, None, timestamp, usage);
     }
 
-    fn push(&mut self, kind: Option<RecordKind>, turn: Option<usize>) {
+    fn push(
+        &mut self,
+        kind: Option<RecordKind>,
+        turn: Option<usize>,
+        timestamp: Option<String>,
+        usage: Option<Usage>,
+    ) {
         if let Some(kind) = kind {
-            self.records.push(Record { turn, kind });
+            self.records.push(Record {
+                turn,
+                timestamp,
+                usage,
+                kind,
+            });
         }
     }
 
     pub(crate) fn finish(mut self) -> Vec<Record> {
         let turn = (self.turn > 0).then_some(self.turn);
-        for kind in self.attached.drain(..) {
-            self.records.push(Record { turn, kind });
+        for pending in self.attached.drain(..) {
+            self.records.push(Record {
+                turn,
+                timestamp: pending.timestamp,
+                usage: pending.usage,
+                kind: pending.kind,
+            });
         }
         self.records
     }
@@ -208,11 +303,23 @@ pub(crate) fn read(text: &str) -> Session {
             }),
             _ => None,
         };
+        // Per-Record timestamp and Usage travel with the Record for the usage
+        // breakdown. Only assistant Records carry Usage; every Record keeps its
+        // own timestamp when the envelope has one.
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let usage = if matches!(ty, Some("assistant")) {
+            claude_usage(&value)
+        } else {
+            None
+        };
 
         if matches!(ty, Some("user") | Some("assistant")) {
-            records.message(kind);
+            records.message(kind, timestamp, usage);
         } else {
-            records.metadata(kind);
+            records.metadata(kind, timestamp, usage);
         }
     }
 
@@ -312,6 +419,32 @@ fn assistant_kind(value: &Value) -> Option<RecordKind> {
     Some(RecordKind::Assistant(
         blocks.iter().filter_map(assistant_block).collect(),
     ))
+}
+
+/// Extract Claude Code Usage from an `assistant` envelope: the model from
+/// `message.model`, the call id from `message.id`, and the four token counts
+/// from `message.usage` when present. Always returns `Some` for an assistant
+/// envelope, so a call without `message.usage` still carries its model and
+/// call id for grouping and display, with `None` token counts rendering blank
+/// numeric cells. A missing or non-u64 token field becomes `None` rather than
+/// aborting the parse; a missing or non-object `usage` means all four are `None`.
+fn claude_usage(value: &Value) -> Option<Usage> {
+    let usage = value.pointer("/message/usage");
+    let as_u64 = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_u64);
+    Some(Usage {
+        input: as_u64("input_tokens"),
+        cache_create: as_u64("cache_creation_input_tokens"),
+        cache_read: as_u64("cache_read_input_tokens"),
+        output: as_u64("output_tokens"),
+        model: value
+            .pointer("/message/model")
+            .and_then(|m| m.as_str())
+            .map(str::to_string),
+        call_id: value
+            .pointer("/message/id")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
+    })
 }
 
 /// Parse one Block of an assistant Message's `content` array. Kept losslessly,
