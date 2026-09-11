@@ -401,10 +401,7 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
         // `token_count` is one call (issue 31). Newer `token_usage_record`
         // lines are a different shape and out of scope here.
         if value.get("type").and_then(Value::as_str) == Some("event_msg")
-            && value
-                .pointer("/payload/type")
-                .and_then(Value::as_str)
-                == Some("token_count")
+            && value.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
         {
             let timestamp = value
                 .get("timestamp")
@@ -944,11 +941,7 @@ impl Stores {
     /// Session's breakdown always sees its workers, regardless of scope,
     /// `--since`, or Current Family exclusion (naming a Session is intent to
     /// include it, like `--session`). Returns empty when the root is absent.
-    pub(crate) fn subtree_handles(
-        &self,
-        harness: Harness,
-        root_id: &str,
-    ) -> Vec<SessionHandle> {
+    pub(crate) fn subtree_handles(&self, harness: Harness, root_id: &str) -> Vec<SessionHandle> {
         let all = self.sessions_including_subagents(harness);
         // Parent links within this Harness.
         let parents: std::collections::HashMap<String, Option<String>> = all
