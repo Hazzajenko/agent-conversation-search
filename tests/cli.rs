@@ -5679,8 +5679,7 @@ fn usage_breakdown_codex_sums_token_counts_with_same_columns() {
         .stdout(predicates::str::contains("64,395"))
         // Default is turn order (file order): first token_count first.
         .stdout(predicates::function::function(|out: &str| {
-            out.find("2026-08-28T10:01:00").unwrap()
-                < out.find("2026-08-28T10:02:00").unwrap()
+            out.find("2026-08-28T10:01:00").unwrap() < out.find("2026-08-28T10:02:00").unwrap()
         }));
 }
 
@@ -5797,7 +5796,15 @@ fn plant_ranking_claude(
         &[
             title_line,
             claude_user_prompt("prompt", timestamp),
-            claude_usage_assistant(message_id, timestamp, "preview", input, cache_create, cache_read, output),
+            claude_usage_assistant(
+                message_id,
+                timestamp,
+                "preview",
+                input,
+                cache_create,
+                cache_read,
+                output,
+            ),
         ]
         .join("\n"),
     );
@@ -6115,17 +6122,7 @@ fn usage_ranking_harness_narrows_like_sessions() {
         500,
     );
     let codex_id = "c0de0202-1111-2222-3333-444444444444";
-    let tc = codex_token_count(
-        "2026-08-28T10:01:00.000Z",
-        6000,
-        0,
-        0,
-        600,
-        6000,
-        0,
-        0,
-        600,
-    );
+    let tc = codex_token_count("2026-08-28T10:01:00.000Z", 6000, 0, 0, 600, 6000, 0, 0, 600);
     plant_codex_usage_session(codex.path(), codex_id, workdir.path(), None, &[&tc]);
 
     agsearch_command()
@@ -6391,9 +6388,7 @@ fn usage_ranking_folds_claude_worker_into_parent() {
         // line and check it shows both alongside the folded total.
         .stdout(predicates::function::function(|out: &str| {
             out.lines().any(|line| {
-                line.contains(&parent_id[..8])
-                    && line.contains("53,097")
-                    && line.contains("2")
+                line.contains(&parent_id[..8]) && line.contains("53,097") && line.contains("2")
             })
         }));
 }
@@ -6469,10 +6464,7 @@ fn usage_breakdown_claude_parent_includes_marked_worker_and_matches_ranking() {
                 .lines()
                 .find(|line| line.contains("claude parent breakdown marker"));
             match (worker_line, parent_line) {
-                (Some(w), Some(p)) => {
-                    w.contains(&worker_id[..8])
-                        && !p.contains(&worker_id[..8])
-                }
+                (Some(w), Some(p)) => w.contains(&worker_id[..8]) && !p.contains(&worker_id[..8]),
                 _ => false,
             }
         }));
@@ -6779,10 +6771,8 @@ fn usage_ranking_folds_transitive_claude_grandchild_into_root() {
         .stdout(predicates::str::contains(&grandchild_id[..8]).not())
         .stdout(predicates::str::contains("63,620"))
         .stdout(predicates::function::function(|out: &str| {
-            out.lines().any(|line| {
-                line.contains(&parent_id[..8])
-                    && line.contains("63,620")
-            })
+            out.lines()
+                .any(|line| line.contains(&parent_id[..8]) && line.contains("63,620"))
         }));
 
     // Breakdown of the root includes all three, both workers marked, total matches.

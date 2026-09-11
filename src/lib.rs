@@ -2196,9 +2196,7 @@ fn usage_calls_from_session(
 /// Build the Codex rows: one [`UsageCall`] per `token_count` Record in file
 /// order, numbered 1-based for the turn column, plus a mismatch warning when
 /// the final `total_token_usage` disagrees with the summed calls (sums kept).
-fn codex_usage_calls_from_session(
-    session: &session::Session,
-) -> (Vec<UsageCall>, Option<String>) {
+fn codex_usage_calls_from_session(session: &session::Session) -> (Vec<UsageCall>, Option<String>) {
     let token_records: Vec<&session::Record> = session
         .records
         .iter()
@@ -2228,7 +2226,10 @@ fn codex_usage_calls_from_session(
 /// the field and means no cache writes). Returns a warning describing the
 /// first disagreement, or `None` when they agree or there is no final to
 /// compare against (no `token_count` Records, or a malformed final).
-fn codex_final_mismatch(calls: &[UsageCall], final_total: Option<&session::Usage>) -> Option<String> {
+fn codex_final_mismatch(
+    calls: &[UsageCall],
+    final_total: Option<&session::Usage>,
+) -> Option<String> {
     let Some(final_total) = final_total else {
         return None;
     };
@@ -2236,9 +2237,10 @@ fn codex_final_mismatch(calls: &[UsageCall], final_total: Option<&session::Usage
         return None;
     }
     let sum = |f: fn(&UsageCall) -> Option<u64>| {
-        calls.iter().map(|c| f(c).unwrap_or(0)).fold(0u64, |a, b| {
-            a.saturating_add(b)
-        })
+        calls
+            .iter()
+            .map(|c| f(c).unwrap_or(0))
+            .fold(0u64, |a, b| a.saturating_add(b))
     };
     let (sum_in, sum_cw, sum_cr, sum_out) = (
         sum(|c| c.input),
@@ -2346,10 +2348,7 @@ fn usage_preview_from_record(record: &session::Record) -> Option<String> {
 /// (no descendants) behaves exactly as before. Codex mismatch warnings from
 /// every Session in the subtree are combined (sums kept); Claude Code never
 /// warns.
-pub fn usage_calls_for_session(
-    stores: &Stores,
-    handle: &SessionHandle,
-) -> Option<UsageBreakdown> {
+pub fn usage_calls_for_session(stores: &Stores, handle: &SessionHandle) -> Option<UsageBreakdown> {
     // Subtree rooted at the selected Session, unfiltered so workers are seen
     // even though ordinary enumeration hides them. Falls back to the single
     // Session when the root is absent from the including enumeration (e.g. a
@@ -2372,8 +2371,7 @@ pub fn usage_calls_for_session(
             }
             continue;
         };
-        let (mut session_calls, warning) =
-            usage_calls_from_session(&parsed, h.info.harness);
+        let (mut session_calls, warning) = usage_calls_from_session(&parsed, h.info.harness);
         if h.info.session_id != handle.info.session_id {
             let worker = h.info.session_id.clone();
             for c in &mut session_calls {
@@ -2612,14 +2610,16 @@ fn calls_have_usage(calls: &[UsageCall]) -> bool {
 
 /// Sum token counts across `calls`, treating missing as 0.
 fn sum_usage_calls(calls: &[UsageCall]) -> (u64, u64, u64, u64) {
-    calls.iter().fold((0u64, 0u64, 0u64, 0u64), |(a, b, c, d), call| {
-        (
-            a.saturating_add(call.input.unwrap_or(0)),
-            b.saturating_add(call.cache_create.unwrap_or(0)),
-            c.saturating_add(call.cache_read.unwrap_or(0)),
-            d.saturating_add(call.output.unwrap_or(0)),
-        )
-    })
+    calls
+        .iter()
+        .fold((0u64, 0u64, 0u64, 0u64), |(a, b, c, d), call| {
+            (
+                a.saturating_add(call.input.unwrap_or(0)),
+                b.saturating_add(call.cache_create.unwrap_or(0)),
+                c.saturating_add(call.cache_read.unwrap_or(0)),
+                d.saturating_add(call.output.unwrap_or(0)),
+            )
+        })
 }
 
 /// Rank the Sessions in `scope` by summed token Usage, biggest first per
@@ -2748,7 +2748,12 @@ pub fn usage_ranking(
                 if h.info.session_id == root.info.session_id {
                     continue;
                 }
-                if walks_to_usages(&h.info.session_id, &root.info.session_id, h.info.harness, &parents) {
+                if walks_to_usages(
+                    &h.info.session_id,
+                    &root.info.session_id,
+                    h.info.harness,
+                    &parents,
+                ) {
                     family.push(h);
                 }
             }
