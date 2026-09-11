@@ -9,13 +9,13 @@ use agsearch::{
     export_timestamp_now, failed_in_store_session, failed_in_stores, format_current,
     format_export_markdown, format_failures, format_paths, format_projects, format_results,
     format_session_paths, format_sessions, format_stats, format_touch_paths, format_touches,
-    format_transcript_for_harness, format_windowed_for_harness, group_failures,
-    list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
-    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
-    resolve_current_thread, resolve_store_session_prefix, search_store_session,
-    search_store_session_with_file, search_stores, search_stores_with_file, since_cutoff,
-    timestamp_is_since, touches_in_store_session, touches_in_stores, ContentSet, FileSelector,
-    Matcher, Scope, StoreSessionRef, Stores,
+    format_transcript_for_harness, format_usage_breakdown, format_windowed_for_harness,
+    group_failures, list_store_projects, list_store_sessions, parse_store_transcript,
+    parse_transcript_path, resolve_claude_dir, resolve_codex_dir, resolve_current_context,
+    resolve_current_session, resolve_current_thread, resolve_store_session_prefix,
+    search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
+    since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
+    usage_calls_for_session, ContentSet, FileSelector, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -83,6 +83,17 @@ enum Command {
     /// exactly. `current` exports only the top-level Session. An existing
     /// destination is rejected unless `--force` is passed.
     Export(ExportArgs),
+    /// Show per-call token Usage for one Session.
+    ///
+    /// With a selector, prints one row per model call in turn order with a
+    /// total line. Without a selector, ranking is not yet supported.
+    Usage(UsageArgs),
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum UsageSort {
+    /// Biggest total first (the leaderboard); default is turn order (the story).
+    Total,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -292,6 +303,20 @@ struct ExportArgs {
     thinking: bool,
 }
 
+/// Arguments for the `usage` verb: per-call breakdown for one Session.
+/// The selector accepts the same forms as `show` (id prefix, `current`,
+/// `current-thread`). Ranking without a selector arrives in a later ticket.
+#[derive(Args)]
+struct UsageArgs {
+    /// A git-style unique prefix of a session-id, `current` for the top-level
+    /// Current Session, or `current-thread` for the calling thread.
+    session: Option<String>,
+
+    /// Reorder the breakdown biggest-total-first instead of turn order.
+    #[arg(long, value_enum)]
+    sort: Option<UsageSort>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -335,6 +360,7 @@ fn main() -> ExitCode {
         Some(Command::Projects(args)) => run_projects(&stores, &args),
         Some(Command::Current(args)) => run_current(&stores, &args),
         Some(Command::Export(args)) => run_export(&stores, &args),
+        Some(Command::Usage(args)) => run_usage(&stores, &args),
         None => run_search(stores, &cli.search),
     }
 }
@@ -878,6 +904,65 @@ fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Run the `usage` verb: with a selector, show the per-call breakdown for one
+/// Session; without one, ranking is not yet supported (a later ticket).
+/// The selector accepts the same forms as `show` (id prefix, `current`,
+/// `current-thread`) and resolves through the centralized current-context
+/// resolver (ADR 0014), so the handoff from any listing verb works.
+fn run_usage(stores: &Stores, args: &UsageArgs) -> ExitCode {
+    let Some(selector) = args.session.as_deref() else {
+        eprintln!("agsearch: usage ranking is not yet supported (pass a session selector)");
+        return ExitCode::FAILURE;
+    };
+    let handle = if selector == "current" {
+        match resolve_current_session(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if selector == "current-thread" {
+        match resolve_current_thread(stores) {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("agsearch: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match resolve_store_session_prefix(stores, selector) {
+            StoreSessionRef::Unique(session) => session,
+            StoreSessionRef::NotFound => {
+                eprintln!("agsearch: no session matches '{selector}'");
+                return ExitCode::FAILURE;
+            }
+            StoreSessionRef::Ambiguous(ids) => {
+                eprintln!(
+                    "agsearch: '{selector}' is ambiguous — {} sessions match:",
+                    ids.len()
+                );
+                for id in ids.iter().take(10) {
+                    eprintln!("  {id}");
+                }
+                if ids.len() > 10 {
+                    eprintln!("  … and {} more", ids.len() - 10);
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let Some(calls) = usage_calls_for_session(stores, &handle) else {
+        eprintln!("agsearch: cannot read {}", handle.info.path.display());
+        return ExitCode::FAILURE;
+    };
+    let sort_total = matches!(args.sort, Some(UsageSort::Total));
+    let rendered = format_usage_breakdown(&calls, sort_total);
+    let _ = write!(anstream::stdout(), "{rendered}");
+    ExitCode::SUCCESS
 }
 
 /// Read the first non-empty line of stdin as a Session file path (for

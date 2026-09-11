@@ -395,10 +395,16 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
             continue;
         };
         let kind = codex_record_kind(payload);
+        // Per-Record timestamp for the future usage breakdown; Usage itself
+        // arrives in a later ticket (Codex `token_count` Records), so None here.
+        let timestamp = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if payload.get("type").and_then(Value::as_str) == Some("message") {
-            records.message(kind);
+            records.message(kind, timestamp, None);
         } else {
-            records.attached(kind);
+            records.attached(kind, timestamp, None);
         }
     }
     Session {
