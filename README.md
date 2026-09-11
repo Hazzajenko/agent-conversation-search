@@ -232,7 +232,8 @@ E:\projects\games\creature-game · 43 sessions · 2026-06-01
 `agsearch usage` ranks the Sessions in scope by total token Usage (tokens
 only, no money), biggest first — for when you want to find which
 conversations burned the most tokens. `agsearch usage <id>` shows one row
-per model call inside that Session, in turn order, with a total line.
+per model call inside that Session, in turn order (Claude Code) or file
+order (Codex `token_count` Records), with a total line.
 
 ```console
 $ agsearch usage
@@ -249,7 +250,7 @@ total                                               215        1,200     165,000
 
 | Flag | Effect |
 |------|--------|
-| `--sort {total,output,input,calls}` | rank by this column (default `total`); on the breakdown only `total` is valid (biggest-first, default is turn order) |
+| `--sort {total,output,input,calls}` | rank by this column (default `total`); on the breakdown only `total` is valid (biggest-first, default is turn order for Claude Code, file order for Codex) |
 | `--limit <N>` | maximum Sessions in the ranking (default 20; ranking only) |
 | `--all`, `--project <substr>`, `--harness <claude\|codex>`, `--since <when>` | scope the ranking like `sessions` (current Project by default) |
 | `--include-subagents` | list subagent threads as their own rows instead of folding them into the parent |
@@ -307,7 +308,7 @@ listing verbs:
 
 The default scope merges Sessions from both Harnesses by their encoded working
 directory. `projects` shows one row when both Harnesses used the same directory.
-Codex subagent Sessions stay excluded unless you pass `--include-subagents`
+Subagent threads stay excluded unless you pass `--include-subagents`
 (`usage` instead folds workers into the parent row unless you pass it).
 `sessions` and `projects` are inventory verbs. They keep listing and counting
 the Current Session; `usage` ranking excludes the Current Session Family like

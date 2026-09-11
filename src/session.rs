@@ -55,11 +55,11 @@ pub(crate) struct SessionMeta {
     pub branch: Option<String>,
     /// The real working directory (`cwd`), first one seen.
     pub cwd: Option<String>,
-    /// The final cumulative Codex totals, for the usage-breakdown mismatch
+    /// The final cumulative totals, for the usage-breakdown mismatch
     /// check (issue 31). Normalized like per-call Usage (non-cached input),
     /// model and call id unset. `None` when the Session has no `token_count`
     /// Records or the final one carries no totals.
-    pub codex_final_total: Option<Usage>,
+    pub final_total: Option<Usage>,
 }
 
 /// One Block of a user Message's `content` array. User array content is
@@ -105,16 +105,16 @@ pub(crate) enum RecordKind {
     Assistant(Vec<AssistantBlock>),
     /// An `ai-title` Record (session metadata, not a turn).
     Title(String),
-    /// A Codex `token_count` event: one model call's token counts, no text.
+    /// A `token_count` event: one model call's token counts, no text.
     /// Carries [`Usage`] on the Record; ignored by search/show/Transcript
     /// (like Title), used only by the usage breakdown. Turn is always `None`
     /// (it never consumes a Transcript turn); the breakdown numbers Codex
     /// calls by file order instead.
-    CodexTokenCount,
+    TokenCount,
 }
 
 /// Token Usage for one model call (see CONTEXT.md Usage). Carried on each
-/// assistant [`Record`] (Claude Code) or [`RecordKind::CodexTokenCount`]
+/// assistant [`Record`] (Claude Code) or [`RecordKind::TokenCount`]
 /// Record (Codex), so every projection sees the same numbers. Claude Code
 /// attaches it to each assistant Message (`message.usage` plus `message.model`
 /// and `message.id`); Codex `token_count` Records carry `last_token_usage`
@@ -139,19 +139,6 @@ pub(crate) struct Usage {
     /// The Harness's call id (`message.id` for Claude Code). Several Records
     /// sharing one id are one call and its Usage is counted once.
     pub call_id: Option<String>,
-}
-
-impl Usage {
-    /// Total tokens, or `None` when the call carries no token counts.
-    #[allow(dead_code)]
-    pub fn total(&self) -> Option<u64> {
-        match (self.input, self.cache_create, self.cache_read, self.output) {
-            (Some(i), Some(c), Some(r), Some(o)) => {
-                Some(i.saturating_add(c).saturating_add(r).saturating_add(o))
-            }
-            _ => None,
-        }
-    }
 }
 
 /// One parsed Record, tagged with its turn number (Message order, the ADR 0002
@@ -186,7 +173,17 @@ pub(crate) struct Session {
 pub(crate) struct RecordBuilder {
     turn: usize,
     records: Vec<Record>,
-    attached: Vec<(RecordKind, Option<String>, Option<Usage>)>,
+    attached: Vec<PendingRecord>,
+}
+
+/// One not-yet-placed Record: its kind plus the per-call timestamp and Usage
+/// that travel with it. Groups the `(kind, timestamp, usage)` triple so the
+/// builder threads one value instead of three.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingRecord {
+    pub kind: RecordKind,
+    pub timestamp: Option<String>,
+    pub usage: Option<Usage>,
 }
 
 impl RecordBuilder {
@@ -197,12 +194,12 @@ impl RecordBuilder {
         usage: Option<Usage>,
     ) {
         self.turn += 1;
-        for (kind, timestamp, usage) in self.attached.drain(..) {
+        for pending in self.attached.drain(..) {
             self.records.push(Record {
                 turn: Some(self.turn),
-                timestamp,
-                usage,
-                kind,
+                timestamp: pending.timestamp,
+                usage: pending.usage,
+                kind: pending.kind,
             });
         }
         self.push(kind, Some(self.turn), timestamp, usage);
@@ -215,7 +212,11 @@ impl RecordBuilder {
         usage: Option<Usage>,
     ) {
         if let Some(kind) = kind {
-            self.attached.push((kind, timestamp, usage));
+            self.attached.push(PendingRecord {
+                kind,
+                timestamp,
+                usage,
+            });
         }
     }
 
@@ -247,12 +248,12 @@ impl RecordBuilder {
 
     pub(crate) fn finish(mut self) -> Vec<Record> {
         let turn = (self.turn > 0).then_some(self.turn);
-        for (kind, timestamp, usage) in self.attached.drain(..) {
+        for pending in self.attached.drain(..) {
             self.records.push(Record {
                 turn,
-                timestamp,
-                usage,
-                kind,
+                timestamp: pending.timestamp,
+                usage: pending.usage,
+                kind: pending.kind,
             });
         }
         self.records

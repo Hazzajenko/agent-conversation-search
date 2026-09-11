@@ -13,11 +13,11 @@ use agsearch::{
     format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
     parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
     resolve_current_context, resolve_current_session, resolve_current_thread,
-    resolve_store_session_prefix, search_store_session, search_store_session_with_file,
-    search_stores, search_stores_with_file, since_cutoff, timestamp_is_since,
-    touches_in_store_session, touches_in_stores, usage_calls_for_session, usage_ranking,
-    ContentSet, FileSelector, Matcher, Scope, SessionUsage, StoreSessionRef, Stores,
-    UsageRankingSort,
+    resolve_store_session_prefix, resolve_store_session_prefix_including_subagents,
+    search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
+    since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
+    usage_calls_for_session, usage_ranking, ContentSet, FileSelector, Matcher, Scope,
+    SessionHandle, SessionUsage, StoreSessionRef, Stores, UsageRankingSort,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long, value_enum, global = true)]
     harness: Option<HarnessChoice>,
 
-    /// Include Codex subagent threads in search, listing, and id resolution.
+    /// Include subagent threads in search, listing, and id resolution.
     #[arg(long, global = true)]
     include_subagents: bool,
 
@@ -89,7 +89,8 @@ enum Command {
     ///
     /// `agsearch usage` ranks the Sessions in scope by total token Usage
     /// (tokens only, no money), biggest first. `agsearch usage <SESSION>`
-    /// shows one row per model call inside that Session, in turn order, with
+    /// shows one row per model call inside that Session, in turn order
+    /// (Claude Code) or file order (Codex `token_count` Records), with
     /// a total line.
     ///
     /// The selector accepts the same forms as `show`: a git-style id prefix,
@@ -103,7 +104,8 @@ enum Command {
     /// `--include-subagents` lists them as their own rows instead. Ranking
     /// order is `--sort {total,output,input,calls}` (default `total`),
     /// truncated to `--limit N` (default 20). On the breakdown, `--sort`
-    /// accepts only `total` (biggest-first); the default is turn order.
+    /// accepts only `total` (biggest-first); the default is turn order
+    /// (Claude Code) or file order (Codex).
     Usage(UsageArgs),
 }
 
@@ -518,6 +520,80 @@ fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Resolve a session selector (`current`, `current-thread`, or an id prefix)
+/// to one Session, printing the standard error and returning failure on any
+/// miss. Shared by `show`, `export`, and search `--session` so the handoff
+/// from any listing verb behaves identically.
+fn resolve_session_selector(stores: &Stores, selector: &str) -> Result<SessionHandle, ExitCode> {
+    if selector == "current" {
+        return resolve_current_session(stores).map_err(|err| {
+            eprintln!("agsearch: {err}");
+            ExitCode::FAILURE
+        });
+    }
+    if selector == "current-thread" {
+        return resolve_current_thread(stores).map_err(|err| {
+            eprintln!("agsearch: {err}");
+            ExitCode::FAILURE
+        });
+    }
+    match resolve_store_session_prefix(stores, selector) {
+        StoreSessionRef::Unique(session) => Ok(session),
+        StoreSessionRef::NotFound => {
+            eprintln!("agsearch: no session matches '{selector}'");
+            Err(ExitCode::FAILURE)
+        }
+        StoreSessionRef::Ambiguous(ids) => {
+            report_ambiguous(selector, &ids);
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Like [`resolve_session_selector`] but including subagent threads. The
+/// `usage` breakdown uses this so a worker row always hands off.
+fn resolve_session_selector_including_subagents(
+    stores: &Stores,
+    selector: &str,
+) -> Result<SessionHandle, ExitCode> {
+    if selector == "current" {
+        return resolve_current_session(stores).map_err(|err| {
+            eprintln!("agsearch: {err}");
+            ExitCode::FAILURE
+        });
+    }
+    if selector == "current-thread" {
+        return resolve_current_thread(stores).map_err(|err| {
+            eprintln!("agsearch: {err}");
+            ExitCode::FAILURE
+        });
+    }
+    match resolve_store_session_prefix_including_subagents(stores, selector) {
+        StoreSessionRef::Unique(session) => Ok(session),
+        StoreSessionRef::NotFound => {
+            eprintln!("agsearch: no session matches '{selector}'");
+            Err(ExitCode::FAILURE)
+        }
+        StoreSessionRef::Ambiguous(ids) => {
+            report_ambiguous(selector, &ids);
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn report_ambiguous(selector: &str, ids: &[String]) {
+    eprintln!(
+        "agsearch: '{selector}' is ambiguous — {} sessions match:",
+        ids.len()
+    );
+    for id in ids.iter().take(10) {
+        eprintln!("  {id}");
+    }
+    if ids.len() > 10 {
+        eprintln!("  … and {} more", ids.len() - 10);
+    }
+}
+
 /// Run the `search` verb: resolve the scope, then either list Touches by
 /// structure (`--file`, no Query), search text restricted to touching Sessions
 /// (`--file` with a Query), list Failures by structure (`--failed`, Query
@@ -539,36 +615,9 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     // context fails with the resolver's error and a worker thread is
     // accessible without --include-subagents.
     let session_path = match &args.session {
-        Some(selector) if selector == "current" => match resolve_current_session(&stores) {
+        Some(selector) => match resolve_session_selector(&stores, selector) {
             Ok(session) => Some(session),
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
-        Some(selector) if selector == "current-thread" => match resolve_current_thread(&stores) {
-            Ok(session) => Some(session),
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
-        Some(prefix) => match resolve_store_session_prefix(&stores, prefix) {
-            StoreSessionRef::Unique(session) => Some(session),
-            StoreSessionRef::NotFound => {
-                eprintln!("agsearch: no session matches '{prefix}'");
-                return ExitCode::FAILURE;
-            }
-            StoreSessionRef::Ambiguous(ids) => {
-                eprintln!(
-                    "agsearch: '{prefix}' is ambiguous — {} sessions match:",
-                    ids.len()
-                );
-                for id in ids.iter().take(10) {
-                    eprintln!("  {id}");
-                }
-                return ExitCode::FAILURE;
-            }
+            Err(code) => return code,
         },
         None => None,
     };
@@ -772,53 +821,10 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-    } else if args.session == "current" {
-        let session = match resolve_current_session(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let Some(turns) = parse_store_transcript(stores, &session) else {
-            eprintln!("agsearch: cannot read {}", session.info.path.display());
-            return ExitCode::FAILURE;
-        };
-        (turns, session.info.harness)
-    } else if args.session == "current-thread" {
-        let session = match resolve_current_thread(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let Some(turns) = parse_store_transcript(stores, &session) else {
-            eprintln!("agsearch: cannot read {}", session.info.path.display());
-            return ExitCode::FAILURE;
-        };
-        (turns, session.info.harness)
     } else {
-        let session = match resolve_store_session_prefix(stores, &args.session) {
-            StoreSessionRef::Unique(session) => session,
-            StoreSessionRef::NotFound => {
-                eprintln!("agsearch: no session matches '{}'", args.session);
-                return ExitCode::FAILURE;
-            }
-            StoreSessionRef::Ambiguous(ids) => {
-                eprintln!(
-                    "agsearch: '{}' is ambiguous — {} sessions match:",
-                    args.session,
-                    ids.len()
-                );
-                for id in ids.iter().take(10) {
-                    eprintln!("  {id}");
-                }
-                if ids.len() > 10 {
-                    eprintln!("  … and {} more", ids.len() - 10);
-                }
-                return ExitCode::FAILURE;
-            }
+        let session = match resolve_session_selector(stores, &args.session) {
+            Ok(session) => session,
+            Err(code) => return code,
         };
         let Some(turns) = parse_store_transcript(stores, &session) else {
             eprintln!("agsearch: cannot read {}", session.info.path.display());
@@ -848,44 +854,9 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
 /// available when the command runs and finishes without waiting for the
 /// Harness.
 fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
-    let handle = if args.session == "current" {
-        match resolve_current_session(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else if args.session == "current-thread" {
-        match resolve_current_thread(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        match resolve_store_session_prefix(stores, &args.session) {
-            StoreSessionRef::Unique(session) => session,
-            StoreSessionRef::NotFound => {
-                eprintln!("agsearch: no session matches '{}'", args.session);
-                return ExitCode::FAILURE;
-            }
-            StoreSessionRef::Ambiguous(ids) => {
-                eprintln!(
-                    "agsearch: '{}' is ambiguous — {} sessions match:",
-                    args.session,
-                    ids.len()
-                );
-                for id in ids.iter().take(10) {
-                    eprintln!("  {id}");
-                }
-                if ids.len() > 10 {
-                    eprintln!("  … and {} more", ids.len() - 10);
-                }
-                return ExitCode::FAILURE;
-            }
-        }
+    let handle = match resolve_session_selector(stores, &args.session) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
 
     match args.format {
@@ -995,43 +966,9 @@ fn run_usage_breakdown(stores: &Stores, args: &UsageArgs, selector: &str) -> Exi
             return ExitCode::FAILURE;
         }
     }
-    let handle = if selector == "current" {
-        match resolve_current_session(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else if selector == "current-thread" {
-        match resolve_current_thread(stores) {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("agsearch: {err}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        match resolve_store_session_prefix(stores, selector) {
-            StoreSessionRef::Unique(session) => session,
-            StoreSessionRef::NotFound => {
-                eprintln!("agsearch: no session matches '{selector}'");
-                return ExitCode::FAILURE;
-            }
-            StoreSessionRef::Ambiguous(ids) => {
-                eprintln!(
-                    "agsearch: '{selector}' is ambiguous — {} sessions match:",
-                    ids.len()
-                );
-                for id in ids.iter().take(10) {
-                    eprintln!("  {id}");
-                }
-                if ids.len() > 10 {
-                    eprintln!("  … and {} more", ids.len() - 10);
-                }
-                return ExitCode::FAILURE;
-            }
-        }
+    let handle = match resolve_session_selector_including_subagents(stores, selector) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
 
     let Some(breakdown) = usage_calls_for_session(stores, &handle) else {

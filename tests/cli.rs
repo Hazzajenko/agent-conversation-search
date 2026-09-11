@@ -6481,6 +6481,92 @@ fn usage_breakdown_claude_parent_includes_marked_worker_and_matches_ranking() {
 }
 
 #[test]
+fn usage_breakdown_resolves_a_claude_worker_id_directly() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "a7a7a7a7-1111-2222-3333-444444444444";
+    let worker_id = "b8b8b8b8-1111-2222-3333-444444444444";
+    plant_claude_parent_with_worker(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        "claude parent handoff marker",
+        "claude worker handoff marker",
+    );
+
+    // A worker row from `usage --include-subagents` hands off to its own
+    // breakdown, even though search/show keep hiding Claude workers.
+    // Worker total: 7+1000+20000+30=21,037, 1 call.
+    for extra in [vec!["--include-subagents"], vec![]] {
+        let mut cmd = agsearch_command();
+        cmd.current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path());
+        for flag in extra {
+            cmd.arg(flag);
+        }
+        cmd.arg("usage").arg(&worker_id[..8]);
+        cmd.assert()
+            .success()
+            .stdout(predicates::str::contains("claude worker handoff marker"))
+            .stdout(predicates::str::contains("21,037"))
+            .stdout(predicates::str::contains("1 call"));
+    }
+}
+
+#[test]
+fn usage_breakdown_codex_malformed_final_disables_the_check() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let session_id = "c0de0009-1111-2222-3333-444444444444";
+    // One valid call, but the final total is not an object: no usable counts,
+    // so the mismatch check disables itself instead of warning on zeros.
+    let malformed = serde_json::json!({
+        "timestamp": "2026-08-28T10:01:00.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 12345,
+                    "cache_write_input_tokens": 500,
+                    "cached_input_tokens": 2000,
+                    "output_tokens": 50,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 12395
+                },
+                "total_token_usage": "not-an-object",
+                "model_context_window": null
+            },
+            "rate_limits": null
+        }
+    })
+    .to_string();
+    plant_codex_usage_session(
+        codex.path(),
+        session_id,
+        workdir.path(),
+        Some("codex-fable-7"),
+        &[&malformed],
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning").not())
+        .stdout(predicates::str::contains("12,395"))
+        .stdout(predicates::str::contains("1 call"));
+}
+
+#[test]
 fn usage_ranking_folds_codex_worker_into_parent() {
     let workdir = tempfile::tempdir().unwrap();
     let claude = tempfile::tempdir().unwrap();

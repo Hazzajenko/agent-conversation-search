@@ -413,7 +413,7 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
                     // Token-count events never consume a Transcript turn;
                     // the breakdown numbers them by file order instead.
                     records.metadata(
-                        Some(crate::session::RecordKind::CodexTokenCount),
+                        Some(crate::session::RecordKind::TokenCount),
                         timestamp,
                         usage,
                     );
@@ -424,7 +424,7 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
                     // Only remember a final when it parses; a malformed final
                     // simply disables the check (no false warning).
                     if let Some(final_usage) = codex_final_from_token_count(total) {
-                        meta.codex_final_total = Some(final_usage);
+                        meta.final_total = Some(final_usage);
                     }
                 }
             }
@@ -469,6 +469,29 @@ fn codex_model_from_meta(meta: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Shared Codex token-count normalization for `last_token_usage` and
+/// `total_token_usage`: raw `input_tokens` minus cached subsets so Codex and
+/// Claude totals share one formula (input + cache-write + cache-read + output)
+/// and match Codex `total_tokens`. Returns
+/// `(input, cache_create, cache_read, output)`.
+fn codex_token_counts(value: &Value) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    let input_raw = value.get("input_tokens").and_then(Value::as_u64);
+    let cache_write = value
+        .get("cache_write_input_tokens")
+        .and_then(Value::as_u64)
+        .or(Some(0));
+    let cached = value.get("cached_input_tokens").and_then(Value::as_u64);
+    let output = value.get("output_tokens").and_then(Value::as_u64);
+    let input = match (input_raw, cached, cache_write) {
+        (Some(raw), Some(cached), Some(write)) => {
+            Some(raw.saturating_sub(cached).saturating_sub(write))
+        }
+        (Some(raw), None, _) => Some(raw),
+        _ => None,
+    };
+    (input, cache_write, cached, output)
+}
+
 /// Build per-call [`Usage`](crate::session::Usage) from a Codex
 /// `last_token_usage` object: `input_tokens`, `cache_write_input_tokens`
 /// (defaulting to 0 when the file predates it), `cached_input_tokens`, and
@@ -482,20 +505,7 @@ fn codex_usage_from_token_count(
     last: &Value,
     model: Option<String>,
 ) -> Option<crate::session::Usage> {
-    let input_raw = last.get("input_tokens").and_then(Value::as_u64);
-    let cache_write = last
-        .get("cache_write_input_tokens")
-        .and_then(Value::as_u64)
-        .or(Some(0));
-    let cached = last.get("cached_input_tokens").and_then(Value::as_u64);
-    let output = last.get("output_tokens").and_then(Value::as_u64);
-    let input = match (input_raw, cached, cache_write) {
-        (Some(raw), Some(cached), Some(write)) => {
-            Some(raw.saturating_sub(cached).saturating_sub(write))
-        }
-        (Some(raw), None, _) => Some(raw),
-        _ => None,
-    };
+    let (input, cache_write, cached, output) = codex_token_counts(last);
     Some(crate::session::Usage {
         input,
         cache_create: cache_write,
@@ -508,22 +518,17 @@ fn codex_usage_from_token_count(
 
 /// Normalize a Codex `total_token_usage` object the same way as
 /// [`codex_usage_from_token_count`], for the mismatch check. Model and call
-/// id are unset: only the four counts participate.
+/// id are unset: only the four counts participate. Returns `None` when the
+/// value carries no usable counts (missing/non-numeric fields, or not an
+/// object), so a malformed final disables the check instead of warning.
 fn codex_final_from_token_count(total: &Value) -> Option<crate::session::Usage> {
-    let input_raw = total.get("input_tokens").and_then(Value::as_u64);
-    let cache_write = total
-        .get("cache_write_input_tokens")
-        .and_then(Value::as_u64)
-        .or(Some(0));
-    let cached = total.get("cached_input_tokens").and_then(Value::as_u64);
-    let output = total.get("output_tokens").and_then(Value::as_u64);
-    let input = match (input_raw, cached, cache_write) {
-        (Some(raw), Some(cached), Some(write)) => {
-            Some(raw.saturating_sub(cached).saturating_sub(write))
-        }
-        (Some(raw), None, _) => Some(raw),
-        _ => None,
-    };
+    if !total.is_object() {
+        return None;
+    }
+    let (input, cache_write, cached, output) = codex_token_counts(total);
+    if input.is_none() && cached.is_none() && output.is_none() {
+        return None;
+    }
     Some(crate::session::Usage {
         input,
         cache_create: cache_write,
@@ -839,6 +844,26 @@ impl Stores {
         sessions
     }
 
+    /// Prefix matches including subagent threads that ordinary listing hides.
+    /// The `usage` breakdown uses this so a worker id from the ranking (with
+    /// `--include-subagents`) always resolves, for both Harnesses. Naming a
+    /// Session is intent to include it.
+    pub(crate) fn matching_sessions_including_subagents(&self, prefix: &str) -> Vec<SessionHandle> {
+        let mut sessions = Vec::new();
+        for (adapter_index, adapter) in self.adapters.iter().enumerate() {
+            sessions.extend(
+                adapter
+                    .matching_including_subagents(prefix)
+                    .into_iter()
+                    .map(|info| SessionHandle {
+                        info,
+                        adapter_index,
+                    }),
+            );
+        }
+        sessions
+    }
+
     pub(crate) fn parse(&self, session: &SessionHandle) -> Option<Session> {
         self.adapters
             .get(session.adapter_index)?
@@ -1000,18 +1025,9 @@ fn walks_to_parent(
     root: &str,
     parents: &std::collections::HashMap<String, Option<String>>,
 ) -> bool {
-    let mut seen = HashSet::new();
-    let mut current = id;
-    while let Some(parent) = parents.get(current).and_then(|p| p.as_deref()) {
-        if !seen.insert(current.to_string()) {
-            return false;
-        }
-        if parent == root {
-            return true;
-        }
-        current = parent;
-    }
-    false
+    crate::walks_to_ancestor(id, root, |current| {
+        parents.get(current).and_then(|p| p.clone())
+    })
 }
 
 #[cfg(test)]
