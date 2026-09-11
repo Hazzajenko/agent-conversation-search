@@ -363,6 +363,10 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
     if let Some(title) = title {
         meta.title = Some(title);
     }
+    // Model for the usage breakdown, from the session meta when present:
+    // a direct `payload.model` first, then the newer
+    // `payload.base_instructions.provenance.model` (e.g. "gpt-5.6-sol").
+    let mut codex_model: Option<String> = None;
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -388,6 +392,47 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
+        if codex_model.is_none()
+            && value.get("type").and_then(Value::as_str) == Some("session_meta")
+        {
+            codex_model = codex_model_from_meta(&value);
+        }
+        // Codex per-call Usage: each `event_msg` with payload type
+        // `token_count` is one call (issue 31). Newer `token_usage_record`
+        // lines are a different shape and out of scope here.
+        if value.get("type").and_then(Value::as_str) == Some("event_msg")
+            && value
+                .pointer("/payload/type")
+                .and_then(Value::as_str)
+                == Some("token_count")
+        {
+            let timestamp = value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(info) = value.pointer("/payload/info") {
+                if let Some(last) = info.get("last_token_usage") {
+                    let usage = codex_usage_from_token_count(last, codex_model.clone());
+                    // Token-count events never consume a Transcript turn;
+                    // the breakdown numbers them by file order instead.
+                    records.metadata(
+                        Some(crate::session::RecordKind::CodexTokenCount),
+                        timestamp,
+                        usage,
+                    );
+                }
+                // The final Record's cumulative totals feed the mismatch check;
+                // the last one in file order wins.
+                if let Some(total) = info.get("total_token_usage") {
+                    // Only remember a final when it parses; a malformed final
+                    // simply disables the check (no false warning).
+                    if let Some(final_usage) = codex_final_from_token_count(total) {
+                        meta.codex_final_total = Some(final_usage);
+                    }
+                }
+            }
+            continue;
+        }
         if value.get("type").and_then(Value::as_str) != Some("response_item") {
             continue;
         }
@@ -395,8 +440,9 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
             continue;
         };
         let kind = codex_record_kind(payload);
-        // Per-Record timestamp for the future usage breakdown; Usage itself
-        // arrives in a later ticket (Codex `token_count` Records), so None here.
+        // Per-Record timestamp for the usage breakdown; Codex Messages carry
+        // no Usage themselves (their token_counts arrive as separate
+        // `event_msg` Records above), so None here.
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -411,6 +457,84 @@ fn codex_read_with_title(text: &str, title: Option<String>) -> Session {
         meta,
         records: records.finish(),
     }
+}
+
+/// The model name for Codex Usage rows, from the session meta when present:
+/// a direct `payload.model` first, then
+/// `payload.base_instructions.provenance.model`. `None` renders a blank model
+/// cell rather than guessing.
+fn codex_model_from_meta(meta: &Value) -> Option<String> {
+    if let Some(model) = meta.pointer("/payload/model").and_then(Value::as_str) {
+        return Some(model.to_string());
+    }
+    meta.pointer("/payload/base_instructions/provenance/model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Build per-call [`Usage`](crate::session::Usage) from a Codex
+/// `last_token_usage` object: `input_tokens`, `cache_write_input_tokens`
+/// (defaulting to 0 when the file predates it), `cached_input_tokens`, and
+/// `output_tokens`. `input` is normalized to non-cached input
+/// (`input - cached - cache_write`, saturating) so Codex and Claude totals
+/// share one formula (input + cache-write + cache-read + output) and match
+/// Codex `total_tokens` (`input + output`, cached subsets). Always returns
+/// `Some`, with `None` counts for missing fields rendering blank cells like a
+/// Claude call without `message.usage`.
+fn codex_usage_from_token_count(
+    last: &Value,
+    model: Option<String>,
+) -> Option<crate::session::Usage> {
+    let input_raw = last.get("input_tokens").and_then(Value::as_u64);
+    let cache_write = last
+        .get("cache_write_input_tokens")
+        .and_then(Value::as_u64)
+        .or(Some(0));
+    let cached = last.get("cached_input_tokens").and_then(Value::as_u64);
+    let output = last.get("output_tokens").and_then(Value::as_u64);
+    let input = match (input_raw, cached, cache_write) {
+        (Some(raw), Some(cached), Some(write)) => {
+            Some(raw.saturating_sub(cached).saturating_sub(write))
+        }
+        (Some(raw), None, _) => Some(raw),
+        _ => None,
+    };
+    Some(crate::session::Usage {
+        input,
+        cache_create: cache_write,
+        cache_read: cached,
+        output,
+        model,
+        call_id: None,
+    })
+}
+
+/// Normalize a Codex `total_token_usage` object the same way as
+/// [`codex_usage_from_token_count`], for the mismatch check. Model and call
+/// id are unset: only the four counts participate.
+fn codex_final_from_token_count(total: &Value) -> Option<crate::session::Usage> {
+    let input_raw = total.get("input_tokens").and_then(Value::as_u64);
+    let cache_write = total
+        .get("cache_write_input_tokens")
+        .and_then(Value::as_u64)
+        .or(Some(0));
+    let cached = total.get("cached_input_tokens").and_then(Value::as_u64);
+    let output = total.get("output_tokens").and_then(Value::as_u64);
+    let input = match (input_raw, cached, cache_write) {
+        (Some(raw), Some(cached), Some(write)) => {
+            Some(raw.saturating_sub(cached).saturating_sub(write))
+        }
+        (Some(raw), None, _) => Some(raw),
+        _ => None,
+    };
+    Some(crate::session::Usage {
+        input,
+        cache_create: cache_write,
+        cache_read: cached,
+        output,
+        model: None,
+        call_id: None,
+    })
 }
 
 fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
@@ -659,6 +783,10 @@ impl Stores {
         self
     }
 
+    pub(crate) fn includes_subagents(&self) -> bool {
+        self.include_subagents
+    }
+
     /// Hide the Current Session Family from scope enumeration, so multi-Session
     /// analysis cannot return the conversation that asked for it (ADR 0011).
     /// Outside a supported Harness this hides nothing. Explicit Session lookup
@@ -773,6 +901,83 @@ impl Stores {
         sessions
     }
 
+    /// All Sessions in `scope` including subagent threads, with Current Family
+    /// exclusion applied. Used by `usage` ranking to fold workers into parents
+    /// even though ordinary enumeration hides them (Claude workers are never
+    /// listed, Codex workers only with `--include-subagents`). Sorted like
+    /// [`Stores::sessions`].
+    pub(crate) fn sessions_including_subagents_in_scope(
+        &self,
+        scope: &Scope,
+    ) -> Vec<SessionHandle> {
+        let mut sessions = Vec::new();
+        for (adapter_index, adapter) in self.adapters.iter().enumerate() {
+            sessions.extend(
+                adapter
+                    .enumerate_including_subagents()
+                    .into_iter()
+                    .filter(|info| {
+                        !self.excluded_sessions.contains(&SessionKey {
+                            harness: info.harness,
+                            session_id: info.session_id.clone(),
+                        })
+                    })
+                    .filter(|info| in_scope(info, scope))
+                    .map(|info| SessionHandle {
+                        info,
+                        adapter_index,
+                    }),
+            );
+        }
+        sessions.sort_by(|a, b| {
+            b.info
+                .timestamp
+                .cmp(&a.info.timestamp)
+                .then_with(|| a.info.path.cmp(&b.info.path))
+        });
+        sessions
+    }
+
+    /// The subtree rooted at `root_id`: the Session itself plus every
+    /// descendant subagent thread (transitive) in the same Harness. Uses the
+    /// unfiltered including-subagents enumeration so an explicitly selected
+    /// Session's breakdown always sees its workers, regardless of scope,
+    /// `--since`, or Current Family exclusion (naming a Session is intent to
+    /// include it, like `--session`). Returns empty when the root is absent.
+    pub(crate) fn subtree_handles(
+        &self,
+        harness: Harness,
+        root_id: &str,
+    ) -> Vec<SessionHandle> {
+        let all = self.sessions_including_subagents(harness);
+        // Parent links within this Harness.
+        let parents: std::collections::HashMap<String, Option<String>> = all
+            .iter()
+            .map(|h| (h.info.session_id.clone(), h.info.parent_id.clone()))
+            .collect();
+        if !parents.contains_key(root_id) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for h in all {
+            let id = h.info.session_id.clone();
+            if id == root_id || walks_to_parent(&id, root_id, &parents) {
+                out.push(h);
+            }
+        }
+        // Deterministic: root first, then workers by session id.
+        out.sort_by(|a, b| {
+            if a.info.session_id == root_id {
+                std::cmp::Ordering::Less
+            } else if b.info.session_id == root_id {
+                std::cmp::Ordering::Greater
+            } else {
+                a.info.session_id.cmp(&b.info.session_id)
+            }
+        });
+        out
+    }
+
     #[cfg(test)]
     pub(crate) fn with_claude_projects_root(projects_root: &Path) -> Self {
         Self::from_adapters(vec![Box::new(ClaudeAdapter {
@@ -793,6 +998,27 @@ fn in_scope(info: &SessionIdentity, scope: &Scope) -> bool {
             .as_ref()
             .is_some_and(|project| project.contains_ignore_case(name_substring)),
     }
+}
+
+/// Whether `id` walks to `root` through parent links (transitive, cycle-safe).
+/// `parents` maps session id to its immediate parent id, if any.
+fn walks_to_parent(
+    id: &str,
+    root: &str,
+    parents: &std::collections::HashMap<String, Option<String>>,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut current = id;
+    while let Some(parent) = parents.get(current).and_then(|p| p.as_deref()) {
+        if !seen.insert(current.to_string()) {
+            return false;
+        }
+        if parent == root {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 #[cfg(test)]

@@ -9,13 +9,15 @@ use agsearch::{
     export_timestamp_now, failed_in_store_session, failed_in_stores, format_current,
     format_export_markdown, format_failures, format_paths, format_projects, format_results,
     format_session_paths, format_sessions, format_stats, format_touch_paths, format_touches,
-    format_transcript_for_harness, format_usage_breakdown, format_windowed_for_harness,
-    group_failures, list_store_projects, list_store_sessions, parse_store_transcript,
-    parse_transcript_path, resolve_claude_dir, resolve_codex_dir, resolve_current_context,
-    resolve_current_session, resolve_current_thread, resolve_store_session_prefix,
-    search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
-    since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
-    usage_calls_for_session, ContentSet, FileSelector, Matcher, Scope, StoreSessionRef, Stores,
+    format_transcript_for_harness, format_usage_breakdown, format_usage_ranking,
+    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
+    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
+    resolve_current_context, resolve_current_session, resolve_current_thread,
+    resolve_store_session_prefix, search_store_session, search_store_session_with_file,
+    search_stores, search_stores_with_file, since_cutoff, timestamp_is_since,
+    touches_in_store_session, touches_in_stores, usage_calls_for_session, usage_ranking,
+    ContentSet, FileSelector, Matcher, Scope, SessionUsage, StoreSessionRef, Stores,
+    UsageRankingSort,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -83,17 +85,25 @@ enum Command {
     /// exactly. `current` exports only the top-level Session. An existing
     /// destination is rejected unless `--force` is passed.
     Export(ExportArgs),
-    /// Show per-call token Usage for one Session.
+    /// Show per-call token Usage for one Session, or rank Sessions by Usage.
     ///
     /// With a selector, prints one row per model call in turn order with a
-    /// total line. Without a selector, ranking is not yet supported.
+    /// total line. Without a selector, ranks the Sessions in scope by total
+    /// token Usage, biggest first.
     Usage(UsageArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum UsageSort {
-    /// Biggest total first (the leaderboard); default is turn order (the story).
+    /// Biggest total first. On the breakdown this flips turn order to the
+    /// leaderboard; on the ranking this is the default order.
     Total,
+    /// Biggest output first (ranking only).
+    Output,
+    /// Biggest input first (ranking only).
+    Input,
+    /// Most model calls first (ranking only).
+    Calls,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -303,18 +313,50 @@ struct ExportArgs {
     thinking: bool,
 }
 
-/// Arguments for the `usage` verb: per-call breakdown for one Session.
-/// The selector accepts the same forms as `show` (id prefix, `current`,
-/// `current-thread`). Ranking without a selector arrives in a later ticket.
+/// Arguments for the `usage` verb: per-call breakdown for one Session, or a
+/// Usage ranking across the scope. The selector accepts the same forms as
+/// `show` (id prefix, `current`, `current-thread`). Without a selector the
+/// scope flags (`--all`, `--project`, `--since`, `--include-current`) behave
+/// exactly like `sessions`, ranking the Sessions in scope by summed Usage.
 #[derive(Args)]
 struct UsageArgs {
     /// A git-style unique prefix of a session-id, `current` for the top-level
-    /// Current Session, or `current-thread` for the calling thread.
+    /// Current Session, or `current-thread` for the calling thread. Omit to
+    /// rank the Sessions in scope instead of showing one breakdown.
     session: Option<String>,
 
-    /// Reorder the breakdown biggest-total-first instead of turn order.
+    /// Reorder the rows: biggest-total-first on the breakdown (default is turn
+    /// order); on the ranking, rank by this column (default `total`).
     #[arg(long, value_enum)]
     sort: Option<UsageSort>,
+
+    /// List Sessions across every Project, not just the current directory's
+    /// (ranking only; ignored with a selector).
+    #[arg(long, conflicts_with = "project")]
+    all: bool,
+
+    /// List Sessions in Projects whose encoded logical working-directory key
+    /// contains this substring, case-insensitive (ranking only; ignored with
+    /// a selector).
+    #[arg(long, value_name = "SUBSTR")]
+    project: Option<String>,
+
+    /// Only Sessions touched since this point: a relative duration (3d, 2w,
+    /// 1h) or an absolute ISO date (2026-05-01) (ranking only; ignored with
+    /// a selector).
+    #[arg(long, value_name = "WHEN")]
+    since: Option<String>,
+
+    /// Include the Current Session Family, which the ranking excludes by
+    /// default so the conversation asking the question does not pollute the
+    /// answer (ranking only; ignored with a selector).
+    #[arg(long)]
+    include_current: bool,
+
+    /// Maximum Sessions shown in the ranking (default 20; ranking only;
+    /// ignored with a selector).
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    limit: usize,
 }
 
 fn main() -> ExitCode {
@@ -360,7 +402,7 @@ fn main() -> ExitCode {
         Some(Command::Projects(args)) => run_projects(&stores, &args),
         Some(Command::Current(args)) => run_current(&stores, &args),
         Some(Command::Export(args)) => run_export(&stores, &args),
-        Some(Command::Usage(args)) => run_usage(&stores, &args),
+        Some(Command::Usage(args)) => run_usage(stores, &args),
         None => run_search(stores, &cli.search),
     }
 }
@@ -907,15 +949,38 @@ fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
 }
 
 /// Run the `usage` verb: with a selector, show the per-call breakdown for one
-/// Session; without one, ranking is not yet supported (a later ticket).
+/// Session; without one, rank the Sessions in scope by summed Usage.
 /// The selector accepts the same forms as `show` (id prefix, `current`,
 /// `current-thread`) and resolves through the centralized current-context
-/// resolver (ADR 0014), so the handoff from any listing verb works.
-fn run_usage(stores: &Stores, args: &UsageArgs) -> ExitCode {
-    let Some(selector) = args.session.as_deref() else {
-        eprintln!("agsearch: usage ranking is not yet supported (pass a session selector)");
-        return ExitCode::FAILURE;
-    };
+/// resolver (ADR 0014), so the handoff from any listing verb works. The
+/// ranking reuses the `sessions` scope flags (`--all`, `--project`, `--since`)
+/// plus `--include-current`, excludes the Current Session Family by default
+/// (ADR 0011), and orders by `--sort` truncated to `--limit`.
+fn run_usage(stores: Stores, args: &UsageArgs) -> ExitCode {
+    if let Some(selector) = args.session.as_deref() {
+        return run_usage_breakdown(&stores, args, selector);
+    }
+    run_usage_ranking(stores, args)
+}
+
+/// Run the `usage` breakdown for one explicitly selected Session. Scope and
+/// ranking flags are ignored here; only `--sort total` applies (other sorts
+/// belong to the ranking).
+fn run_usage_breakdown(stores: &Stores, args: &UsageArgs, selector: &str) -> ExitCode {
+    if let Some(sort) = args.sort {
+        if !matches!(sort, UsageSort::Total) {
+            let name = match sort {
+                UsageSort::Output => "output",
+                UsageSort::Input => "input",
+                UsageSort::Calls => "calls",
+                UsageSort::Total => "total",
+            };
+            eprintln!(
+                "agsearch: --sort {name} is only valid for usage ranking (without a session selector)"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let handle = if selector == "current" {
         match resolve_current_session(stores) {
             Ok(session) => session,
@@ -955,12 +1020,60 @@ fn run_usage(stores: &Stores, args: &UsageArgs) -> ExitCode {
         }
     };
 
-    let Some(calls) = usage_calls_for_session(stores, &handle) else {
+    let Some(breakdown) = usage_calls_for_session(stores, &handle) else {
         eprintln!("agsearch: cannot read {}", handle.info.path.display());
         return ExitCode::FAILURE;
     };
+    // A Codex Session whose summed turns disagree with its final running
+    // total keeps the sums (the file may be truncated or double-logged).
+    if let Some(warning) = breakdown.warning {
+        eprintln!("agsearch: warning: {warning}");
+    }
     let sort_total = matches!(args.sort, Some(UsageSort::Total));
-    let rendered = format_usage_breakdown(&calls, sort_total);
+    let rendered = format_usage_breakdown(&breakdown.calls, sort_total);
+    let _ = write!(anstream::stdout(), "{rendered}");
+    ExitCode::SUCCESS
+}
+
+/// Run the `usage` ranking: list the Sessions in scope ordered by summed
+/// Usage, truncated to `--limit`. Scope (`--all`, `--project`, `--harness`,
+/// `--since`) behaves exactly like `sessions`; the Current Session Family is
+/// excluded unless `--include-current` is passed. Sessions with no Usage are
+/// omitted and counted on the final skipped line.
+fn run_usage_ranking(stores: Stores, args: &UsageArgs) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!("agsearch: cannot read the current directory: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cutoff = match parse_since(args.since.as_deref()) {
+        Ok(cutoff) => cutoff,
+        Err(()) => return ExitCode::FAILURE,
+    };
+
+    // Multi-Session analysis hides the Current Session Family so a request to
+    // recall earlier work cannot match the conversation that made it (ADR
+    // 0011), unless --include-current puts it back.
+    let stores = if args.include_current {
+        stores
+    } else {
+        stores.excluding_current_family()
+    };
+
+    let scope = build_scope(args.all, args.project.as_deref(), &cwd);
+    let sort = match args.sort.unwrap_or(UsageSort::Total) {
+        UsageSort::Total => UsageRankingSort::Total,
+        UsageSort::Output => UsageRankingSort::Output,
+        UsageSort::Input => UsageRankingSort::Input,
+        UsageSort::Calls => UsageRankingSort::Calls,
+    };
+    let (mut rows, skipped): (Vec<SessionUsage>, usize) =
+        usage_ranking(&stores, &scope, cutoff, sort);
+    rows.truncate(args.limit);
+
+    let rendered = format_usage_ranking(&rows, skipped);
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
 }

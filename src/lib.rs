@@ -188,8 +188,9 @@ fn segments_from_record(record: &Record) -> Vec<Segment> {
             .collect(),
         // Every Harness exposes its Title through Session metadata. Claude's
         // on-disk Title Record remains in the lossless model but contributes no
-        // second searchable Segment.
-        RecordKind::Title(_) => Vec::new(),
+        // second searchable Segment. Codex token_counts carry numbers, not
+        // text, so they likewise contribute none.
+        RecordKind::Title(_) | RecordKind::CodexTokenCount => Vec::new(),
     }
 }
 
@@ -862,7 +863,7 @@ fn turn_from_record(
 ) -> Option<Turn> {
     let number = record.turn?;
     let (kind, blocks) = match &record.kind {
-        RecordKind::Title(_) => return None,
+        RecordKind::Title(_) | RecordKind::CodexTokenCount => return None,
         RecordKind::Prompt(text) => {
             if text.trim().is_empty() {
                 return None;
@@ -2087,16 +2088,29 @@ pub fn format_touch_paths(results: &[SessionTouches]) -> String {
 
 /// One model call's token Usage for the `usage` breakdown (see CONTEXT.md
 /// Usage). A call is one API call: for Claude Code, all Records sharing one
-/// `message.id` collapse to one row and its Usage is counted once. A call with
-/// no Usage still appears, with blank numeric cells, so the reader sees the
-/// call happened.
+/// `message.id` collapse to one row and its Usage is counted once; for Codex,
+/// each `token_count` Record is one call. A call with no Usage still appears,
+/// with blank numeric cells, so the reader sees the call happened (except a
+/// Codex Session with no `token_count` Records, which is an empty table —
+/// Codex Messages never become calls).
+///
+/// In a parent Session's breakdown (issue 33), worker calls from descendant
+/// subagent threads are included and marked via `subagent`: `None` for the
+/// parent's own calls, `Some(worker session id)` for worker calls, so the
+/// breakdown total equals the ranking row. Codex `token_count` calls carry no
+/// text, so the preview column alone could not mark them — the dedicated
+/// `subagent` column does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCall {
-    /// Transcript turn of the call's first Record (the ADR 0002 coordinate).
+    /// Transcript turn of the call's first Record (the ADR 0002 coordinate)
+    /// for Claude Code; the 1-based file-order ordinal among `token_count`
+    /// Records for Codex. Worker calls keep their own Session-local numbers;
+    /// the `subagent` column disambiguates collisions.
     pub turn: Option<usize>,
     /// ISO 8601 timestamp of the call's first Record, if any.
     pub timestamp: Option<String>,
-    /// Model name (`message.model`), if recorded.
+    /// Model name (`message.model` for Claude Code, the session meta for
+    /// Codex when present), if recorded.
     pub model: Option<String>,
     /// Token counts, or `None` when the Harness recorded no Usage for this call.
     pub input: Option<u64>,
@@ -2104,7 +2118,11 @@ pub struct UsageCall {
     pub cache_read: Option<u64>,
     pub output: Option<u64>,
     /// Short preview of the call's first text or tool block, truncated.
+    /// Empty for Codex `token_count` calls, which carry numbers but no text.
     pub preview: String,
+    /// The worker Session this call came from, if it is a folded subagent
+    /// call. `None` for the selected Session's own calls.
+    pub subagent: Option<String>,
 }
 
 impl UsageCall {
@@ -2119,11 +2137,28 @@ impl UsageCall {
     }
 }
 
+/// The per-call breakdown for one Session: its rows plus an optional stderr
+/// warning. Only Codex warns today, when the final `total_token_usage`
+/// disagrees with the summed `last_token_usage` (the sums are kept).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageBreakdown {
+    pub calls: Vec<UsageCall>,
+    pub warning: Option<String>,
+}
+
 /// Collect the per-call Usage rows for one parsed Session, in turn order.
-/// Only assistant Records become calls; user Prompts and Titles never do.
-/// Records sharing one call id (Claude `message.id`) group into one call.
-/// Records without a call id each become their own call.
-fn usage_calls_from_session(session: &session::Session) -> Vec<UsageCall> {
+/// Claude Code: only assistant Records become calls; user Prompts and Titles
+/// never do. Records sharing one call id (`message.id`) group into one call.
+/// Records without a call id each become their own call. Codex: each
+/// `token_count` Record is one call, numbered by file order; Messages never
+/// become calls, so no `token_count` Records means an empty table.
+fn usage_calls_from_session(
+    session: &session::Session,
+    harness: Harness,
+) -> (Vec<UsageCall>, Option<String>) {
+    if harness == Harness::Codex {
+        return codex_usage_calls_from_session(session);
+    }
     use std::collections::HashMap;
 
     // Group assistant Records by call id, preserving first-seen order.
@@ -2150,18 +2185,97 @@ fn usage_calls_from_session(session: &session::Session) -> Vec<UsageCall> {
         groups.entry(key).or_default().push(record);
     }
 
-    order
+    let calls = order
         .into_iter()
         .filter_map(|key| groups.remove(&key))
         .map(|records| usage_call_from_group(&records))
-        .collect()
+        .collect();
+    (calls, None)
+}
+
+/// Build the Codex rows: one [`UsageCall`] per `token_count` Record in file
+/// order, numbered 1-based for the turn column, plus a mismatch warning when
+/// the final `total_token_usage` disagrees with the summed calls (sums kept).
+fn codex_usage_calls_from_session(
+    session: &session::Session,
+) -> (Vec<UsageCall>, Option<String>) {
+    let token_records: Vec<&session::Record> = session
+        .records
+        .iter()
+        .filter(|r| matches!(r.kind, RecordKind::CodexTokenCount))
+        .collect();
+    let mut calls = Vec::with_capacity(token_records.len());
+    for (index, record) in token_records.iter().enumerate() {
+        let usage = record.usage.as_ref();
+        calls.push(UsageCall {
+            turn: Some(index + 1),
+            timestamp: record.timestamp.clone(),
+            model: usage.and_then(|u| u.model.clone()),
+            input: usage.and_then(|u| u.input),
+            cache_create: usage.and_then(|u| u.cache_create),
+            cache_read: usage.and_then(|u| u.cache_read),
+            output: usage.and_then(|u| u.output),
+            preview: String::new(),
+            subagent: None,
+        });
+    }
+    let warning = codex_final_mismatch(&calls, session.meta.codex_final_total.as_ref());
+    (calls, warning)
+}
+
+/// Compare summed Codex calls against the final cumulative totals. `None`
+/// counts as 0 on both sides (a missing `cache_write_input_tokens` predates
+/// the field and means no cache writes). Returns a warning describing the
+/// first disagreement, or `None` when they agree or there is no final to
+/// compare against (no `token_count` Records, or a malformed final).
+fn codex_final_mismatch(calls: &[UsageCall], final_total: Option<&session::Usage>) -> Option<String> {
+    let Some(final_total) = final_total else {
+        return None;
+    };
+    if calls.is_empty() {
+        return None;
+    }
+    let sum = |f: fn(&UsageCall) -> Option<u64>| {
+        calls.iter().map(|c| f(c).unwrap_or(0)).fold(0u64, |a, b| {
+            a.saturating_add(b)
+        })
+    };
+    let (sum_in, sum_cw, sum_cr, sum_out) = (
+        sum(|c| c.input),
+        sum(|c| c.cache_create),
+        sum(|c| c.cache_read),
+        sum(|c| c.output),
+    );
+    let sum_tot = sum_in
+        .saturating_add(sum_cw)
+        .saturating_add(sum_cr)
+        .saturating_add(sum_out);
+    let (fin_in, fin_cw, fin_cr, fin_out) = (
+        final_total.input.unwrap_or(0),
+        final_total.cache_create.unwrap_or(0),
+        final_total.cache_read.unwrap_or(0),
+        final_total.output.unwrap_or(0),
+    );
+    let fin_tot = fin_in
+        .saturating_add(fin_cw)
+        .saturating_add(fin_cr)
+        .saturating_add(fin_out);
+    if sum_in == fin_in && sum_cw == fin_cw && sum_cr == fin_cr && sum_out == fin_out {
+        return None;
+    }
+    Some(format!(
+        "summed token usage (input {sum_in}, cache-write {sum_cw}, cache-read {sum_cr}, output {sum_out}, total {sum_tot}) \
+         differs from final total_token_usage (input {fin_in}, cache-write {fin_cw}, cache-read {fin_cr}, output {fin_out}, total {fin_tot}); using sum"
+    ))
 }
 
 /// Build one [`UsageCall`] from the Records sharing one call id, in file order.
 /// Turn and timestamp come from the first Record carrying each; model and token
 /// counts come from the first Record carrying each, so a group where one Record
 /// lacks `message.usage` still shows the model's name with blank numeric cells.
-/// Preview is the first text or tool block across the group.
+/// Preview is the first text or tool block across the group. The call belongs
+/// to the selected Session itself (`subagent: None`); family rollup marks
+/// worker calls afterwards.
 fn usage_call_from_group(records: &[&session::Record]) -> UsageCall {
     let first = records[0];
     let turn = first.turn;
@@ -2194,6 +2308,7 @@ fn usage_call_from_group(records: &[&session::Record]) -> UsageCall {
         cache_read,
         output,
         preview,
+        subagent: None,
     }
 }
 
@@ -2223,11 +2338,62 @@ fn usage_preview_from_record(record: &session::Record) -> Option<String> {
     None
 }
 
-/// Collect the per-call Usage rows for one resolved Session.
-pub fn usage_calls_for_session(stores: &Stores, handle: &SessionHandle) -> Option<Vec<UsageCall>> {
-    stores
-        .parse(handle)
-        .map(|parsed| usage_calls_from_session(&parsed))
+/// Collect the per-call Usage rows for one resolved Session, including its
+/// descendant subagent threads (issue 33). The selected Session's own calls
+/// carry `subagent: None`; every descendant's calls carry
+/// `subagent: Some(worker session id)` and are marked in the `subagent` column,
+/// so the breakdown total equals the ranking row's folded total. A leaf Session
+/// (no descendants) behaves exactly as before. Codex mismatch warnings from
+/// every Session in the subtree are combined (sums kept); Claude Code never
+/// warns.
+pub fn usage_calls_for_session(
+    stores: &Stores,
+    handle: &SessionHandle,
+) -> Option<UsageBreakdown> {
+    // Subtree rooted at the selected Session, unfiltered so workers are seen
+    // even though ordinary enumeration hides them. Falls back to the single
+    // Session when the root is absent from the including enumeration (e.g. a
+    // path-piped Session outside the Stores).
+    let subtree = stores.subtree_handles(handle.info.harness, &handle.info.session_id);
+    let handles: Vec<&SessionHandle> = if subtree.is_empty() {
+        vec![handle]
+    } else {
+        subtree.iter().collect()
+    };
+    let mut calls = Vec::new();
+    let mut warnings = Vec::new();
+    for h in handles {
+        let Some(parsed) = stores.parse(h) else {
+            // A worker that cannot be read contributes nothing; the parent's
+            // own calls still render. Mirrors ranking, which skips unreadable
+            // Sessions.
+            if h.info.session_id == handle.info.session_id {
+                return None;
+            }
+            continue;
+        };
+        let (mut session_calls, warning) =
+            usage_calls_from_session(&parsed, h.info.harness);
+        if h.info.session_id != handle.info.session_id {
+            let worker = h.info.session_id.clone();
+            for c in &mut session_calls {
+                c.subagent = Some(worker.clone());
+            }
+        }
+        calls.extend(session_calls);
+        if let Some(w) = warning {
+            warnings.push(w);
+        }
+    }
+    // De-duplicate identical warnings (e.g. same sums repeated) while keeping
+    // order, so a family with two identical workers does not print twice.
+    warnings.dedup();
+    let warning = if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join("; "))
+    };
+    Some(UsageBreakdown { calls, warning })
 }
 
 /// Format a thousands-separated integer (`12345` → `"12,345"`) for the usage
@@ -2249,23 +2415,44 @@ fn format_opt_thousands(v: Option<u64>) -> String {
 }
 
 /// Render the per-call usage breakdown: one row per model call plus a total
-/// line. Default order is turn order (the story); with `sort_total` the rows
+/// line. Default order is chronological (timestamp, then turn) — the story;
+/// for a single Session this equals turn order. With `sort_total` the rows
 /// flip to biggest-total-first (the leaderboard), with no-Usage calls last.
 /// Numbers use thousands separators; calls with no Usage show blank numeric
-/// cells. Always ends with a `total` line summing the Usage-bearing calls, so
-/// the reader never adds the column themselves.
+/// cells. Worker calls from folded subagent threads appear with their worker's
+/// short id in the `subagent` column (blank for the parent's own calls), so a
+/// Codex worker (empty preview) is still marked. Always ends with a `total`
+/// line summing the Usage-bearing calls, so the reader never adds the column
+/// themselves — and so the total matches the ranking row's folded total.
 pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
     let mut rows: Vec<&UsageCall> = calls.iter().collect();
     if sort_total {
-        // Biggest total first; no-Usage (None) sorts last; ties keep turn order.
+        // Biggest total first; no-Usage (None) sorts last; ties keep
+        // chronological order, then worker for determinism.
         rows.sort_by(|a, b| match (a.total(), b.total()) {
-            (Some(at), Some(bt)) => bt.cmp(&at).then_with(|| a.turn.cmp(&b.turn)),
+            (Some(at), Some(bt)) => bt.cmp(&at).then_with(|| {
+                a.timestamp
+                    .cmp(&b.timestamp)
+                    .then_with(|| a.turn.cmp(&b.turn))
+                    .then_with(|| a.subagent.cmp(&b.subagent))
+            }),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.turn.cmp(&b.turn),
+            (None, None) => a
+                .timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.turn.cmp(&b.turn))
+                .then_with(|| a.subagent.cmp(&b.subagent)),
         });
     } else {
-        rows.sort_by(|a, b| a.turn.cmp(&b.turn));
+        // Chronological: timestamp, then turn, then parent-before-worker.
+        // For one Session timestamps increase with turns, so this is turn order.
+        rows.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.turn.cmp(&b.turn))
+                .then_with(|| a.subagent.cmp(&b.subagent))
+        });
     }
 
     // Column widths include the header, so short tables still align.
@@ -2277,8 +2464,10 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
     let mut w_cr = "cache-read".len();
     let mut w_out = "output".len();
     let mut w_tot = "total".len();
+    let mut w_sub = "subagent".len();
     // Preview is trailing and unbounded; no padding needed.
     let mut rendered: Vec<(
+        String,
         String,
         String,
         String,
@@ -2298,6 +2487,7 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
         let cr = format_opt_thousands(c.cache_read);
         let out = format_opt_thousands(c.output);
         let tot = c.total().map(format_thousands).unwrap_or_default();
+        let sub = c.subagent.as_deref().map(short_id).unwrap_or_default();
         w_turn = w_turn.max(turn.chars().count());
         w_ts = w_ts.max(ts.chars().count());
         w_model = w_model.max(model.chars().count());
@@ -2306,7 +2496,19 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
         w_cr = w_cr.max(cr.chars().count());
         w_out = w_out.max(out.chars().count());
         w_tot = w_tot.max(tot.chars().count());
-        rendered.push((turn, ts, model, input, cw, cr, out, tot, c.preview.clone()));
+        w_sub = w_sub.max(sub.chars().count());
+        rendered.push((
+            turn,
+            ts,
+            model,
+            input,
+            cw,
+            cr,
+            out,
+            tot,
+            sub,
+            c.preview.clone(),
+        ));
     }
 
     // Totals sum only Usage-bearing calls; a call with no Usage contributes 0.
@@ -2348,20 +2550,399 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
 
     let mut out = String::new();
     out.push_str(&format!(
-        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  preview\n",
-        "turn", "timestamp", "model", "input", "cache-write", "cache-read", "output", "total",
+        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {:<w_sub$}  preview\n",
+        "turn", "timestamp", "model", "input", "cache-write", "cache-read", "output", "total", "subagent",
     ));
-    for (turn, ts, model, input, cw, cr, outv, tot, preview) in rendered {
+    for (turn, ts, model, input, cw, cr, outv, tot, sub, preview) in rendered {
         out.push_str(&format!(
-            "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {preview}\n",
-            turn, ts, model, input, cw, cr, outv, tot,
+            "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {:<w_sub$}  {preview}\n",
+            turn, ts, model, input, cw, cr, outv, tot, sub,
         ));
     }
     out.push_str(&format!(
-        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {call_noun}\n",
-        "total", "", "", s_in, s_cw, s_cr, s_out, s_tot,
+        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {:<w_sub$}  {call_noun}\n",
+        "total", "", "", s_in, s_cw, s_cr, s_out, s_tot, "",
     ));
     out
+}
+
+// --- usage: ranking Sessions by total token Usage (issue 32) ---
+
+/// Which column the `usage` ranking orders by. `Total` (input + cache-write +
+/// cache-read + output) is the default; the other variants rank by that
+/// column's summed tokens, or by the number of model calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageRankingSort {
+    Total,
+    Output,
+    Input,
+    Calls,
+}
+
+/// One row of the `usage` ranking: a Session's summed token Usage across both
+/// Harnesses. Sums treat a missing count as 0 (a call without Usage
+/// contributes 0, like the breakdown total line); `calls` counts every model
+/// call the breakdown would list (including no-Usage calls for Claude Code),
+/// so the row matches the breakdown's total line. `subagents` is the number of
+/// descendant subagent threads folded into this row (0 when `--include-subagents`
+/// lists workers as their own rows, or for a leaf Session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionUsage {
+    pub session: SessionIdentity,
+    pub calls: usize,
+    pub input: u64,
+    pub cache_create: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub total: u64,
+    pub subagents: usize,
+}
+
+/// Whether any call in `calls` carries Usage (any of the four counts present).
+/// `total()` needs all four, so a partial record would otherwise look like no
+/// Usage while still summing non-zero below.
+fn calls_have_usage(calls: &[UsageCall]) -> bool {
+    calls.iter().any(|c| {
+        c.input.is_some()
+            || c.cache_create.is_some()
+            || c.cache_read.is_some()
+            || c.output.is_some()
+    })
+}
+
+/// Sum token counts across `calls`, treating missing as 0.
+fn sum_usage_calls(calls: &[UsageCall]) -> (u64, u64, u64, u64) {
+    calls.iter().fold((0u64, 0u64, 0u64, 0u64), |(a, b, c, d), call| {
+        (
+            a.saturating_add(call.input.unwrap_or(0)),
+            b.saturating_add(call.cache_create.unwrap_or(0)),
+            c.saturating_add(call.cache_read.unwrap_or(0)),
+            d.saturating_add(call.output.unwrap_or(0)),
+        )
+    })
+}
+
+/// Rank the Sessions in `scope` by summed token Usage, biggest first per
+/// `sort`. By default (issue 33) every descendant subagent thread's Usage is
+/// folded into its parent row and `subagents` shows how many were folded;
+/// with `--include-subagents` (via [`Stores::including_subagents`]) threads
+/// are listed as their own rows with no folding and `subagents` is 0.
+/// Sessions (or families, when folding) with no Usage are omitted; the
+/// returned count reports how many were skipped. An optional `cutoff` (from
+/// `--since`) narrows to Sessions touched at or after it, exactly like
+/// `sessions` — excluded Sessions never count as skipped. When folding, the
+/// cutoff applies to the parent's timestamp; workers fold regardless of their
+/// own timestamp so the family total stays complete.
+///
+/// Scans every configured Store in parallel like the other multi-Session
+/// verbs; a missing Store is silently skipped by enumeration. Codex mismatch
+/// warnings are ignored here (sums are kept, as in the breakdown).
+pub fn usage_ranking(
+    stores: &Stores,
+    scope: &Scope,
+    cutoff: Option<i64>,
+    sort: UsageRankingSort,
+) -> (Vec<SessionUsage>, usize) {
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+
+    // Including-subagents enumeration (scope + Current Family exclusion
+    // applied) is the base for both modes, so Claude workers — never listed
+    // elsewhere — still fold, and `--include-subagents` lists them for usage.
+    let all = stores.sessions_including_subagents_in_scope(scope);
+
+    if stores.includes_subagents() {
+        // No folding: every Session (including workers) is its own row.
+        let filtered: Vec<&SessionHandle> = all
+            .iter()
+            .filter(|h| match cutoff {
+                Some(cutoff) => timestamp_is_since(h.info.timestamp.as_deref(), cutoff),
+                None => true,
+            })
+            .collect();
+
+        let mut rows: Vec<SessionUsage> = filtered
+            .par_iter()
+            .filter_map(|handle| {
+                let parsed = stores.parse(handle)?;
+                let (calls, _) = usage_calls_from_session(&parsed, handle.info.harness);
+                if !calls_have_usage(&calls) {
+                    return None;
+                }
+                let (sum_in, sum_cw, sum_cr, sum_out) = sum_usage_calls(&calls);
+                let total = sum_in
+                    .saturating_add(sum_cw)
+                    .saturating_add(sum_cr)
+                    .saturating_add(sum_out);
+                Some(SessionUsage {
+                    session: handle.info.clone(),
+                    calls: calls.len(),
+                    input: sum_in,
+                    cache_create: sum_cw,
+                    cache_read: sum_cr,
+                    output: sum_out,
+                    total,
+                    subagents: 0,
+                })
+            })
+            .collect();
+
+        let skipped = filtered.len().saturating_sub(rows.len());
+        sort_usage_ranking(&mut rows, sort);
+        return (rows, skipped);
+    }
+
+    // Folding mode: build the parent->descendants forest from the
+    // scope-filtered set, then one row per root.
+    //
+    // Keys are Harness-qualified because session ids can coincide across Stores.
+    let by_key: HashMap<(Harness, String), &SessionHandle> = all
+        .iter()
+        .map(|h| ((h.info.harness, h.info.session_id.clone()), h))
+        .collect();
+    // Roots: no parent, or parent absent from the scope-filtered set (orphan
+    // workers become their own roots rather than vanishing).
+    let mut roots: Vec<&SessionHandle> = all
+        .iter()
+        .filter(|h| match &h.info.parent_id {
+            None => true,
+            Some(pid) => !by_key.contains_key(&(h.info.harness, pid.clone())),
+        })
+        .collect();
+    // Cutoff applies to the parent's timestamp so a recent parent keeps its
+    // whole family; workers fold regardless of their own timestamps.
+    roots.retain(|h| match cutoff {
+        Some(cutoff) => timestamp_is_since(h.info.timestamp.as_deref(), cutoff),
+        None => true,
+    });
+    // Deterministic family collection: sort roots by session id before the
+    // parallel sum so row order never depends on scan order (final sort below
+    // orders by Usage anyway).
+    roots.sort_by(|a, b| {
+        (a.info.harness.as_str(), &a.info.session_id)
+            .cmp(&(b.info.harness.as_str(), &b.info.session_id))
+    });
+
+    // For each root, its family is the root plus every handle in `all` that
+    // walks to it. Precompute parent links once.
+    let parents: HashMap<(Harness, String), Option<String>> = all
+        .iter()
+        .map(|h| {
+            (
+                (h.info.harness, h.info.session_id.clone()),
+                h.info.parent_id.clone(),
+            )
+        })
+        .collect();
+
+    let mut rows: Vec<SessionUsage> = roots
+        .par_iter()
+        .filter_map(|root| {
+            // Collect family: root + transitive descendants present in `all`.
+            let mut family: Vec<&SessionHandle> = Vec::new();
+            family.push(*root);
+            for h in &all {
+                if h.info.harness != root.info.harness {
+                    continue;
+                }
+                if h.info.session_id == root.info.session_id {
+                    continue;
+                }
+                if walks_to_usages(&h.info.session_id, &root.info.session_id, h.info.harness, &parents) {
+                    family.push(h);
+                }
+            }
+            // Parse every member; an unreadable root drops the row, unreadable
+            // workers are skipped (the parent's own calls still render, like
+            // the breakdown). Mirrors `usage_calls_for_session`.
+            let mut all_calls = Vec::new();
+            let mut parsed_descendants = 0usize;
+            for member in &family {
+                let Some(parsed) = stores.parse(member) else {
+                    if member.info.session_id == root.info.session_id {
+                        return None;
+                    }
+                    continue;
+                };
+                let (calls, _) = usage_calls_from_session(&parsed, member.info.harness);
+                if member.info.session_id != root.info.session_id {
+                    parsed_descendants += 1;
+                }
+                all_calls.extend(calls);
+            }
+            if !calls_have_usage(&all_calls) {
+                return None;
+            }
+            let (sum_in, sum_cw, sum_cr, sum_out) = sum_usage_calls(&all_calls);
+            let total = sum_in
+                .saturating_add(sum_cw)
+                .saturating_add(sum_cr)
+                .saturating_add(sum_out);
+            // Subagents folded: parsed descendant threads. Counts threads, not
+            // Usage-bearing threads, so the column explains the family size
+            // even when a worker added 0. Unreadable workers are skipped, like
+            // their Usage.
+            let subagents = parsed_descendants;
+            // `calls` counts every model call the breakdown would list,
+            // including no-Usage calls, so the row matches the breakdown total.
+            Some(SessionUsage {
+                session: root.info.clone(),
+                calls: all_calls.len(),
+                input: sum_in,
+                cache_create: sum_cw,
+                cache_read: sum_cr,
+                output: sum_out,
+                total,
+                subagents,
+            })
+        })
+        .collect();
+
+    let skipped = roots.len().saturating_sub(rows.len());
+    sort_usage_ranking(&mut rows, sort);
+    (rows, skipped)
+}
+
+/// Whether `id` walks to `root` through parent links within one Harness
+/// (transitive, cycle-safe). `parents` is keyed by `(harness, session id)`.
+fn walks_to_usages(
+    id: &str,
+    root: &str,
+    harness: Harness,
+    parents: &std::collections::HashMap<(Harness, String), Option<String>>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut current = id.to_string();
+    loop {
+        if !seen.insert(current.clone()) {
+            return false;
+        }
+        let parent = parents
+            .get(&(harness, current.clone()))
+            .and_then(|p| p.as_deref());
+        match parent {
+            None => return false,
+            Some(pid) if pid == root => return true,
+            Some(pid) => current = pid.to_string(),
+        }
+    }
+}
+
+/// Order ranking rows biggest-first by `sort`, with deterministic
+/// tie-breakers (total descending, then session id) so output never depends
+/// on scan order.
+pub fn sort_usage_ranking(rows: &mut [SessionUsage], sort: UsageRankingSort) {
+    rows.sort_by(|a, b| {
+        let primary = match sort {
+            UsageRankingSort::Total => b.total.cmp(&a.total),
+            UsageRankingSort::Output => b.output.cmp(&a.output),
+            UsageRankingSort::Input => b.input.cmp(&a.input),
+            UsageRankingSort::Calls => b.calls.cmp(&a.calls),
+        };
+        primary
+            .then_with(|| b.total.cmp(&a.total))
+            .then_with(|| a.session.session_id.cmp(&b.session.session_id))
+    });
+}
+
+/// Render the `usage` ranking as a plain aligned text table: one row per
+/// Session with short id, Project, Harness, Title, folded subagent count,
+/// calls, and the four token columns plus total. Numbers use thousands
+/// separators. Rows are shown in the order given (already sorted); the caller
+/// truncates to `--limit` before rendering. Sessions with no Usage never
+/// appear; when `skipped` is nonzero a final line reports how many were
+/// omitted. An empty ranking renders a clear "no sessions with usage" line.
+pub fn format_usage_ranking(rows: &[SessionUsage], skipped: usize) -> String {
+    if rows.is_empty() {
+        let mut out = "No sessions with usage.\n".to_string();
+        if skipped > 0 {
+            out.push_str(&skipped_line(skipped));
+        }
+        return out;
+    }
+
+    let mut w_session = "session".len();
+    let mut w_project = "project".len();
+    let mut w_harness = "harness".len();
+    let mut w_title = "title".len();
+    let mut w_sub = "subagents".len();
+    let mut w_calls = "calls".len();
+    let mut w_in = "input".len();
+    let mut w_cw = "cache-write".len();
+    let mut w_cr = "cache-read".len();
+    let mut w_out = "output".len();
+    let mut w_tot = "total".len();
+
+    let mut rendered: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let session = short_id(&r.session.session_id);
+        let project = r.session.display_project().to_string();
+        let harness = r.session.harness.as_str().to_string();
+        let title = r
+            .session
+            .title
+            .as_deref()
+            .unwrap_or("(untitled)")
+            .to_string();
+        let sub = format_thousands(r.subagents as u64);
+        let calls = format_thousands(r.calls as u64);
+        let input = format_thousands(r.input);
+        let cw = format_thousands(r.cache_create);
+        let cr = format_thousands(r.cache_read);
+        let outv = format_thousands(r.output);
+        let tot = format_thousands(r.total);
+        w_session = w_session.max(session.chars().count());
+        w_project = w_project.max(project.chars().count());
+        w_harness = w_harness.max(harness.chars().count());
+        w_title = w_title.max(title.chars().count());
+        w_sub = w_sub.max(sub.chars().count());
+        w_calls = w_calls.max(calls.chars().count());
+        w_in = w_in.max(input.chars().count());
+        w_cw = w_cw.max(cw.chars().count());
+        w_cr = w_cr.max(cr.chars().count());
+        w_out = w_out.max(outv.chars().count());
+        w_tot = w_tot.max(tot.chars().count());
+        rendered.push((
+            session, project, harness, title, sub, calls, input, cw, cr, outv, tot,
+        ));
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<w_session$}  {:<w_project$}  {:<w_harness$}  {:<w_title$}  {:>w_sub$}  {:>w_calls$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}\n",
+        "session", "project", "harness", "title", "subagents", "calls", "input", "cache-write", "cache-read", "output", "total",
+    ));
+    for (session, project, harness, title, sub, calls, input, cw, cr, outv, tot) in rendered {
+        out.push_str(&format!(
+            "{:<w_session$}  {:<w_project$}  {:<w_harness$}  {:<w_title$}  {:>w_sub$}  {:>w_calls$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}\n",
+            session, project, harness, title, sub, calls, input, cw, cr, outv, tot,
+        ));
+    }
+    if skipped > 0 {
+        out.push_str(&skipped_line(skipped));
+    }
+    out
+}
+
+fn skipped_line(skipped: usize) -> String {
+    let noun = if skipped == 1 {
+        "1 session"
+    } else {
+        &format!("{skipped} sessions")
+    };
+    format!("skipped {noun} with no usage\n")
 }
 
 // --- --since: filtering Sessions by recency ------------------------------
