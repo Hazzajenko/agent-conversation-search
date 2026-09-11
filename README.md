@@ -20,13 +20,14 @@ $ agsearch current             # inspect the Session that invoked this command
 ## Why
 
 The transcripts use Harness-specific layouts and JSON formats. `agsearch`
-turns them into five jobs:
+turns them into six jobs:
 
 - **find** a conversation — `agsearch <query>`
 - **read** a conversation — `agsearch show <id>`
 - **inspect** the Current Session — `agsearch current`
 - **preserve** a conversation — `agsearch export <id> <file>`
 - **analyse** what went wrong — `agsearch --failed` / `--stats`
+- **measure** token Usage — `agsearch usage` / `agsearch usage <id>`
 
 ## Install
 
@@ -226,6 +227,42 @@ E:\projects\rust\agent-conversation-search · 7 sessions · 2026-06-02
 E:\projects\games\creature-game · 43 sessions · 2026-06-01
 ```
 
+### `usage` — rank Sessions by token Usage
+
+`agsearch usage` ranks the Sessions in scope by total token Usage (tokens
+only, no money), biggest first — for when you want to find which
+conversations burned the most tokens. `agsearch usage <id>` shows one row
+per model call inside that Session, in turn order, with a total line.
+
+```console
+$ agsearch usage
+session   project               harness  title                     subagents  calls  input  cache-write  cache-read  output  total
+aaaaaaaa  E:\projects\rust\demo  claude   Refactor auth middleware        0      2    215        1,200     165,000  10,600  177,015
+bbbbbbbb  E:\projects\rust\demo  claude   Debug flaky test                0      1     80          200      12,000     900   13,180
+
+$ agsearch usage aaaaaaaa
+turn  timestamp                 model            input  cache-write  cache-read  output  total    subagent  preview
+   2  2026-08-20T04:00:10.000Z  claude-opus-4-6    120          800      45,000   2,100   48,020            Draft the middleware refactor plan
+   4  2026-08-20T04:00:20.000Z  claude-opus-4-6     95          400     120,000   8,500  128,995            Apply the edit to auth.rs
+total                                               215        1,200     165,000  10,600  177,015            2 calls
+```
+
+| Flag | Effect |
+|------|--------|
+| `--sort {total,output,input,calls}` | rank by this column (default `total`); on the breakdown only `total` is valid (biggest-first, default is turn order) |
+| `--limit <N>` | maximum Sessions in the ranking (default 20; ranking only) |
+| `--all`, `--project <substr>`, `--harness <claude\|codex>`, `--since <when>` | scope the ranking like `sessions` (current Project by default) |
+| `--include-subagents` | list subagent threads as their own rows instead of folding them into the parent |
+| `--include-current` | put the Current Session Family back into the ranking (excluded by default) |
+
+Subagent threads fold into their parent row by default (the `subagents`
+column shows how many were folded); the breakdown of a parent includes its
+workers' calls marked in the `subagent` column, so its total matches the
+ranking row. Sessions with no Usage are omitted with a `skipped N sessions
+with no usage` line. The selector accepts the same forms as `show` (id
+prefix, `current`, `current-thread`). A Codex Session whose summed turns
+disagree with its final running total keeps the sums and warns on stderr.
+
 ## Failure analysis
 
 Find and aggregate **failed tool calls** by structure, independent of any
@@ -259,26 +296,28 @@ listing verbs:
 
 | Flag | Effect | Applies to |
 |------|--------|-----------|
-| _(default)_ | the current directory's Project | search, sessions |
-| `--all` | every Project in your history | search, sessions |
-| `--project <substr>` | Projects whose name contains the substring | search, sessions, projects |
+| _(default)_ | the current directory's Project | search, sessions, usage |
+| `--all` | every Project in your history | search, sessions, usage |
+| `--project <substr>` | Projects whose name contains the substring | search, sessions, projects, usage |
 | `--session <selector>` | one Session, selected by id-prefix, `current`, or `current-thread`. The selected Session remains included when it belongs to the Current Session Family | search |
 | `--file <SELECTOR>` | list Touches of the selected file; with a Query, restrict Matches to touching Sessions | search |
 | `--written` | with `--file`, keep only write Touches | search |
-| `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats` |
+| `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats`, usage |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 
 The default scope merges Sessions from both Harnesses by their encoded working
 directory. `projects` shows one row when both Harnesses used the same directory.
-Codex subagent Sessions stay excluded unless you pass `--include-subagents`.
+Codex subagent Sessions stay excluded unless you pass `--include-subagents`
+(`usage` instead folds workers into the parent row unless you pass it).
 `sessions` and `projects` are inventory verbs. They keep listing and counting
-the Current Session.
+the Current Session; `usage` ranking excludes the Current Session Family like
+search and failure analysis.
 
 ## Output and exit codes
 
 - Output is colorized on a TTY and plain when piped or under `NO_COLOR`.
-- "No matches" / "No sessions" / "No projects" exit **0** — an empty result is
-  not an error.
+- "No matches" / "No sessions" / "No projects" / "No sessions with usage"
+  exit **0** — an empty result is not an error.
 - Bad input (unparseable regex, unparseable `--since`, an ambiguous id, a
   missing Session, unavailable or ambiguous current context, an existing Export
   destination without `--force`) exits **non-zero** with a readable message.
@@ -293,7 +332,7 @@ thin glue over the same binary, so install `agsearch` on your PATH first.
 ## Concepts
 
 The precise vocabulary this tool is built around — **Harness, Project, Session,
-Record, Message, Query, Match, Failure, Store** — lives in [`CONTEXT.md`](CONTEXT.md).
+Record, Message, Query, Match, Failure, Usage, Store** — lives in [`CONTEXT.md`](CONTEXT.md).
 The reasoning behind the bigger design decisions is in
 [`docs/adr/`](docs/adr/) (locating Projects, the verb/handoff model, failure
 grouping, the listing verbs).

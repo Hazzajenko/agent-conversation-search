@@ -87,9 +87,23 @@ enum Command {
     Export(ExportArgs),
     /// Show per-call token Usage for one Session, or rank Sessions by Usage.
     ///
-    /// With a selector, prints one row per model call in turn order with a
-    /// total line. Without a selector, ranks the Sessions in scope by total
-    /// token Usage, biggest first.
+    /// `agsearch usage` ranks the Sessions in scope by total token Usage
+    /// (tokens only, no money), biggest first. `agsearch usage <SESSION>`
+    /// shows one row per model call inside that Session, in turn order, with
+    /// a total line.
+    ///
+    /// The selector accepts the same forms as `show`: a git-style id prefix,
+    /// `current`, or `current-thread`. Omit it to rank instead of showing one
+    /// breakdown.
+    ///
+    /// Ranking scope reuses the `sessions` flags: `--all`, `--project <SUBSTR>`,
+    /// `--harness <claude|codex>`, `--since <WHEN>`, `--include-subagents`,
+    /// and `--include-current` (the ranking excludes the Current Session Family
+    /// by default). Subagent threads fold into their parent row by default;
+    /// `--include-subagents` lists them as their own rows instead. Ranking
+    /// order is `--sort {total,output,input,calls}` (default `total`),
+    /// truncated to `--limit N` (default 20). On the breakdown, `--sort`
+    /// accepts only `total` (biggest-first); the default is turn order.
     Usage(UsageArgs),
 }
 
