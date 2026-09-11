@@ -88,6 +88,10 @@ _Avoid_: access, hit, reference, usage.
 The path fragment a user passes to select Touches. Matches when its segments equal the trailing segments of the Touch's path, case-insensitive, with `/` and `\` treated as equal. `CLAUDE.md` matches every `CLAUDE.md` in every Project; `docs/adr/0001-x.md` matches only that trailing path.
 _Avoid_: file filter, glob, pattern.
 
+**Usage**:
+The token counts a Harness records for one model call: input, output, cache-write and cache-read tokens, plus the model name. Claude Code attaches it to each assistant Message; Codex records it as a `token_count` Record per turn. A Session's Usage is the sum over its calls; a family's Usage is the sum over the parent Session and its subagent threads. Tokens only — no money is involved.
+_Avoid_: cost, spend, bill, price, tokens (as a term).
+
 ## Example dialogue
 
 > **Dev:** When I run a search, does a hit mean the Query matched a whole Session?
