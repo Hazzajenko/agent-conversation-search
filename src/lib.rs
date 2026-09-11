@@ -1701,18 +1701,19 @@ pub struct FileSelector {
 }
 
 impl FileSelector {
-    /// Parse and validate a raw `--file` selector. Rejects an empty selector
-    /// (including whitespace-only and separator-only) and a selector with a
-    /// trailing separator, so a mistake yields an error rather than everything.
+    /// Parse and validate a raw `--file` selector. Trims whitespace and ignores
+    /// one trailing separator (`docs/` ≡ `docs`); rejects an empty selector
+    /// (including whitespace-only and separator-only) with a clear error.
     pub fn parse(selector: &str) -> Result<Self, String> {
-        if selector.trim().is_empty() {
+        let trimmed = selector.trim();
+        if trimmed.is_empty() {
             return Err("--file selector must not be empty".to_string());
         }
-        let trimmed = selector.trim();
-        if trimmed.ends_with('/') || trimmed.ends_with('\\') {
-            return Err("--file selector must not end with a separator".to_string());
-        }
-        let segments = split_path_segments(trimmed);
+        let stripped = trimmed
+            .strip_suffix('/')
+            .or_else(|| trimmed.strip_suffix('\\'))
+            .unwrap_or(trimmed);
+        let segments = split_path_segments(stripped);
         if segments.is_empty() {
             return Err("--file selector must not be empty".to_string());
         }

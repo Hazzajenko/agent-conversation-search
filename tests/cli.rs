@@ -4229,7 +4229,7 @@ fn file_rejects_an_empty_selector_with_a_clear_error() {
         &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
     );
 
-    for selector in ["", "   ", "/", "docs/"] {
+    for selector in ["", "   ", "/"] {
         agsearch_command()
             .current_dir(workdir.path())
             .arg("--claude-dir")
@@ -4240,6 +4240,23 @@ fn file_rejects_an_empty_selector_with_a_clear_error() {
             .failure()
             .stderr(predicates::str::contains("--file"));
     }
+}
+
+#[test]
+fn file_trailing_separator_is_ignored() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"docs/x.md"}"#),
+    );
+
+    cmd.arg("--file")
+        .arg("x.md/")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("docs/x.md"));
 }
 
 #[test]

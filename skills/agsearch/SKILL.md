@@ -64,8 +64,10 @@ you. Result trailers print the exact `show` command to run next.
   query becomes an optional filter on command/error. `--full` prints whole
   error texts; `--stats` aggregates into a counts table by tool and error
   signature.
+- `agsearch --file <SELECTOR>` — list file Touches by File Selector instead of
+  searching text. See `agsearch --help` for selector rules.
 
-Search, `--failed`, and `--stats` cover **past** Sessions. They exclude the
+Search, `--failed`, `--stats`, and `--file` cover **past** Sessions. They exclude the
 Current Session Family, which contains the Current Session and its subagent
 threads. This prevents a search from returning the Prompt that started the
 search.

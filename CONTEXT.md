@@ -85,8 +85,8 @@ A tool call in a Session that reads or writes a specific file. Has a kind: `read
 _Avoid_: access, hit, reference, usage.
 
 **File Selector**:
-The path fragment a user passes to select Touches. Matches when its segments equal the trailing segments of the Touch's path, case-insensitive, with `/` and `\` treated as equal. `CLAUDE.md` matches every `CLAUDE.md` in every Project; `docs/adr/0001-x.md` matches only that trailing path.
-_Avoid_: file filter, glob, pattern.
+The path fragment a user passes to select Touches. Matches when its segments equal the trailing segments of the Touch's path, case-insensitive, with `/` and `\` treated as equal. A trailing separator is ignored (`docs/` ≡ `docs`); a selector that is empty after trimming and stripping is rejected. `CLAUDE.md` matches every `CLAUDE.md` in every Project; `docs/adr/0001-x.md` matches only that trailing path.
+_Avoid_: file filter, glob, pattern, file.
 
 **Usage**:
 The token counts a Harness records for one model call: input, output, cache-write and cache-read tokens, plus the model name. Claude Code attaches it to each assistant Message; Codex records it as a `token_count` Record per turn. A Session's Usage is the sum over its calls; a family's Usage is the sum over the parent Session and its subagent threads. Tokens only — no money is involved.
