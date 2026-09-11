@@ -1708,7 +1708,8 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
 
 /// Which kind of [`Touch`] it is. `Read` comes from the `Read`
 /// tool; `Write` comes from `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`
-/// (Claude Code). Found by structure, like a Failure, not by a Query.
+/// (Claude Code) and `apply_patch` (Codex). Found by structure, like a
+/// Failure, not by a Query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchKind {
     Read,
@@ -1732,10 +1733,11 @@ pub struct Touch {
     pub turn: Option<usize>,
     /// Whether the call read or wrote the file.
     pub kind: TouchKind,
-    /// The tool that touched the file (e.g. `Read`, `Edit`).
+    /// The tool that touched the file (e.g. `Read`, `Edit`, `apply_patch`).
     pub tool: String,
     /// The raw file path from the tool input (`file_path`, or `notebook_path`
-    /// for `NotebookEdit`).
+    /// for `NotebookEdit`; one file header in the patch body for Codex
+    /// `apply_patch`).
     pub path: String,
     /// Whether the call failed (its `tool_result` was `is_error`), joined via
     /// `tool_use_id` like a Failure. A failed Touch is still listed, flagged.
@@ -1818,6 +1820,78 @@ fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> 
     input.get(key)?.as_str().map(str::to_string)
 }
 
+/// The file paths a Codex `apply_patch` call touches: one per `Add` / `Update`
+/// / `Delete File:` header in the patch body, kind always `Write`. Paths are
+/// raw strings from the patch; matching applies the same trailing-segment rule
+/// with no cwd resolution.
+fn codex_patch_paths(input: &serde_json::Value) -> Vec<String> {
+    let mut candidates: Vec<&str> = Vec::new();
+    match input {
+        serde_json::Value::String(text) => candidates.push(text.as_str()),
+        serde_json::Value::Object(map) => {
+            let mut pushed_known = false;
+            for key in [
+                "patch",
+                "input",
+                "content",
+                "text",
+                "diff",
+                "patch_body",
+                "patch_text",
+                "body",
+            ] {
+                if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
+                    candidates.push(text);
+                    pushed_known = true;
+                }
+            }
+            if !pushed_known {
+                for value in map.values() {
+                    if let Some(text) = value.as_str() {
+                        candidates.push(text);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut paths = Vec::new();
+    for text in candidates {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            for prefix in ["*** Add File:", "*** Update File:", "*** Delete File:"] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let path = rest.trim();
+                    if !path.is_empty() {
+                        paths.push(path.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// All `(kind, path)` Touches one `tool_use` contributes. Claude Code tools
+/// yield at most one; Codex `apply_patch` yields one per file named in the
+/// patch body; anything else (Glob, Grep, Bash, Codex shell) yields none.
+fn touches_for_tool_use(name: &str, input: &serde_json::Value) -> Vec<(TouchKind, String)> {
+    if name == "apply_patch" {
+        return codex_patch_paths(input)
+            .into_iter()
+            .map(|path| (TouchKind::Write, path))
+            .collect();
+    }
+    let Some(kind) = touch_kind_for_tool(name) else {
+        return Vec::new();
+    };
+    let Some(path) = touch_path_for_tool(name, input) else {
+        return Vec::new();
+    };
+    vec![(kind, path)]
+}
+
 /// Whether a parsed Session contains at least one Touch of the selected file
 /// (issue 27's pre-filter for combined `--file QUERY` search). Mirrors the
 /// selection rules of [`touches_in_parsed_session`] — same tools, same path
@@ -1837,19 +1911,15 @@ fn parsed_session_has_touch(
             let AssistantBlock::ToolUse { name, input, .. } = block else {
                 continue;
             };
-            let Some(kind) = touch_kind_for_tool(name) else {
-                continue;
-            };
-            if written_only && kind != TouchKind::Write {
-                continue;
+            for (kind, path) in touches_for_tool_use(name, input) {
+                if written_only && kind != TouchKind::Write {
+                    continue;
+                }
+                if path.is_empty() || !selector.matches(&path) {
+                    continue;
+                }
+                return true;
             }
-            let Some(path) = touch_path_for_tool(name, input) else {
-                continue;
-            };
-            if path.is_empty() || !selector.matches(&path) {
-                continue;
-            }
-            return true;
         }
     }
     false
@@ -1950,26 +2020,22 @@ fn touches_in_parsed_session(
             let AssistantBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
-            let Some(kind) = touch_kind_for_tool(name) else {
-                continue;
-            };
-            if written_only && kind != TouchKind::Write {
-                continue;
+            for (kind, path) in touches_for_tool_use(name, input) {
+                if written_only && kind != TouchKind::Write {
+                    continue;
+                }
+                if path.is_empty() || !selector.matches(&path) {
+                    continue;
+                }
+                let failed = id.as_ref().is_some_and(|id| failed_ids.contains(id));
+                touches.push(Touch {
+                    turn: record.turn,
+                    kind,
+                    tool: name.clone(),
+                    path,
+                    failed,
+                });
             }
-            let Some(path) = touch_path_for_tool(name, input) else {
-                continue;
-            };
-            if path.is_empty() || !selector.matches(&path) {
-                continue;
-            }
-            let failed = id.as_ref().is_some_and(|id| failed_ids.contains(id));
-            touches.push(Touch {
-                turn: record.turn,
-                kind,
-                tool: name.clone(),
-                path,
-                failed,
-            });
         }
     }
 

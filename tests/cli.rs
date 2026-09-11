@@ -4886,3 +4886,189 @@ fn file_query_composes_with_session_limit_and_files_flag() {
         .stdout(predicates::str::contains("+1 more"))
         .stdout(predicates::str::contains("agsearch show"));
 }
+
+// --- Codex apply_patch produces write Touches (issue 28) ---
+
+/// One Codex `apply_patch` tool call carrying `patch` in its input.
+fn codex_apply_patch(call_id: &str, patch: &str) -> String {
+    let input = serde_json::json!({"patch": patch}).to_string();
+    serde_json::json!({
+        "timestamp": "2026-08-28T10:03:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "call_id": call_id,
+            "name": "apply_patch",
+            "input": input,
+        }
+    })
+    .to_string()
+}
+
+/// One Codex shell tool call (never a Touch, even with a file-like command).
+fn codex_shell(call_id: &str, cmd: &str) -> String {
+    let input = serde_json::json!({"cmd": cmd}).to_string();
+    serde_json::json!({
+        "timestamp": "2026-08-28T10:03:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "call_id": call_id,
+            "name": "shell",
+            "input": input,
+        }
+    })
+    .to_string()
+}
+
+fn codex_output(call_id: &str, output: serde_json::Value) -> String {
+    serde_json::json!({
+        "timestamp": "2026-08-28T10:04:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
+    })
+    .to_string()
+}
+
+fn codex_message(text: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-08-28T10:05:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }
+    })
+    .to_string()
+}
+
+fn codex_file_command(workdir: &std::path::Path, codex_dir: &std::path::Path) -> Command {
+    let mut cmd = agsearch_command();
+    cmd.current_dir(workdir)
+        .arg("--claude-dir")
+        .arg(workdir.join("missing-claude"))
+        .arg("--codex-dir")
+        .arg(codex_dir)
+        .arg("--harness")
+        .arg("codex");
+    cmd
+}
+
+#[test]
+fn codex_apply_patch_touching_two_files_yields_two_write_touches() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let patch = "*** Begin Patch\n*** Add File: a/x.md\n+hello\n*** Update File: b/x.md\n@@\n-old\n+new\n*** End Patch\n";
+    let call = codex_apply_patch("patch-1", patch);
+    let done = codex_message("done");
+    plant_codex_session(
+        codex.path(),
+        "c0de0028-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[call.as_str(), done.as_str()],
+    );
+
+    codex_file_command(workdir.path(), codex.path())
+        .arg("-m")
+        .arg("0")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("codex · c0de0028"))
+        .stdout(predicates::str::contains("write apply_patch"))
+        .stdout(predicates::str::contains("a/x.md"))
+        .stdout(predicates::str::contains("b/x.md"));
+
+    // Write Touches survive --written.
+    codex_file_command(workdir.path(), codex.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("a/x.md"))
+        .stdout(predicates::str::contains("b/x.md"));
+}
+
+#[test]
+fn codex_apply_patch_add_update_and_delete_hunks_all_count() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let patch = "*** Begin Patch\n*** Add File: docs/added.md\n+new\n*** Update File: docs/changed.md\n@@\n-old\n+new\n*** Delete File: docs/removed.md\n*** End Patch\n";
+    let call = codex_apply_patch("patch-1", patch);
+    let done = codex_message("done");
+    plant_codex_session(
+        codex.path(),
+        "c0de0029-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[call.as_str(), done.as_str()],
+    );
+
+    for selector in ["added.md", "changed.md", "removed.md"] {
+        codex_file_command(workdir.path(), codex.path())
+            .arg("--file")
+            .arg(selector)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("codex · c0de0029"))
+            .stdout(predicates::str::contains("write apply_patch"));
+    }
+}
+
+#[test]
+fn codex_shell_calls_produce_no_touch() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let shell = codex_shell("shell-1", "cat x.md");
+    let done = codex_message("done");
+    plant_codex_session(
+        codex.path(),
+        "c0de0030-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[shell.as_str(), done.as_str()],
+    );
+
+    codex_file_command(workdir.path(), codex.path())
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}
+
+#[test]
+fn codex_failed_apply_patch_is_listed_and_flagged() {
+    let workdir = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let patch = "*** Begin Patch\n*** Update File: docs/x.md\n@@\n-old\n+new\n*** End Patch\n";
+    let call = codex_apply_patch("patch-1", patch);
+    let output = codex_output(
+        "patch-1",
+        serde_json::json!({"exit_code": 1, "output": "patch failed"}),
+    );
+    let done = codex_message("done");
+    plant_codex_session(
+        codex.path(),
+        "c0de0031-0000-0000-0000-000000000000",
+        workdir.path(),
+        "user",
+        &[call.as_str(), output.as_str(), done.as_str()],
+    );
+
+    codex_file_command(workdir.path(), codex.path())
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("write apply_patch"))
+        .stdout(predicates::str::contains("FAILED"));
+}
