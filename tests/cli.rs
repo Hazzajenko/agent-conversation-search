@@ -3707,3 +3707,609 @@ fn export_reports_ambiguity_like_current() {
         .stderr(predicates::str::contains("ambiguous"))
         .stderr(predicates::str::contains("--harness"));
 }
+
+// --- --file lists Touches by File Selector (issue 25, Claude Code) ---
+
+/// One assistant `tool_use` line for a Touch-capable tool.
+fn touch_use(id: &str, name: &str, input_json: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input_json}}}]}}}}"#
+    )
+}
+
+#[test]
+fn file_lists_touches_grouped_by_session_with_handoff_shape() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
+        touch_use("t2", "Edit", r#"{"file_path":"docs/x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        // Same id-and-turn handoff shape as Matches: header + turn brackets.
+        .stdout(predicates::str::contains("claude · "))
+        .stdout(predicates::str::contains("[1] read Read"))
+        .stdout(predicates::str::contains("[2] write Edit"))
+        .stdout(predicates::str::contains("E:\\p\\x.md"))
+        .stdout(predicates::str::contains("docs/x.md"));
+}
+
+#[test]
+fn file_suffix_matches_windows_unix_and_relative_paths() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
+        touch_use("t2", "Read", r#"{"file_path":"/home/u/p/x.md"}"#),
+        touch_use("t3", "Read", r#"{"file_path":"docs/x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("E:\\p\\x.md"))
+        .stdout(predicates::str::contains("/home/u/p/x.md"))
+        .stdout(predicates::str::contains("docs/x.md"));
+}
+
+#[test]
+fn file_multi_segment_selector_does_not_match_a_different_parent() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Read", r#"{"file_path":"docs/x.md"}"#),
+        touch_use("t2", "Read", r#"{"file_path":"other/x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("--file")
+        .arg("docs/x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("docs/x.md"))
+        .stdout(predicates::str::contains("other/x.md").not());
+}
+
+#[test]
+fn file_matching_is_case_insensitive_and_separator_agnostic() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = touch_use("t1", "Read", r#"{"file_path":"DOCS\\X.MD"}"#);
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    // Lowercase slash selector matches uppercase backslash Touch.
+    cmd.arg("--file")
+        .arg("docs/x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("DOCS\\X.MD"));
+}
+
+#[test]
+fn file_absolute_selector_matches_only_that_file() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
+        touch_use("t2", "Read", r#"{"file_path":"E:\\other\\x.md"}"#),
+    ]
+    .join("\n");
+
+    // An absolute selector pasted from a tool call selects only that file.
+    agsearch_in(workdir.path(), store.path(), &lines)
+        .arg("--file")
+        .arg("E:\\p\\x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("E:\\p\\x.md"))
+        .stdout(predicates::str::contains("E:\\other\\x.md").not());
+}
+
+#[test]
+fn file_kind_mapping_covers_all_write_tools_and_excludes_non_touch_tools() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("r1", "Read", r#"{"file_path":"x.md"}"#),
+        touch_use("e1", "Edit", r#"{"file_path":"x.md"}"#),
+        touch_use("w1", "Write", r#"{"file_path":"x.md"}"#),
+        touch_use("m1", "MultiEdit", r#"{"file_path":"x.md"}"#),
+        touch_use("n1", "NotebookEdit", r#"{"notebook_path":"x.md"}"#),
+        // Non-Touch tools that must never produce a Touch, even with file-like inputs.
+        touch_use("g1", "Glob", r#"{"pattern":"x.md"}"#),
+        touch_use("g2", "Grep", r#"{"pattern":"x.md"}"#),
+        touch_use("b1", "Bash", r#"{"command":"cat x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("-m")
+        .arg("0")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("read Read"))
+        .stdout(predicates::str::contains("write Edit"))
+        .stdout(predicates::str::contains("write Write"))
+        .stdout(predicates::str::contains("write MultiEdit"))
+        .stdout(predicates::str::contains("write NotebookEdit"))
+        .stdout(predicates::str::contains("Glob").not())
+        .stdout(predicates::str::contains("Grep").not())
+        .stdout(predicates::str::contains("cat x.md").not());
+}
+
+#[test]
+fn file_failed_touch_is_listed_and_flagged() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Edit", r#"{"file_path":"x.md"}"#),
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"String to replace not found"}]}}"#.to_string(),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("write Edit"))
+        .stdout(predicates::str::contains("FAILED"));
+}
+
+#[test]
+fn file_rows_are_capped_by_max_per_session_with_a_show_hint() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        touch_use("t2", "Read", r#"{"file_path":"x.md"}"#),
+        touch_use("t3", "Read", r#"{"file_path":"x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("-m")
+        .arg("1")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[1] read Read"))
+        .stdout(predicates::str::contains("[2]").not())
+        .stdout(predicates::str::contains("+2 more"))
+        .stdout(predicates::str::contains("agsearch show"));
+}
+
+#[test]
+fn file_files_flag_prints_only_session_paths() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    cmd.arg("-l")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session.jsonl"))
+        .stdout(predicates::str::contains("[1]").not())
+        .stdout(predicates::str::contains("read Read").not());
+}
+
+#[test]
+fn file_groups_by_session_newest_first() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-01-01T10:00:00.000Z"}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-06-01T10:00:00.000Z"}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"))
+        .stdout(predicates::str::contains("bbbbbbbb"))
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("bbbbbbbb").unwrap() < out.find("aaaaaaaa").unwrap()
+        }));
+}
+
+#[test]
+fn file_session_scope_searches_only_the_named_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "aaaa1111-0000-0000-0000-000000000000",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "bbbb2222-0000-0000-0000-000000000000",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--session")
+        .arg("aaaa1111")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaa1111"))
+        .stdout(predicates::str::contains("bbbb2222").not());
+}
+
+/// Two Sessions with Touches in the current Project, one of which is Current.
+/// Short-ids differ so headers are distinguishable.
+fn plant_current_and_earlier_touches(
+    workdir: &std::path::Path,
+    claude: &std::path::Path,
+) -> String {
+    let current_id = "cccccccc-0000-0000-0000-000000000400";
+    plant_claude_session(
+        claude,
+        workdir,
+        current_id,
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-08-02T10:00:00.000Z"}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        claude,
+        workdir,
+        "aaaaaaaa-0000-0000-0000-000000000401",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-08-01T10:00:00.000Z"}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    current_id.to_string()
+}
+
+#[test]
+fn file_session_current_selects_only_the_current_session() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
+
+    agsearch_as_current(workdir.path(), claude.path(), &current_id)
+        .arg("--session")
+        .arg("current")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]));
+}
+
+#[test]
+fn file_excludes_the_current_family_by_default_and_restores_with_include_current() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
+
+    // Default: only earlier work.
+    agsearch_as_current(workdir.path(), claude.path(), &current_id)
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]).not());
+
+    // Opt-in: the family returns.
+    agsearch_as_current(workdir.path(), claude.path(), &current_id)
+        .arg("--include-current")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&current_id[..8]));
+}
+
+#[test]
+fn file_all_widens_scope_beyond_the_current_project() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-other",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    // Default current-project scope sees nothing.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--all")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("E--projects-other"));
+}
+
+#[test]
+fn file_since_excludes_older_sessions() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let project = store
+        .path()
+        .join("projects")
+        .join(agsearch::encode_project_dir(
+            &workdir.path().to_string_lossy(),
+        ));
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("newish.jsonl"),
+        [
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-06-01T10:00:00.000Z"}"#,
+            &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fs::write(
+        project.join("oldie.jsonl"),
+        [
+            r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-01-01T10:00:00.000Z"}"#,
+            &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--since")
+        .arg("2026-05-01")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("newish"))
+        .stdout(predicates::str::contains("oldie").not());
+}
+
+#[test]
+fn file_harness_claude_lists_claude_touches_and_codex_lists_none() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    let command = |harness: &str| {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--harness")
+            .arg(harness)
+            .arg("--file")
+            .arg("x.md");
+        command
+    };
+
+    command("claude")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"));
+    command("codex")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}
+
+#[test]
+fn file_rejects_failed_and_stats_with_a_clear_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let _ = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    // Build fresh commands: agsearch_in plants once; reuse store for each run.
+    let run = |extra: &[&str]| {
+        let mut cmd = agsearch_command();
+        cmd.current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path())
+            .arg("--file")
+            .arg("x.md");
+        for flag in extra {
+            cmd.arg(flag);
+        }
+        cmd
+    };
+
+    run(&["--failed"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+    run(&["--stats"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
+fn file_rejects_a_repeated_flag_with_a_clear_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let _ = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("--file")
+        .arg("y.md")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--file"));
+}
+
+#[test]
+fn file_rejects_an_empty_selector_with_a_clear_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let _ = agsearch_in(
+        workdir.path(),
+        store.path(),
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    for selector in ["", "   ", "/", "docs/"] {
+        agsearch_command()
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path())
+            .arg("--file")
+            .arg(selector)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("--file"));
+    }
+}
+
+#[test]
+fn file_reports_the_standard_empty_message_when_nothing_touches() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut cmd = agsearch_in(
+        workdir.path(),
+        store.path(),
+        r#"{"type":"user","message":{"role":"user","content":"no tools here"}}"#,
+    );
+
+    cmd.arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}
+
+#[test]
+fn sessions_and_projects_reject_file() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir_all(store.path().join("projects")).unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("sessions")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .failure();
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("projects")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn file_project_flag_targets_a_named_project() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_project(
+        store.path(),
+        "E--projects-wanted",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+    plant_project(
+        store.path(),
+        "E--projects-other",
+        &touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--project")
+        .arg("wanted")
+        .arg("--file")
+        .arg("x.md")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("E--projects-wanted"))
+        .stdout(predicates::str::contains("E--projects-other").not());
+}
