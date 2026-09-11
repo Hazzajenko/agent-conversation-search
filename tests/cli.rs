@@ -4513,3 +4513,376 @@ fn written_keeps_writes_in_session_current() {
         .stdout(predicates::str::contains("write Edit"))
         .stdout(predicates::str::contains("read Read").not());
 }
+
+// --- --file combined with a Query restricts Matches to touching Sessions (issue 27) ---
+
+#[test]
+fn file_query_returns_matches_only_from_touching_sessions() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio in touching session"}}"#
+                .to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio in other session"}}"#
+                .to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"y.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("tokio in touching session"))
+        .stdout(predicates::str::contains("tokio in other session").not());
+}
+
+#[test]
+fn file_query_omits_touching_sessions_with_no_match() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio here"}}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"unrelated content"}}"#
+                .to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"))
+        .stdout(predicates::str::contains("bbbbbbbb").not())
+        .stdout(predicates::str::contains("tokio here"));
+}
+
+#[test]
+fn file_query_output_uses_the_standard_match_shape() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"{"type":"user","message":{"role":"user","content":"tokio needle here"}}"#.to_string(),
+        touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    ]
+    .join("\n");
+    let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
+
+    cmd.arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        // Same header + turn + role + snippet shape as a plain search, not the
+        // Touch row shape (`read Read <path>` never appears).
+        .stdout(predicates::str::contains("claude · "))
+        .stdout(predicates::str::contains("[1] user:"))
+        .stdout(predicates::str::contains("tokio needle here"))
+        .stdout(predicates::str::contains("read Read").not());
+}
+
+#[test]
+fn file_query_written_restricts_to_write_touches() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio read touch"}}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio write touch"}}"#
+                .to_string(),
+            touch_use("t1", "Edit", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    // Without --written both touching Sessions match.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"))
+        .stdout(predicates::str::contains("bbbbbbbb"));
+
+    // With --written only the Session with a write Touch remains.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bbbbbbbb"))
+        .stdout(predicates::str::contains("aaaaaaaa").not())
+        .stdout(predicates::str::contains("tokio write touch"));
+}
+
+#[test]
+fn file_query_keeps_thinking_and_tools_meaning() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // One Session whose only Match is in thinking, one whose only Match is in
+    // tool content; both touch the selected file.
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering the zylophone problem"}]}}"#.to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"zylophone --tune"}}]}}"#.to_string(),
+            touch_use("t2", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    // By default neither thinking nor tool content matches.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--file")
+        .arg("x.md")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+
+    // --thinking finds only the thinking Session.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--thinking")
+        .arg("--file")
+        .arg("x.md")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"))
+        .stdout(predicates::str::contains("bbbbbbbb").not())
+        .stdout(predicates::str::contains("thinking"));
+
+    // --tools finds only the tool Session; --all-content finds both.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--tools")
+        .arg("--file")
+        .arg("x.md")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bbbbbbbb"))
+        .stdout(predicates::str::contains("aaaaaaaa").not());
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--all-content")
+        .arg("--file")
+        .arg("x.md")
+        .arg("zylophone")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaaaaaa"))
+        .stdout(predicates::str::contains("bbbbbbbb"));
+}
+
+#[test]
+fn file_query_keeps_regex_and_case_meaning() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"{"type":"user","message":{"role":"user","content":"reading the borrow checker docs"}}"#
+            .to_string(),
+        touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    ]
+    .join("\n");
+    let _ = agsearch_in(workdir.path(), store.path(), &lines);
+
+    let run = |extra: &[&str], query: &str| {
+        let mut cmd = agsearch_command();
+        cmd.current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(store.path());
+        for flag in extra {
+            cmd.arg(flag);
+        }
+        cmd.arg("--file").arg("x.md").arg(query);
+        cmd
+    };
+
+    // Literal mode treats the pattern as plain text.
+    run(&[], "bo+rrow")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+    // Regex mode matches the pattern, still restricted to touching Sessions.
+    run(&["--regex"], "bo+rrow")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("borrow checker"));
+    // Case-insensitive by default, sensitive with -s.
+    run(&[], "BORROW")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("borrow checker"));
+    run(&["--case-sensitive"], "BORROW")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No matches."));
+}
+
+#[test]
+fn file_query_composes_with_session_limit_and_files_flag() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "aaaa1111-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio in session A"}}"#
+                .to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        "bbbb2222-0000-0000-0000-000000000000",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"tokio in session B"}}"#
+                .to_string(),
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    // --session narrows the combined search to one Session.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--session")
+        .arg("aaaa1111")
+        .arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("tokio in session A"))
+        .stdout(predicates::str::contains("tokio in session B").not());
+
+    // -l prints only the touching Session paths with Matches.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("--all")
+        .arg("-l")
+        .arg("--file")
+        .arg("x.md")
+        .arg("tokio")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("aaaa1111"))
+        .stdout(predicates::str::contains("bbbb2222"))
+        .stdout(predicates::str::contains("tokio in session").not());
+
+    // -m caps the Matches per Session with the standard hint.
+    let capped_dir = tempfile::tempdir().unwrap();
+    let capped_store = tempfile::tempdir().unwrap();
+    let capped_lines = [
+        r#"{"type":"user","message":{"role":"user","content":"zebra one"}}"#.to_string(),
+        r#"{"type":"user","message":{"role":"user","content":"zebra two"}}"#.to_string(),
+        touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+    ]
+    .join("\n");
+    let _ = agsearch_in(capped_dir.path(), capped_store.path(), &capped_lines);
+    let mut capped = agsearch_command();
+    capped
+        .current_dir(capped_dir.path())
+        .arg("--claude-dir")
+        .arg(capped_store.path())
+        .arg("-m")
+        .arg("1")
+        .arg("--file")
+        .arg("x.md")
+        .arg("zebra");
+    capped
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("zebra one"))
+        .stdout(predicates::str::contains("+1 more"))
+        .stdout(predicates::str::contains("agsearch show"));
+}

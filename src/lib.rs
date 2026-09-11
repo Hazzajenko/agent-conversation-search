@@ -308,6 +308,56 @@ pub fn search_store_session(
         .collect()
 }
 
+/// Search Sessions enumerated by every configured Harness adapter, keeping only
+/// Sessions that contain a Touch of the selected file (issue 27). When
+/// `written_only` is set, only Sessions with a write Touch are kept. Sessions
+/// with a Touch but no text Match are omitted; the surviving Matches render
+/// with the standard Match shape, unchanged.
+pub fn search_stores_with_file(
+    stores: &Stores,
+    scope: &Scope,
+    matcher: &Matcher,
+    content: &ContentSet,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionMatches> {
+    let sessions = stores.sessions(scope);
+    let mut results: Vec<SessionMatches> = sessions
+        .par_iter()
+        .filter_map(|handle| {
+            let parsed = stores.parse(handle)?;
+            if !parsed_session_has_touch(&parsed, selector, written_only) {
+                return None;
+            }
+            search_parsed_session(&handle.info, parsed, matcher, content)
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results
+}
+
+/// Search one resolved Session, keeping it only when it contains a Touch of
+/// the selected file (the `--session` form of issue 27).
+pub fn search_store_session_with_file(
+    stores: &Stores,
+    handle: &SessionHandle,
+    matcher: &Matcher,
+    content: &ContentSet,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionMatches> {
+    stores
+        .parse(handle)
+        .filter(|parsed| parsed_session_has_touch(parsed, selector, written_only))
+        .and_then(|parsed| search_parsed_session(&handle.info, parsed, matcher, content))
+        .into_iter()
+        .collect()
+}
+
 fn search_parsed_session(
     info: &SessionIdentity,
     parsed: session::Session,
@@ -1766,6 +1816,43 @@ fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> 
         "file_path"
     };
     input.get(key)?.as_str().map(str::to_string)
+}
+
+/// Whether a parsed Session contains at least one Touch of the selected file
+/// (issue 27's pre-filter for combined `--file QUERY` search). Mirrors the
+/// selection rules of [`touches_in_parsed_session`] — same tools, same path
+/// extraction, same selector — but skips the failure join and Touch building
+/// since only presence matters. When `written_only` is set, only write Touches
+/// count.
+fn parsed_session_has_touch(
+    session: &session::Session,
+    selector: &FileSelector,
+    written_only: bool,
+) -> bool {
+    for record in &session.records {
+        let RecordKind::Assistant(blocks) = &record.kind else {
+            continue;
+        };
+        for block in blocks {
+            let AssistantBlock::ToolUse { name, input, .. } = block else {
+                continue;
+            };
+            let Some(kind) = touch_kind_for_tool(name) else {
+                continue;
+            };
+            if written_only && kind != TouchKind::Write {
+                continue;
+            }
+            let Some(path) = touch_path_for_tool(name, input) else {
+                continue;
+            };
+            if path.is_empty() || !selector.matches(&path) {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// All Touches found within a single Session, grouped with the metadata needed
