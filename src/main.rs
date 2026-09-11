@@ -8,12 +8,13 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use agsearch::{
     export_timestamp_now, failed_in_store_session, failed_in_stores, format_current,
     format_export_markdown, format_failures, format_paths, format_projects, format_results,
-    format_session_paths, format_sessions, format_stats, format_transcript_for_harness,
-    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
-    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
-    resolve_current_context, resolve_current_session, resolve_current_thread,
-    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
-    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
+    format_session_paths, format_sessions, format_stats, format_touch_paths, format_touches,
+    format_transcript_for_harness, format_windowed_for_harness, group_failures,
+    list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
+    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
+    resolve_current_thread, resolve_store_session_prefix, search_store_session, search_stores,
+    since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores, ContentSet,
+    FileSelector, Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -157,7 +158,7 @@ struct SearchArgs {
     /// Aggregate failures into a counts table by tool and error signature
     /// instead of listing them (the aggregate counterpart to --failed). Implies
     /// failure analysis and inherits scope, --since, and the optional Query.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "file")]
     stats: bool,
 
     /// Only Sessions touched since this point: a relative duration (3d, 2w, 1h)
@@ -167,9 +168,16 @@ struct SearchArgs {
 
     /// Include the Current Session Family, which multi-Session analysis
     /// excludes by default so a search cannot return the conversation that
-    /// asked for it. Applies to text search, --failed, and --stats.
+    /// asked for it. Applies to text search, --failed, --stats, and --file.
     #[arg(long)]
     include_current: bool,
+
+    /// List file Touches by File Selector instead of searching text. With no
+    /// Query, lists every Touch of the selected file grouped by Session in the
+    /// same id-and-turn handoff shape as Matches. Cannot be used with --failed
+    /// or --stats.
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["failed", "stats"])]
+    file: Option<String>,
 }
 
 /// Arguments for the `show` verb.
@@ -418,8 +426,9 @@ fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Run the `search` verb: resolve the scope, then either list Failures by
-/// structure (`--failed`, Query optional) or search text (Query required).
+/// Run the `search` verb: resolve the scope, then either list Touches by
+/// structure (`--file`, no Query), list Failures by structure (`--failed`,
+/// Query optional), or search text (Query required).
 fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
@@ -502,6 +511,41 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     } else {
         stores.excluding_current_family()
     };
+
+    // --file lists Touches by structure (no Query). A Query with --file is
+    // issue 27; reject it here so the combination cannot silently do the wrong
+    // thing. --failed/--stats with --file are rejected by clap conflicts.
+    if let Some(selector_str) = args.file.as_deref() {
+        if matcher.is_some() {
+            eprintln!("agsearch: --file cannot be used with a query");
+            return ExitCode::FAILURE;
+        }
+        let selector = match FileSelector::parse(selector_str) {
+            Ok(selector) => selector,
+            Err(msg) => {
+                eprintln!("agsearch: {msg}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut results = match &session_path {
+            Some(session) => touches_in_store_session(&stores, session, &selector),
+            None => touches_in_stores(
+                &stores,
+                &build_scope(args.all, args.project.as_deref(), &cwd),
+                &selector,
+            ),
+        };
+        if let Some(cutoff) = cutoff {
+            results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
+        }
+        let rendered = if args.files {
+            format_touch_paths(&results)
+        } else {
+            format_touches(&results, args.max_per_session)
+        };
+        let _ = write!(anstream::stdout(), "{rendered}");
+        return ExitCode::SUCCESS;
+    }
 
     // --stats and --failed share one scan; --stats aggregates, --failed lists.
     if args.failed || args.stats {
