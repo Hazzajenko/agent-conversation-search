@@ -55,6 +55,11 @@ pub(crate) struct SessionMeta {
     pub branch: Option<String>,
     /// The real working directory (`cwd`), first one seen.
     pub cwd: Option<String>,
+    /// The final cumulative Codex totals, for the usage-breakdown mismatch
+    /// check (issue 31). Normalized like per-call Usage (non-cached input),
+    /// model and call id unset. `None` when the Session has no `token_count`
+    /// Records or the final one carries no totals.
+    pub codex_final_total: Option<Usage>,
 }
 
 /// One Block of a user Message's `content` array. User array content is
@@ -86,9 +91,10 @@ pub(crate) enum AssistantBlock {
     },
 }
 
-/// What a [`Record`] is. Only Message and Title Records are kept; noise Records
-/// (`queue-operation`, `mode`, `attachment`, unparseable lines) are skipped —
-/// but the turn counter still ticks past every `user` / `assistant` line.
+/// What a [`Record`] is. Only Message, Title, and Codex usage Records are
+/// kept; noise Records (`queue-operation`, `mode`, `attachment`, unparseable
+/// lines) are skipped — but the turn counter still ticks past every `user` /
+/// `assistant` line.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RecordKind {
     /// A user Message the person typed (string content).
@@ -99,16 +105,30 @@ pub(crate) enum RecordKind {
     Assistant(Vec<AssistantBlock>),
     /// An `ai-title` Record (session metadata, not a turn).
     Title(String),
+    /// A Codex `token_count` event: one model call's token counts, no text.
+    /// Carries [`Usage`] on the Record; ignored by search/show/Transcript
+    /// (like Title), used only by the usage breakdown. Turn is always `None`
+    /// (it never consumes a Transcript turn); the breakdown numbers Codex
+    /// calls by file order instead.
+    CodexTokenCount,
 }
 
 /// Token Usage for one model call (see CONTEXT.md Usage). Carried on each
-/// assistant [`Record`], so every projection (search, show, usage breakdown)
-/// sees the same numbers. Claude Code attaches it to each assistant Message
-/// (`message.usage` plus `message.model` and `message.id`); Codex `token_count`
-/// Records feed the same shape in a later ticket. Token counts are `None` when
-/// the Harness recorded no Usage for the call — the breakdown then shows blank
+/// assistant [`Record`] (Claude Code) or [`RecordKind::CodexTokenCount`]
+/// Record (Codex), so every projection sees the same numbers. Claude Code
+/// attaches it to each assistant Message (`message.usage` plus `message.model`
+/// and `message.id`); Codex `token_count` Records carry `last_token_usage`
+/// with the model from the session meta. Token counts are `None` when the
+/// Harness recorded no Usage for the call — the breakdown then shows blank
 /// numeric cells but still lists the call with its model and preview. Tokens
 /// only, no money.
+///
+/// For Codex, `input` is the *non-cached* input (raw `input_tokens` minus
+/// `cached_input_tokens` minus `cache_write_input_tokens`) so Codex and Claude
+/// totals are comparable for cross-Harness ranking: both sum to
+/// input + cache-write + cache-read + output, matching Codex `total_tokens`
+/// (`input_tokens + output_tokens`, cached subsets). `cache_write` is
+/// `Some(0)` when the file predates `cache_write_input_tokens`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Usage {
     pub input: Option<u64>,
