@@ -4889,9 +4889,9 @@ fn file_query_composes_with_session_limit_and_files_flag() {
 
 // --- Codex apply_patch produces write Touches (issue 28) ---
 
-/// One Codex `apply_patch` tool call carrying `patch` in its input.
+/// One Codex `apply_patch` tool call carrying the raw patch string in its
+/// input, mirroring real rollouts (`payload.input: "*** Begin Patch\n..."`).
 fn codex_apply_patch(call_id: &str, patch: &str) -> String {
-    let input = serde_json::json!({"patch": patch}).to_string();
     serde_json::json!({
         "timestamp": "2026-08-28T10:03:00.000Z",
         "type": "response_item",
@@ -4899,7 +4899,22 @@ fn codex_apply_patch(call_id: &str, patch: &str) -> String {
             "type": "custom_tool_call",
             "call_id": call_id,
             "name": "apply_patch",
-            "input": input,
+            "input": patch,
+        }
+    })
+    .to_string()
+}
+
+/// Same patch via the `function_call.arguments` shape the harness also reads.
+fn codex_apply_patch_via_arguments(call_id: &str, patch: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-08-28T10:03:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": "apply_patch",
+            "arguments": patch,
         }
     })
     .to_string()
@@ -5002,7 +5017,9 @@ fn codex_apply_patch_add_update_and_delete_hunks_all_count() {
     let workdir = tempfile::tempdir().unwrap();
     let codex = tempfile::tempdir().unwrap();
     let patch = "*** Begin Patch\n*** Add File: docs/added.md\n+new\n*** Update File: docs/changed.md\n@@\n-old\n+new\n*** Delete File: docs/removed.md\n*** End Patch\n";
-    let call = codex_apply_patch("patch-1", patch);
+    // Exercise the `function_call.arguments` input shape here (the other
+    // Codex tests use `custom_tool_call.input`).
+    let call = codex_apply_patch_via_arguments("patch-1", patch);
     let done = codex_message("done");
     plant_codex_session(
         codex.path(),
