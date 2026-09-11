@@ -4435,7 +4435,8 @@ fn written_composes_with_files_flag_and_max_per_session() {
         .join("\n"),
     );
 
-    // -l lists only the session left with writes.
+    // -l lists only the session left with writes (session file paths only,
+    // so assert on paths present/absent, not turn brackets).
     agsearch_command()
         .current_dir(workdir.path())
         .arg("--claude-dir")
@@ -4447,8 +4448,7 @@ fn written_composes_with_files_flag_and_max_per_session() {
         .assert()
         .success()
         .stdout(predicates::str::contains("bbbbbbbb"))
-        .stdout(predicates::str::contains("aaaaaaaa").not())
-        .stdout(predicates::str::contains("[2]").not());
+        .stdout(predicates::str::contains("aaaaaaaa").not());
 
     // -m caps the surviving write rows with the standard hint.
     agsearch_command()
@@ -4484,4 +4484,32 @@ fn written_composes_with_session_current() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No matches."));
+}
+
+#[test]
+fn written_keeps_writes_in_session_current() {
+    let workdir = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let current_id = "cccccccc-0000-0000-0000-000000000400";
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        current_id,
+        &[
+            touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
+            touch_use("t2", "Edit", r#"{"file_path":"x.md"}"#),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_as_current(workdir.path(), claude.path(), current_id)
+        .arg("--session")
+        .arg("current")
+        .arg("--file")
+        .arg("x.md")
+        .arg("--written")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("write Edit"))
+        .stdout(predicates::str::contains("read Read").not());
 }
