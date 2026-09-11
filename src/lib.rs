@@ -2083,6 +2083,287 @@ pub fn format_touch_paths(results: &[SessionTouches]) -> String {
     out
 }
 
+// --- usage: per-call token breakdown for one Session ---------------------)
+
+/// One model call's token Usage for the `usage` breakdown (see CONTEXT.md
+/// Usage). A call is one API call: for Claude Code, all Records sharing one
+/// `message.id` collapse to one row and its Usage is counted once. A call with
+/// no Usage still appears, with blank numeric cells, so the reader sees the
+/// call happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCall {
+    /// Transcript turn of the call's first Record (the ADR 0002 coordinate).
+    pub turn: Option<usize>,
+    /// ISO 8601 timestamp of the call's first Record, if any.
+    pub timestamp: Option<String>,
+    /// Model name (`message.model`), if recorded.
+    pub model: Option<String>,
+    /// Token counts, or `None` when the Harness recorded no Usage for this call.
+    pub input: Option<u64>,
+    pub cache_create: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub output: Option<u64>,
+    /// Short preview of the call's first text or tool block, truncated.
+    pub preview: String,
+}
+
+impl UsageCall {
+    /// Total tokens for the call, or `None` when it carries no Usage.
+    pub fn total(&self) -> Option<u64> {
+        match (self.input, self.cache_create, self.cache_read, self.output) {
+            (Some(i), Some(c), Some(r), Some(o)) => {
+                Some(i.saturating_add(c).saturating_add(r).saturating_add(o))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Collect the per-call Usage rows for one parsed Session, in turn order.
+/// Only assistant Records become calls; user Prompts and Titles never do.
+/// Records sharing one call id (Claude `message.id`) group into one call.
+/// Records without a call id each become their own call.
+fn usage_calls_from_session(session: &session::Session) -> Vec<UsageCall> {
+    use std::collections::HashMap;
+
+    // Group assistant Records by call id, preserving first-seen order.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&session::Record>> = HashMap::new();
+    // Records without a call id each get a unique synthetic key.
+    let mut unnamed = 0usize;
+
+    for record in &session.records {
+        let RecordKind::Assistant(_) = &record.kind else {
+            continue;
+        };
+        let key = match record.usage.as_ref().and_then(|u| u.call_id.clone()) {
+            Some(id) => format!("id:{id}"),
+            None => {
+                let k = format!("rec:{unnamed}");
+                unnamed += 1;
+                k
+            }
+        };
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(record);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|key| groups.remove(&key))
+        .map(|records| usage_call_from_group(&records))
+        .collect()
+}
+
+/// Build one [`UsageCall`] from the Records sharing one call id, in file order.
+/// Turn and timestamp come from the first Record carrying each; model and token
+/// counts come from the first Record carrying each, so a group where one Record
+/// lacks `message.usage` still shows the model's name with blank numeric cells.
+/// Preview is the first text or tool block across the group.
+fn usage_call_from_group(records: &[&session::Record]) -> UsageCall {
+    let first = records[0];
+    let turn = first.turn;
+    let timestamp = records.iter().find_map(|r| r.timestamp.clone());
+    let model = records
+        .iter()
+        .find_map(|r| r.usage.as_ref().and_then(|u| u.model.clone()));
+    let input = records
+        .iter()
+        .find_map(|r| r.usage.as_ref().and_then(|u| u.input));
+    let cache_create = records
+        .iter()
+        .find_map(|r| r.usage.as_ref().and_then(|u| u.cache_create));
+    let cache_read = records
+        .iter()
+        .find_map(|r| r.usage.as_ref().and_then(|u| u.cache_read));
+    let output = records
+        .iter()
+        .find_map(|r| r.usage.as_ref().and_then(|u| u.output));
+    let preview = records
+        .iter()
+        .find_map(|r| usage_preview_from_record(r))
+        .unwrap_or_default();
+    UsageCall {
+        turn,
+        timestamp,
+        model,
+        input,
+        cache_create,
+        cache_read,
+        output,
+        preview,
+    }
+}
+
+/// Preview for one Record: its first text or tool block, reusing the Transcript
+/// one-liner rendering truncated to [`TOOL_LINE_MAX`]. Thinking blocks are
+/// skipped; blank text is skipped like `show` does.
+fn usage_preview_from_record(record: &session::Record) -> Option<String> {
+    let RecordKind::Assistant(blocks) = &record.kind else {
+        return None;
+    };
+    for block in blocks {
+        match block {
+            session::AssistantBlock::Text(text) if !text.trim().is_empty() => {
+                return Some(one_line(text, TOOL_LINE_MAX));
+            }
+            session::AssistantBlock::Text(_) => continue,
+            session::AssistantBlock::Thinking(_) => continue,
+            session::AssistantBlock::ToolUse { name, input, .. } => {
+                let name = if name.is_empty() { "tool" } else { name };
+                match session::tool_key_arg(input) {
+                    Some(arg) => return Some(one_line(&format!("→ {name} {arg}"), TOOL_LINE_MAX)),
+                    None => return Some(format!("→ {name}")),
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Collect the per-call Usage rows for one resolved Session.
+pub fn usage_calls_for_session(stores: &Stores, handle: &SessionHandle) -> Option<Vec<UsageCall>> {
+    stores
+        .parse(handle)
+        .map(|parsed| usage_calls_from_session(&parsed))
+}
+
+/// Format a thousands-separated integer (`12345` → `"12,345"`) for the usage
+/// tables. Hand-rolled: the tool otherwise has no number-formatting dependency.
+fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn format_opt_thousands(v: Option<u64>) -> String {
+    v.map(format_thousands).unwrap_or_default()
+}
+
+/// Render the per-call usage breakdown: one row per model call plus a total
+/// line. Default order is turn order (the story); with `sort_total` the rows
+/// flip to biggest-total-first (the leaderboard), with no-Usage calls last.
+/// Numbers use thousands separators; calls with no Usage show blank numeric
+/// cells. Always ends with a `total` line summing the Usage-bearing calls, so
+/// the reader never adds the column themselves.
+pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
+    let mut rows: Vec<&UsageCall> = calls.iter().collect();
+    if sort_total {
+        // Biggest total first; no-Usage (None) sorts last; ties keep turn order.
+        rows.sort_by(|a, b| match (a.total(), b.total()) {
+            (Some(at), Some(bt)) => bt.cmp(&at).then_with(|| a.turn.cmp(&b.turn)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.turn.cmp(&b.turn),
+        });
+    } else {
+        rows.sort_by(|a, b| a.turn.cmp(&b.turn));
+    }
+
+    // Column widths include the header, so short tables still align.
+    let mut w_turn = "turn".len();
+    let mut w_ts = "timestamp".len();
+    let mut w_model = "model".len();
+    let mut w_in = "input".len();
+    let mut w_cw = "cache-write".len();
+    let mut w_cr = "cache-read".len();
+    let mut w_out = "output".len();
+    let mut w_tot = "total".len();
+    // Preview is trailing and unbounded; no padding needed.
+    let mut rendered: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = Vec::with_capacity(rows.len());
+    for c in &rows {
+        let turn = c.turn.map(|t| t.to_string()).unwrap_or_default();
+        let ts = c.timestamp.clone().unwrap_or_default();
+        let model = c.model.clone().unwrap_or_default();
+        let input = format_opt_thousands(c.input);
+        let cw = format_opt_thousands(c.cache_create);
+        let cr = format_opt_thousands(c.cache_read);
+        let out = format_opt_thousands(c.output);
+        let tot = c.total().map(format_thousands).unwrap_or_default();
+        w_turn = w_turn.max(turn.chars().count());
+        w_ts = w_ts.max(ts.chars().count());
+        w_model = w_model.max(model.chars().count());
+        w_in = w_in.max(input.chars().count());
+        w_cw = w_cw.max(cw.chars().count());
+        w_cr = w_cr.max(cr.chars().count());
+        w_out = w_out.max(out.chars().count());
+        w_tot = w_tot.max(tot.chars().count());
+        rendered.push((turn, ts, model, input, cw, cr, out, tot, c.preview.clone()));
+    }
+
+    // Totals sum only Usage-bearing calls; a call with no Usage contributes 0.
+    let (sum_in, sum_cw, sum_cr, sum_out) =
+        calls
+            .iter()
+            .fold((0u64, 0u64, 0u64, 0u64), |(a, b, c, d), call| {
+                (
+                    a.saturating_add(call.input.unwrap_or(0)),
+                    b.saturating_add(call.cache_create.unwrap_or(0)),
+                    c.saturating_add(call.cache_read.unwrap_or(0)),
+                    d.saturating_add(call.output.unwrap_or(0)),
+                )
+            });
+    let sum_tot = sum_in
+        .saturating_add(sum_cw)
+        .saturating_add(sum_cr)
+        .saturating_add(sum_out);
+    let total_calls = calls.len();
+    let call_noun = if total_calls == 1 {
+        "1 call".to_string()
+    } else {
+        format!("{total_calls} calls")
+    };
+    let s_in = format_thousands(sum_in);
+    let s_cw = format_thousands(sum_cw);
+    let s_cr = format_thousands(sum_cr);
+    let s_out = format_thousands(sum_out);
+    let s_tot = format_thousands(sum_tot);
+    w_turn = w_turn.max("total".len());
+    w_in = w_in.max(s_in.chars().count());
+    w_cw = w_cw.max(s_cw.chars().count());
+    w_cr = w_cr.max(s_cr.chars().count());
+    w_out = w_out.max(s_out.chars().count());
+    w_tot = w_tot.max(s_tot.chars().count());
+    // The call count annotates the preview column so numeric columns stay aligned.
+    w_ts = w_ts.max(0);
+    w_model = w_model.max(0);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  preview\n",
+        "turn", "timestamp", "model", "input", "cache-write", "cache-read", "output", "total",
+    ));
+    for (turn, ts, model, input, cw, cr, outv, tot, preview) in rendered {
+        out.push_str(&format!(
+            "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {preview}\n",
+            turn, ts, model, input, cw, cr, outv, tot,
+        ));
+    }
+    out.push_str(&format!(
+        "{:>w_turn$}  {:<w_ts$}  {:<w_model$}  {:>w_in$}  {:>w_cw$}  {:>w_cr$}  {:>w_out$}  {:>w_tot$}  {call_noun}\n",
+        "total", "", "", s_in, s_cw, s_cr, s_out, s_tot,
+    ));
+    out
+}
+
 // --- --since: filtering Sessions by recency ------------------------------
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's

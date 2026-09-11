@@ -5089,3 +5089,399 @@ fn codex_failed_apply_patch_is_listed_and_flagged() {
         .stdout(predicates::str::contains("write apply_patch"))
         .stdout(predicates::str::contains("FAILED"));
 }
+
+// --- usage: per-call breakdown for one Claude Code Session (issue 30) ---
+
+/// Build one Claude `assistant` line carrying Usage, for usage-breakdown fixtures.
+fn claude_usage_assistant(
+    message_id: &str,
+    timestamp: &str,
+    text: &str,
+    input: u64,
+    cache_create: u64,
+    cache_read: u64,
+    output: u64,
+) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": message_id,
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "input_tokens": input,
+                "cache_creation_input_tokens": cache_create,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": output
+            }
+        }
+    })
+    .to_string()
+}
+
+fn claude_user_prompt(text: &str, timestamp: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "timestamp": timestamp,
+        "message": {"role": "user", "content": text}
+    })
+    .to_string()
+}
+
+#[test]
+fn usage_breakdown_lists_calls_in_turn_order_with_total() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "aaaaaaaa-1111-2222-3333-444444444444";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("first prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_0001",
+                "2026-08-20T04:00:10.000Z",
+                "first call preview alpha",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+            claude_user_prompt("second prompt", "2026-08-20T04:00:15.000Z"),
+            claude_usage_assistant(
+                "msg_0002",
+                "2026-08-20T04:00:20.000Z",
+                "second call preview beta",
+                5,
+                500,
+                40000,
+                12000,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        // Header plus both previews and the total line.
+        .stdout(predicates::str::contains("turn"))
+        .stdout(predicates::str::contains("first call preview alpha"))
+        .stdout(predicates::str::contains("second call preview beta"))
+        .stdout(predicates::str::contains("total"))
+        .stdout(predicates::str::contains("2 calls"))
+        // Thousands separators on the large counts.
+        .stdout(predicates::str::contains("30,000"))
+        .stdout(predicates::str::contains("40,000"))
+        .stdout(predicates::str::contains("12,000"))
+        // Totals: input 15, cache-write 2,500, cache-read 70,000,
+        // output 12,050, total 84,565.
+        .stdout(predicates::str::contains("2,500"))
+        .stdout(predicates::str::contains("70,000"))
+        .stdout(predicates::str::contains("84,565"))
+        // Default is turn order: the first call precedes the second.
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("first call preview alpha").unwrap()
+                < out.find("second call preview beta").unwrap()
+        }));
+}
+
+#[test]
+fn usage_breakdown_counts_shared_message_id_once() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "bbbbbbbb-1111-2222-3333-444444444444";
+    // One API call written as three Records sharing one message.id (thinking,
+    // text, tool_use) with identical Usage, plus a second distinct call.
+    let shared_id = "msg_shared_0001";
+    let thinking = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:10.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "thinking", "thinking": "planning the fix"}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    let text = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:11.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "text", "text": "shared call preview gamma"}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    let tool = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:12.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": shared_id,
+            "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo test"}}],
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 40000, "output_tokens": 12000}
+        }
+    })
+    .to_string();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            thinking,
+            text,
+            tool,
+            claude_usage_assistant(
+                "msg_0002",
+                "2026-08-20T04:00:20.000Z",
+                "other call preview delta",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        // The shared call appears once (its first text block wins the preview).
+        .stdout(predicates::str::contains("shared call preview gamma"))
+        .stdout(predicates::str::contains("other call preview delta"))
+        .stdout(predicates::str::contains("2 calls"))
+        // Counted once: input 5+10=15, cache-write 500+2000=2,500,
+        // cache-read 40000+30000=70,000, output 12000+50=12,050.
+        // Triple-counting would give 25 / 3,500 / 150,000 / 36,050.
+        .stdout(predicates::str::contains("2,500"))
+        .stdout(predicates::str::contains("70,000"))
+        .stdout(predicates::str::contains("84,565"))
+        .stdout(predicates::function::function(|out: &str| {
+            out.matches("shared call preview gamma").count() == 1
+        }));
+}
+
+#[test]
+fn usage_breakdown_shows_blank_cells_for_calls_without_usage() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "cccccccc-1111-2222-3333-444444444444";
+    let no_usage = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-08-20T04:00:30.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "id": "msg_no_usage",
+            "content": [{"type": "text", "text": "no usage marker epsilon"}]
+        }
+    })
+    .to_string();
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_0001",
+                "2026-08-20T04:00:10.000Z",
+                "usage marker zeta",
+                12345,
+                2000,
+                30000,
+                50,
+            ),
+            no_usage,
+        ]
+        .join("\n"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("usage marker zeta"))
+        .stdout(predicates::str::contains("no usage marker epsilon"))
+        // The usage-bearing call uses thousands separators.
+        .stdout(predicates::str::contains("12,345"))
+        // Totals sum only the usage-bearing call.
+        .stdout(predicates::str::contains("2 calls"))
+        // The no-usage row shows its model and preview but no comma-formatted
+        // numbers: its line carries no ',' (timestamps, turns and model names
+        // never contain commas; only thousands separators do).
+        .stdout(predicates::function::function(|out: &str| {
+            out.lines()
+                .find(|line| line.contains("no usage marker epsilon"))
+                .is_some_and(|line| !line.contains(','))
+        }));
+}
+
+#[test]
+fn usage_breakdown_sort_total_orders_biggest_first() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let session_id = "dddddddd-1111-2222-3333-444444444444";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        session_id,
+        &[
+            claude_user_prompt("prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_small",
+                "2026-08-20T04:00:10.000Z",
+                "small call preview",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+            claude_usage_assistant(
+                "msg_big",
+                "2026-08-20T04:00:20.000Z",
+                "big call preview",
+                5,
+                500,
+                40000,
+                12000,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    // Default: turn order (small before big).
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .assert()
+        .success()
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("small call preview").unwrap() < out.find("big call preview").unwrap()
+        }));
+
+    // --sort total: biggest first (big before small).
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg(&session_id[..8])
+        .arg("--sort")
+        .arg("total")
+        .assert()
+        .success()
+        .stdout(predicates::function::function(|out: &str| {
+            out.find("big call preview").unwrap() < out.find("small call preview").unwrap()
+        }));
+}
+
+#[test]
+fn usage_current_and_current_thread_resolve_through_the_central_resolver() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let parent_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0200";
+    let worker_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0201";
+    plant_claude_session(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        &[
+            claude_user_prompt("parent prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_parent",
+                "2026-08-20T04:00:10.000Z",
+                "parent usage marker",
+                10,
+                2000,
+                30000,
+                50,
+            ),
+        ]
+        .join("\n"),
+    );
+    plant_claude_subagent(
+        store.path(),
+        workdir.path(),
+        parent_id,
+        worker_id,
+        &[
+            claude_user_prompt("worker prompt", "2026-08-20T04:00:00.000Z"),
+            claude_usage_assistant(
+                "msg_worker",
+                "2026-08-20T04:00:10.000Z",
+                "worker usage marker",
+                7,
+                1000,
+                20000,
+                30,
+            ),
+        ]
+        .join("\n"),
+    );
+
+    // `current` selects the top-level Session even when invoked from a worker.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("current")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("parent usage marker"))
+        .stdout(predicates::str::contains("worker usage marker").not());
+
+    // `current-thread` selects the calling thread without --include-subagents.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("CLAUDE_CODE_SESSION_ID", worker_id)
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .arg("current-thread")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("worker usage marker"))
+        .stdout(predicates::str::contains("parent usage marker").not());
+}
+
+#[test]
+fn usage_without_a_selector_errors_as_not_yet_supported() {
+    let workdir = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(store.path())
+        .arg("usage")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not yet supported"));
+}
