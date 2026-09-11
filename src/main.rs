@@ -178,6 +178,11 @@ struct SearchArgs {
     /// or --stats.
     #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["failed", "stats"])]
     file: Option<String>,
+
+    /// With --file, show only write Touches (Edit, Write, MultiEdit,
+    /// NotebookEdit). Requires --file.
+    #[arg(long)]
+    written: bool,
 }
 
 /// Arguments for the `show` verb.
@@ -515,6 +520,11 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     // --file lists Touches by structure (no Query). A Query with --file is
     // issue 27; reject it here so the combination cannot silently do the wrong
     // thing. --failed/--stats with --file are rejected by clap conflicts.
+    // --written narrows --file to write Touches, so it requires --file.
+    if args.written && args.file.is_none() {
+        eprintln!("agsearch: --written requires --file");
+        return ExitCode::FAILURE;
+    }
     if let Some(selector_str) = args.file.as_deref() {
         if matcher.is_some() {
             eprintln!("agsearch: --file cannot be used with a query");
@@ -528,11 +538,12 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
             }
         };
         let mut results = match &session_path {
-            Some(session) => touches_in_store_session(&stores, session, &selector),
+            Some(session) => touches_in_store_session(&stores, session, &selector, args.written),
             None => touches_in_stores(
                 &stores,
                 &build_scope(args.all, args.project.as_deref(), &cwd),
                 &selector,
+                args.written,
             ),
         };
         if let Some(cutoff) = cutoff {
