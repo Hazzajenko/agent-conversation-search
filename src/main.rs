@@ -8,12 +8,14 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use agsearch::{
     export_timestamp_now, failed_in_store_session, failed_in_stores, format_current,
     format_export_markdown, format_failures, format_paths, format_projects, format_results,
-    format_session_paths, format_sessions, format_stats, format_transcript_for_harness,
-    format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
-    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
-    resolve_current_context, resolve_current_session, resolve_current_thread,
-    resolve_store_session_prefix, search_store_session, search_stores, since_cutoff,
-    timestamp_is_since, ContentSet, Matcher, Scope, StoreSessionRef, Stores,
+    format_session_paths, format_sessions, format_stats, format_touch_paths, format_touches,
+    format_transcript_for_harness, format_windowed_for_harness, group_failures,
+    list_store_projects, list_store_sessions, parse_store_transcript, parse_transcript_path,
+    resolve_claude_dir, resolve_codex_dir, resolve_current_context, resolve_current_session,
+    resolve_current_thread, resolve_store_session_prefix, search_store_session,
+    search_store_session_with_file, search_stores, search_stores_with_file, since_cutoff,
+    timestamp_is_since, touches_in_store_session, touches_in_stores, ContentSet, FileSelector,
+    Matcher, Scope, StoreSessionRef, Stores,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -157,7 +159,7 @@ struct SearchArgs {
     /// Aggregate failures into a counts table by tool and error signature
     /// instead of listing them (the aggregate counterpart to --failed). Implies
     /// failure analysis and inherits scope, --since, and the optional Query.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "file")]
     stats: bool,
 
     /// Only Sessions touched since this point: a relative duration (3d, 2w, 1h)
@@ -167,9 +169,25 @@ struct SearchArgs {
 
     /// Include the Current Session Family, which multi-Session analysis
     /// excludes by default so a search cannot return the conversation that
-    /// asked for it. Applies to text search, --failed, and --stats.
+    /// asked for it. Applies to text search, --failed, --stats, and --file.
     #[arg(long)]
     include_current: bool,
+
+    /// List file Touches by File Selector instead of searching text. With no
+    /// Query, lists every Touch of the selected file grouped by Session in the
+    /// same id-and-turn handoff shape as Matches. With a Query, runs the
+    /// normal text search but only inside Sessions that contain a Touch of the
+    /// selected file (output is the standard Match shape). Cannot be used
+    /// with --failed or --stats.
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["failed", "stats"])]
+    file: Option<String>,
+
+    /// With --file, narrow to write Touches (Edit, Write, MultiEdit,
+    /// NotebookEdit, Codex apply_patch): without a Query only write Touch rows
+    /// are listed; with a Query only Sessions with a write Touch are searched.
+    /// Requires --file.
+    #[arg(long)]
+    written: bool,
 }
 
 /// Arguments for the `show` verb.
@@ -418,8 +436,10 @@ fn run_projects(stores: &Stores, args: &ProjectsArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Run the `search` verb: resolve the scope, then either list Failures by
-/// structure (`--failed`, Query optional) or search text (Query required).
+/// Run the `search` verb: resolve the scope, then either list Touches by
+/// structure (`--file`, no Query), search text restricted to touching Sessions
+/// (`--file` with a Query), list Failures by structure (`--failed`, Query
+/// optional), or search text (Query required).
 fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
@@ -502,6 +522,81 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     } else {
         stores.excluding_current_family()
     };
+
+    // --file with no Query lists Touches by structure; --file with a Query
+    // (issue 27) runs the normal text search but only inside Sessions that
+    // contain a Touch of the selected file. --failed/--stats with --file are
+    // rejected by clap conflicts. --written narrows --file to write Touches,
+    // so it requires --file.
+    if args.written && args.file.is_none() {
+        eprintln!("agsearch: --written requires --file");
+        return ExitCode::FAILURE;
+    }
+    if let Some(selector_str) = args.file.as_deref() {
+        let selector = match FileSelector::parse(selector_str) {
+            Ok(selector) => selector,
+            Err(msg) => {
+                eprintln!("agsearch: {msg}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Some(matcher) = matcher.as_ref() {
+            let content = ContentSet {
+                thinking: args.thinking || args.all_content,
+                tools: args.tools || args.all_content,
+            };
+            let mut results = match &session_path {
+                Some(session) => search_store_session_with_file(
+                    &stores,
+                    session,
+                    matcher,
+                    &content,
+                    &selector,
+                    args.written,
+                ),
+                None => search_stores_with_file(
+                    &stores,
+                    &build_scope(args.all, args.project.as_deref(), &cwd),
+                    matcher,
+                    &content,
+                    &selector,
+                    args.written,
+                ),
+            };
+            if let Some(cutoff) = cutoff {
+                results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
+            }
+            // Let anstream decide whether colour is wanted, as in plain search.
+            let color =
+                anstream::AutoStream::choice(&std::io::stdout()) != anstream::ColorChoice::Never;
+            let rendered = if args.files {
+                format_paths(&results)
+            } else {
+                format_results(&results, matcher, args.max_per_session, color)
+            };
+            let _ = write!(anstream::stdout(), "{rendered}");
+            return ExitCode::SUCCESS;
+        }
+        let mut results = match &session_path {
+            Some(session) => touches_in_store_session(&stores, session, &selector, args.written),
+            None => touches_in_stores(
+                &stores,
+                &build_scope(args.all, args.project.as_deref(), &cwd),
+                &selector,
+                args.written,
+            ),
+        };
+        if let Some(cutoff) = cutoff {
+            results.retain(|r| timestamp_is_since(r.timestamp.as_deref(), cutoff));
+        }
+        let rendered = if args.files {
+            format_touch_paths(&results)
+        } else {
+            format_touches(&results, args.max_per_session)
+        };
+        let _ = write!(anstream::stdout(), "{rendered}");
+        return ExitCode::SUCCESS;
+    }
 
     // --stats and --failed share one scan; --stats aggregates, --failed lists.
     if args.failed || args.stats {

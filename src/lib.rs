@@ -308,6 +308,56 @@ pub fn search_store_session(
         .collect()
 }
 
+/// Search Sessions enumerated by every configured Harness adapter, keeping only
+/// Sessions that contain a Touch of the selected file (issue 27). When
+/// `written_only` is set, only Sessions with a write Touch are kept. Sessions
+/// with a Touch but no text Match are omitted; the surviving Matches render
+/// with the standard Match shape, unchanged.
+pub fn search_stores_with_file(
+    stores: &Stores,
+    scope: &Scope,
+    matcher: &Matcher,
+    content: &ContentSet,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionMatches> {
+    let sessions = stores.sessions(scope);
+    let mut results: Vec<SessionMatches> = sessions
+        .par_iter()
+        .filter_map(|handle| {
+            let parsed = stores.parse(handle)?;
+            if !parsed_session_has_touch(&parsed, selector, written_only) {
+                return None;
+            }
+            search_parsed_session(&handle.info, parsed, matcher, content)
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results
+}
+
+/// Search one resolved Session, keeping it only when it contains a Touch of
+/// the selected file (the `--session` form of issue 27).
+pub fn search_store_session_with_file(
+    stores: &Stores,
+    handle: &SessionHandle,
+    matcher: &Matcher,
+    content: &ContentSet,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionMatches> {
+    stores
+        .parse(handle)
+        .filter(|parsed| parsed_session_has_touch(parsed, selector, written_only))
+        .and_then(|parsed| search_parsed_session(&handle.info, parsed, matcher, content))
+        .into_iter()
+        .collect()
+}
+
 fn search_parsed_session(
     info: &SessionIdentity,
     parsed: session::Session,
@@ -1652,6 +1702,385 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
             salient_line(&f.error_text)
         ));
     }
+}
+
+// --- file touches: finding file reads/writes by structure -------------
+
+/// Which kind of [`Touch`] it is. `Read` comes from the `Read`
+/// tool; `Write` comes from `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`
+/// (Claude Code) and `apply_patch` (Codex). Found by structure, like a
+/// Failure, not by a Query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchKind {
+    Read,
+    Write,
+}
+
+impl TouchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+/// A Touch (see CONTEXT.md): a tool call in a Session that reads or writes a
+/// specific file. Found by structure, not by a Query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Touch {
+    /// The turn the `tool_use` Record sits at (same numbering as search/show).
+    pub turn: Option<usize>,
+    /// Whether the call read or wrote the file.
+    pub kind: TouchKind,
+    /// The tool that touched the file (e.g. `Read`, `Edit`, `apply_patch`).
+    pub tool: String,
+    /// The raw file path from the tool input (`file_path`, or `notebook_path`
+    /// for `NotebookEdit`; one file header in the patch body for Codex
+    /// `apply_patch`).
+    pub path: String,
+    /// Whether the call failed (its `tool_result` was `is_error`), joined via
+    /// `tool_use_id` like a Failure. A failed Touch is still listed, flagged.
+    pub failed: bool,
+}
+
+/// A File Selector (see CONTEXT.md): the path fragment a user passes to select
+/// Touches. Matches when its segments equal the trailing segments of the
+/// Touch's path, case-insensitive, with `/` and `\` treated as equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSelector {
+    segments: Vec<String>,
+}
+
+impl FileSelector {
+    /// Parse and validate a raw `--file` selector. Trims whitespace and ignores
+    /// one trailing separator (`docs/` ≡ `docs`); rejects an empty selector
+    /// (including whitespace-only and separator-only) with a clear error.
+    pub fn parse(selector: &str) -> Result<Self, String> {
+        let trimmed = selector.trim();
+        if trimmed.is_empty() {
+            return Err("--file selector must not be empty".to_string());
+        }
+        let stripped = trimmed
+            .strip_suffix('/')
+            .or_else(|| trimmed.strip_suffix('\\'))
+            .unwrap_or(trimmed);
+        let segments = split_path_segments(stripped);
+        if segments.is_empty() {
+            return Err("--file selector must not be empty".to_string());
+        }
+        Ok(Self { segments })
+    }
+
+    /// Whether Touch `path` is selected: its segments end with the selector's
+    /// segments, case-insensitive, separators already normalized by splitting.
+    pub fn matches(&self, path: &str) -> bool {
+        let haystack = split_path_segments(path);
+        if haystack.len() < self.segments.len() {
+            return false;
+        }
+        let offset = haystack.len() - self.segments.len();
+        haystack[offset..] == self.segments[..]
+    }
+}
+
+/// Split a path on both separators, dropping empties and folding case, so
+/// Windows (`E:\p\x.md`), Unix (`/home/u/p/x.md`), and relative (`docs/x.md`)
+/// paths compare as segment lists. No cwd resolution.
+fn split_path_segments(path: &str) -> Vec<String> {
+    path.split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+/// The tool kind of a Claude Code `tool_use`, or `None` when the tool never
+/// produces a Touch (e.g. `Glob`, `Grep`, `Bash`).
+fn touch_kind_for_tool(name: &str) -> Option<TouchKind> {
+    match name {
+        "Read" => Some(TouchKind::Read),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Some(TouchKind::Write),
+        _ => None,
+    }
+}
+
+/// The file path a Claude Code Touch tool carries: `file_path`, except
+/// `NotebookEdit` which uses `notebook_path` (falling back to `file_path`).
+/// `None` when the input carries no usable path.
+fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> {
+    let key = if name == "NotebookEdit" {
+        input
+            .get("notebook_path")
+            .and_then(|v| v.as_str())
+            .map(|_| "notebook_path")
+            .unwrap_or("file_path")
+    } else {
+        "file_path"
+    };
+    input.get(key)?.as_str().map(str::to_string)
+}
+
+/// The file paths a Codex `apply_patch` call touches: one per `Add` / `Update`
+/// / `Delete File:` header in the patch body, kind always `Write`. Paths are
+/// raw strings from the patch; matching applies the same trailing-segment rule
+/// with no cwd resolution.
+fn codex_patch_paths(input: &serde_json::Value) -> Vec<String> {
+    // Real Codex transcripts carry the patch as the raw `input` string
+    // (`"*** Begin Patch\n..."`); keep one back-compat `{"patch": ...}`
+    // object shape and ignore everything else so unrelated string fields
+    // can never become phantom Touches.
+    let candidates: Vec<&str> = match input {
+        serde_json::Value::String(text) => vec![text.as_str()],
+        serde_json::Value::Object(map) => match map.get("patch").and_then(|v| v.as_str()) {
+            Some(text) => vec![text],
+            None => vec![],
+        },
+        _ => vec![],
+    };
+    let mut paths = Vec::new();
+    for text in candidates {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            for prefix in ["*** Add File:", "*** Update File:", "*** Delete File:"] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let path = rest.trim();
+                    if !path.is_empty() {
+                        paths.push(path.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// All `(kind, path)` Touches one `tool_use` contributes. Claude Code tools
+/// yield at most one; Codex `apply_patch` yields one per file named in the
+/// patch body; anything else (Glob, Grep, Bash, Codex shell) yields none.
+fn touches_for_tool_use(name: &str, input: &serde_json::Value) -> Vec<(TouchKind, String)> {
+    if name == "apply_patch" {
+        return codex_patch_paths(input)
+            .into_iter()
+            .map(|path| (TouchKind::Write, path))
+            .collect();
+    }
+    let Some(kind) = touch_kind_for_tool(name) else {
+        return Vec::new();
+    };
+    let Some(path) = touch_path_for_tool(name, input) else {
+        return Vec::new();
+    };
+    vec![(kind, path)]
+}
+
+/// Whether a parsed Session contains at least one Touch of the selected file
+/// (issue 27's pre-filter for combined `--file QUERY` search). Mirrors the
+/// selection rules of [`touches_in_parsed_session`] — same tools, same path
+/// extraction, same selector — but skips the failure join and Touch building
+/// since only presence matters. When `written_only` is set, only write Touches
+/// count.
+fn parsed_session_has_touch(
+    session: &session::Session,
+    selector: &FileSelector,
+    written_only: bool,
+) -> bool {
+    for record in &session.records {
+        let RecordKind::Assistant(blocks) = &record.kind else {
+            continue;
+        };
+        for block in blocks {
+            let AssistantBlock::ToolUse { name, input, .. } = block else {
+                continue;
+            };
+            for (kind, path) in touches_for_tool_use(name, input) {
+                if written_only && kind != TouchKind::Write {
+                    continue;
+                }
+                if path.is_empty() || !selector.matches(&path) {
+                    continue;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// All Touches found within a single Session, grouped with the metadata needed
+/// to display and reopen it — the Touch analogue of [`SessionMatches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTouches {
+    pub session: SessionIdentity,
+    pub touches: Vec<Touch>,
+}
+
+impl std::ops::Deref for SessionTouches {
+    type Target = SessionIdentity;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for SessionTouches {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
+}
+
+/// Scan Sessions enumerated by every configured Harness adapter for Touches of
+/// the selected file. When `written_only` is set, only write Touches are
+/// returned (Sessions left with no rows are omitted).
+pub fn touches_in_stores(
+    stores: &Stores,
+    scope: &Scope,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionTouches> {
+    let sessions = stores.sessions(scope);
+    let mut results: Vec<SessionTouches> = sessions
+        .par_iter()
+        .filter_map(|handle| {
+            let parsed = stores.parse(handle)?;
+            touches_in_parsed_session(&handle.info, parsed, selector, written_only)
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results
+}
+
+pub fn touches_in_store_session(
+    stores: &Stores,
+    handle: &SessionHandle,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Vec<SessionTouches> {
+    stores
+        .parse(handle)
+        .and_then(|parsed| touches_in_parsed_session(&handle.info, parsed, selector, written_only))
+        .into_iter()
+        .collect()
+}
+
+fn touches_in_parsed_session(
+    info: &SessionIdentity,
+    session: session::Session,
+    selector: &FileSelector,
+    written_only: bool,
+) -> Option<SessionTouches> {
+    use std::collections::HashSet;
+
+    // The join a Touch needs for its failed flag: tool_result id -> errored.
+    let mut failed_ids: HashSet<String> = HashSet::new();
+    for record in &session.records {
+        let RecordKind::UserBlocks(blocks) = &record.kind else {
+            continue;
+        };
+        for block in blocks {
+            if let UserBlock::ToolResult {
+                is_error: true,
+                tool_use_id: Some(id),
+                ..
+            } = block
+            {
+                failed_ids.insert(id.clone());
+            }
+        }
+    }
+
+    let mut touches = Vec::new();
+    for record in &session.records {
+        let RecordKind::Assistant(blocks) = &record.kind else {
+            continue;
+        };
+        for block in blocks {
+            let AssistantBlock::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            for (kind, path) in touches_for_tool_use(name, input) {
+                if written_only && kind != TouchKind::Write {
+                    continue;
+                }
+                if path.is_empty() || !selector.matches(&path) {
+                    continue;
+                }
+                let failed = id.as_ref().is_some_and(|id| failed_ids.contains(id));
+                touches.push(Touch {
+                    turn: record.turn,
+                    kind,
+                    tool: name.clone(),
+                    path,
+                    failed,
+                });
+            }
+        }
+    }
+
+    if touches.is_empty() {
+        return None;
+    }
+    Some(SessionTouches {
+        session: info.clone(),
+        touches,
+    })
+}
+
+/// Render Touches with the search index shape: each Session as a header, then
+/// each Touch as one `[turn] kind tool path` line, flagged when failed. At
+/// most `max_per_session` per Session (`0` = unlimited), with an actionable
+/// `+N more  ›  show` hint. An empty result set renders the standard empty
+/// search message, so scripts behave predictably.
+pub fn format_touches(results: &[SessionTouches], max_per_session: usize) -> String {
+    if results.is_empty() {
+        return "No matches.\n".to_string();
+    }
+    let mut out = String::new();
+    for s in results {
+        let short = short_id(&s.session_id);
+        out.push_str(&session_header(&s.session));
+        out.push('\n');
+
+        let shown = if max_per_session == 0 {
+            s.touches.len()
+        } else {
+            s.touches.len().min(max_per_session)
+        };
+        for t in &s.touches[..shown] {
+            let turn = match t.turn {
+                Some(turn) => format!("[{turn}] "),
+                None => String::new(),
+            };
+            let failed = if t.failed { " ✗ FAILED" } else { "" };
+            out.push_str(&format!(
+                "  {turn}{} {} {}{failed}\n",
+                t.kind.as_str(),
+                t.tool,
+                t.path
+            ));
+        }
+        let hidden = s.touches.len() - shown;
+        if hidden > 0 {
+            out.push_str(&format!("  … +{hidden} more  ›  agsearch show {short}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render just the touching Session file paths, one per line, in result order —
+/// the `--file -l` counterpart to [`format_paths`], for piping into `show -`.
+pub fn format_touch_paths(results: &[SessionTouches]) -> String {
+    let mut out = String::new();
+    for s in results {
+        out.push_str(&s.path.to_string_lossy());
+        out.push('\n');
+    }
+    out
 }
 
 // --- --since: filtering Sessions by recency ------------------------------

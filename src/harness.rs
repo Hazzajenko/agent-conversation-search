@@ -454,8 +454,12 @@ fn codex_record_kind(payload: &Value) -> Option<crate::session::RecordKind> {
             let input = payload
                 .get("input")
                 .or_else(|| payload.get("arguments"))
-                .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str(raw).ok())
+                .map(|value| match value {
+                    Value::String(raw) => {
+                        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
+                    }
+                    other => other.clone(),
+                })
                 .unwrap_or(Value::Null);
             Some(crate::session::RecordKind::Assistant(vec![
                 crate::session::AssistantBlock::ToolUse { id, name, input },
