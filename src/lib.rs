@@ -1825,36 +1825,18 @@ fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> 
 /// raw strings from the patch; matching applies the same trailing-segment rule
 /// with no cwd resolution.
 fn codex_patch_paths(input: &serde_json::Value) -> Vec<String> {
-    let mut candidates: Vec<&str> = Vec::new();
-    match input {
-        serde_json::Value::String(text) => candidates.push(text.as_str()),
-        serde_json::Value::Object(map) => {
-            let mut pushed_known = false;
-            for key in [
-                "patch",
-                "input",
-                "content",
-                "text",
-                "diff",
-                "patch_body",
-                "patch_text",
-                "body",
-            ] {
-                if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
-                    candidates.push(text);
-                    pushed_known = true;
-                }
-            }
-            if !pushed_known {
-                for value in map.values() {
-                    if let Some(text) = value.as_str() {
-                        candidates.push(text);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
+    // Real Codex transcripts carry the patch as the raw `input` string
+    // (`"*** Begin Patch\n..."`); keep one back-compat `{"patch": ...}`
+    // object shape and ignore everything else so unrelated string fields
+    // can never become phantom Touches.
+    let candidates: Vec<&str> = match input {
+        serde_json::Value::String(text) => vec![text.as_str()],
+        serde_json::Value::Object(map) => match map.get("patch").and_then(|v| v.as_str()) {
+            Some(text) => vec![text],
+            None => vec![],
+        },
+        _ => vec![],
+    };
     let mut paths = Vec::new();
     for text in candidates {
         for line in text.lines() {
