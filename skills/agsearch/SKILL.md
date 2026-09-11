@@ -64,8 +64,9 @@ you. Result trailers print the exact `show` command to run next.
   query becomes an optional filter on command/error. `--full` prints whole
   error texts; `--stats` aggregates into a counts table by tool and error
   signature.
-- `agsearch --file <SELECTOR>` — list file Touches by File Selector instead of
-  searching text. `--written` keeps only write Touches. See `agsearch --help` for selector rules.
+- `agsearch --file <SELECTOR>` — list file Touches by File Selector; with a
+  Query, restrict text Matches to touching Sessions. `--written` further narrows
+  the Session set. See `agsearch --help` for selector rules.
 
 Search, `--failed`, `--stats`, and `--file` cover **past** Sessions. They exclude the
 Current Session Family, which contains the Current Session and its subagent
