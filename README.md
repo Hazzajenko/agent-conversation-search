@@ -82,6 +82,7 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `-m`, `--max-per-session <N>` | cap matches shown per Session (`0` = unlimited; default 3) |
 | `-l`, `--files` | print only matching file paths, for piping |
 | `--file <SELECTOR>` | list file Touches by File Selector instead of searching text |
+| `--written` | with `--file`, show only write Touches (Edit, Write, MultiEdit, NotebookEdit, Codex apply_patch) |
 | `--harness <claude\|codex>` | search only one Harness |
 | `--include-subagents` | include Codex subagent Sessions and mark them in output |
 | `--include-current` | include the Current Session Family (excluded by default) |
@@ -263,6 +264,7 @@ listing verbs:
 | `--project <substr>` | Projects whose name contains the substring | search, sessions, projects |
 | `--session <selector>` | one Session, selected by id-prefix, `current`, or `current-thread`. The selected Session remains included when it belongs to the Current Session Family | search |
 | `--file <SELECTOR>` | list Touches of the selected file (File Selector) | search |
+| `--written` | with `--file`, keep only write Touches | search |
 | `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats` |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 

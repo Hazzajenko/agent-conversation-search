@@ -180,7 +180,7 @@ struct SearchArgs {
     file: Option<String>,
 
     /// With --file, show only write Touches (Edit, Write, MultiEdit,
-    /// NotebookEdit). Requires --file.
+    /// NotebookEdit, Codex apply_patch). Requires --file.
     #[arg(long)]
     written: bool,
 }
