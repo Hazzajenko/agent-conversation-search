@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Search local coding conversation history across Harnesses"
 license = "MIT"
+repository = "https://github.com/Hazzajenko/agent-conversation-search"
+readme = "README.md"
+keywords = ["claude", "codex", "search", "cli", "transcripts"]
+categories = ["command-line-utilities"]
+rust-version = "1.85"
 
 [[bin]]
 name = "agsearch"
@@ -29,3 +34,8 @@ proptest = "1"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
