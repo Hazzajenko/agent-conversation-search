@@ -13,6 +13,6 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-`done` is a local addition — the five mattpocock state roles have no terminal "completed" state, so finished work would otherwise linger as `ready-for-agent` and pollute "what's ready to pick up?" queries. Transition: `ready-for-agent` / `ready-for-human` → `done` once the work is merged and verified. Like `wontfix`, it is terminal. On GitHub, `done` means closing the issue (`gh issue close <n> --comment "..."` summarising what shipped) rather than applying a label; the label form only applies to the legacy `.scratch/` markdown issues.
+`done` is a local addition — the five mattpocock state roles have no terminal "completed" state, so finished work would otherwise linger as `ready-for-agent` and pollute "what's ready to pick up?" queries. Transition: `ready-for-agent` / `ready-for-human` → `done` once the work is merged and verified. Like `wontfix`, it is terminal. On GitHub, `done` means closing the issue (`gh issue close <n> --comment "..."` summarising what shipped) rather than applying a label.
 
 Edit the right-hand column to match whatever vocabulary you actually use.

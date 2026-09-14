@@ -2,7 +2,7 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
-> **Legacy note**: issues 01–20 for the initial `ccsearch` build live as markdown files under `.scratch/ccsearch/issues/` from before this repo had a remote. Treat them as read-only history; file all new work as GitHub issues.
+> **Legacy note**: issues 01–20 for the initial `ccsearch` build were tracked as markdown files before this repo had a remote. They are not in the repository. File all new work as GitHub issues.
 
 ## Conventions
 
