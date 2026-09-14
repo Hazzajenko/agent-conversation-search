@@ -11,6 +11,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The MSRV is pinned via the `toolchain` input, not the action ref.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]
