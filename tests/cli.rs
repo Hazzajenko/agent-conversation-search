@@ -5501,6 +5501,7 @@ fn usage_without_a_selector_ranks_instead_of_erroring() {
 /// one). `total_tokens` is derived as `input + output` (cached and
 /// cache-write are subsets of input, matching real Codex files), so callers
 /// need not compute it.
+#[allow(clippy::too_many_arguments)]
 fn codex_token_count(
     timestamp: &str,
     last_input: u64,
@@ -5776,6 +5777,7 @@ fn usage_breakdown_codex_empty_with_no_token_counts() {
 /// Plant a Claude Session with one usage-bearing call and an ai-title, for
 /// ranking fixtures. Returns the session id prefix assertion helper data via
 /// the planted file; the caller keeps the id.
+#[allow(clippy::too_many_arguments)]
 fn plant_ranking_claude(
     store: &std::path::Path,
     cwd: &std::path::Path,

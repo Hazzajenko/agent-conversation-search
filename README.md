@@ -29,15 +29,31 @@ turns them into six jobs:
 - **analyse** what went wrong — `agsearch --failed` / `--stats`
 - **measure** token Usage — `agsearch usage` / `agsearch usage <id>`
 
+> **Status: early.** `agsearch` is at 0.x. Verbs and flags can still change
+> between minor versions. Open an issue if something breaks for you.
+
 ## Install
 
-Requires a [Rust toolchain](https://rustup.rs/).
+Prebuilt binaries for Linux, macOS, and Windows are attached to each
+[GitHub Release](https://github.com/Hazzajenko/agent-conversation-search/releases).
+The installers put the `agsearch` binary onto your PATH:
 
 ```console
-# from a clone of this repo
-cargo install --path .          # installs the `agsearch` binary onto your PATH
-# or just build it
-cargo build --release           # ./target/release/agsearch
+# Linux / macOS
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Hazzajenko/agent-conversation-search/releases/latest/download/agsearch-installer.sh | sh
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/Hazzajenko/agent-conversation-search/releases/latest/download/agsearch-installer.ps1 | iex"
+```
+
+With a [Rust toolchain](https://rustup.rs/):
+
+```console
+cargo install agsearch          # from crates.io
+# or, from a clone of this repo
+cargo install --path .
 ```
 
 `agsearch` reads `$CLAUDE_CONFIG_DIR` or `~/.claude` for Claude Code and

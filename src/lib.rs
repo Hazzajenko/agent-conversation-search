@@ -2252,9 +2252,7 @@ fn codex_final_mismatch(
     calls: &[UsageCall],
     final_total: Option<&session::Usage>,
 ) -> Option<String> {
-    let Some(final_total) = final_total else {
-        return None;
-    };
+    let final_total = final_total?;
     if calls.is_empty() {
         return None;
     }
@@ -2537,8 +2535,6 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
     w_out = w_out.max(s_out.chars().count());
     w_tot = w_tot.max(s_tot.chars().count());
     // The call count annotates the preview column so numeric columns stay aligned.
-    w_ts = w_ts.max(0);
-    w_model = w_model.max(0);
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -3159,12 +3155,12 @@ mod tests {
 
     #[test]
     fn dots_and_consecutive_separators_each_become_their_own_dash() {
-        // Real observed case: `c:\Users\jenki\.config\powershell`. The `:`, the
+        // Real observed case: `c:\Users\alice\.config\powershell`. The `:`, the
         // backslashes, AND the leading dot of `.config` all collapse to `-`,
         // producing the doubled dash before `config`.
         assert_eq!(
-            encode_project_dir(r"c:\Users\jenki\.config\powershell"),
-            "c--Users-jenki--config-powershell"
+            encode_project_dir(r"c:\Users\alice\.config\powershell"),
+            "c--Users-alice--config-powershell"
         );
     }
 
@@ -4013,21 +4009,21 @@ mod tests {
         let dir = resolve_claude_dir(
             Some(Path::new("/explicit/claude")),
             Some("/env/claude"),
-            Some(Path::new("/home/jenki")),
+            Some(Path::new("/home/alice")),
         );
         assert_eq!(dir, Some(PathBuf::from("/explicit/claude")));
     }
 
     #[test]
     fn env_config_dir_wins_over_home_when_no_override() {
-        let dir = resolve_claude_dir(None, Some("/env/claude"), Some(Path::new("/home/jenki")));
+        let dir = resolve_claude_dir(None, Some("/env/claude"), Some(Path::new("/home/alice")));
         assert_eq!(dir, Some(PathBuf::from("/env/claude")));
     }
 
     #[test]
     fn falls_back_to_home_dot_claude() {
-        let dir = resolve_claude_dir(None, None, Some(Path::new("/home/jenki")));
-        assert_eq!(dir, Some(PathBuf::from("/home/jenki/.claude")));
+        let dir = resolve_claude_dir(None, None, Some(Path::new("/home/alice")));
+        assert_eq!(dir, Some(PathBuf::from("/home/alice/.claude")));
     }
 
     #[test]
