@@ -4,6 +4,22 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 
+/// A fresh temp directory under the *canonical* system temp path.
+///
+/// On macOS `$TMPDIR` lives under `/var/folders`, a symlink to `/private/var`.
+/// The binary reports its cwd via `getcwd`, which returns the resolved path,
+/// so a fixture keyed on the symlinked path would never match the Project the
+/// binary derives. Creating the directory inside the canonical root keeps both
+/// sides identical on every platform.
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    let root = std::env::temp_dir();
+    // Windows `canonicalize` adds a `\?\` verbatim prefix, which nothing
+    // else in the pipeline produces, so only resolve symlinks on Unix.
+    #[cfg(not(windows))]
+    let root = root.canonicalize().unwrap_or(root);
+    tempfile::tempdir_in(root)
+}
+
 fn agsearch_command() -> Command {
     let mut command = Command::cargo_bin("agsearch").unwrap();
     command.env("CODEX_HOME", "__agsearch_test_missing_codex_store__");
@@ -36,8 +52,8 @@ fn agsearch_in(
 
 #[test]
 fn finds_a_match_in_the_current_projects_conversations() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -171,9 +187,9 @@ fn write_codex_rollout(
 
 #[test]
 fn default_search_finds_codex_prompts_and_replies_in_the_current_project() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0001-0000-0000-0000-000000000000",
@@ -201,9 +217,9 @@ fn default_search_finds_codex_prompts_and_replies_in_the_current_project() {
 
 #[test]
 fn search_spans_both_stores_and_harness_narrows_to_codex() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_project(
         claude.path(),
         &agsearch::encode_project_dir(&workdir.path().to_string_lossy()),
@@ -247,9 +263,9 @@ fn search_spans_both_stores_and_harness_narrows_to_codex() {
 
 #[test]
 fn codex_subagents_are_excluded_and_forked_sessions_remain_independent() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let record = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fork marker"}]}}"#;
     plant_codex_session(
         codex.path(),
@@ -291,8 +307,8 @@ fn codex_subagents_are_excluded_and_forked_sessions_remain_independent() {
 
 #[test]
 fn include_subagents_makes_workers_searchable_listable_and_showable() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0015-0000-0000-0000-000000000000",
@@ -337,8 +353,8 @@ fn include_subagents_makes_workers_searchable_listable_and_showable() {
 
 #[test]
 fn codex_home_override_and_missing_stores_are_silent() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0006-0000-0000-0000-000000000000",
@@ -362,8 +378,8 @@ fn codex_home_override_and_missing_stores_are_silent() {
 
 #[test]
 fn codex_show_and_session_search_use_the_transparent_id_handoff() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let id = "c0de0010-0000-0000-0000-000000000000";
     plant_codex_session(
         codex.path(),
@@ -436,8 +452,8 @@ fn codex_show_and_session_search_use_the_transparent_id_handoff() {
 
 #[test]
 fn codex_search_content_flags_match_claude_semantics() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0011-0000-0000-0000-000000000000",
@@ -502,8 +518,8 @@ fn codex_search_content_flags_match_claude_semantics() {
 
 #[test]
 fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let titled = "c0de0012-0000-0000-0000-000000000000";
     let untitled = "c0de0013-0000-0000-0000-000000000000";
     plant_codex_session(
@@ -589,9 +605,9 @@ fn sessions_lists_codex_titles_recency_and_excludes_subagents() {
 
 #[test]
 fn projects_merge_harnesses_and_cwdless_codex_sessions_stay_unscoped() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let encoded = agsearch::encode_project_dir(&workdir.path().to_string_lossy());
     plant_project(
         claude.path(),
@@ -669,8 +685,8 @@ fn projects_merge_harnesses_and_cwdless_codex_sessions_stay_unscoped() {
 
 #[test]
 fn codex_failed_and_stats_infer_failures_from_tool_outputs() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     plant_codex_session(
         codex.path(),
         "c0de0018-0000-0000-0000-000000000000",
@@ -714,8 +730,8 @@ fn codex_failed_and_stats_infer_failures_from_tool_outputs() {
 
 #[test]
 fn all_flag_searches_projects_other_than_the_current_one() {
-    let workdir = tempfile::tempdir().unwrap(); // cwd has no Project of its own
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap(); // cwd has no Project of its own
+    let store = tempdir().unwrap();
     plant_project(
         store.path(),
         "E--projects-other",
@@ -735,8 +751,8 @@ fn all_flag_searches_projects_other_than_the_current_one() {
 
 #[test]
 fn project_flag_targets_a_named_project_by_substring() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_project(
         store.path(),
         "E--projects-games-creature-game",
@@ -763,8 +779,8 @@ fn project_flag_targets_a_named_project_by_substring() {
 
 #[test]
 fn regex_flag_matches_the_query_as_a_pattern() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -780,8 +796,8 @@ fn regex_flag_matches_the_query_as_a_pattern() {
 
 #[test]
 fn case_sensitive_flag_excludes_a_wrong_case_match() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -797,8 +813,8 @@ fn case_sensitive_flag_excludes_a_wrong_case_match() {
 
 #[test]
 fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -815,8 +831,8 @@ fn an_invalid_regex_exits_non_zero_with_a_readable_error() {
 
 #[test]
 fn thinking_flag_includes_thinking_blocks() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -833,8 +849,8 @@ fn thinking_flag_includes_thinking_blocks() {
 
 #[test]
 fn tools_flag_includes_tool_results() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -851,8 +867,8 @@ fn tools_flag_includes_tool_results() {
 
 #[test]
 fn all_content_flag_includes_tool_calls() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -869,8 +885,8 @@ fn all_content_flag_includes_tool_calls() {
 
 #[test]
 fn max_per_session_flag_caps_matches_and_notes_the_rest() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         r#"{"type":"user","message":{"role":"user","content":"zebra one"}}"#,
         r#"{"type":"user","message":{"role":"user","content":"zebra two"}}"#,
@@ -889,8 +905,8 @@ fn max_per_session_flag_caps_matches_and_notes_the_rest() {
 
 #[test]
 fn files_flag_prints_only_the_matching_path() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -907,8 +923,8 @@ fn files_flag_prints_only_the_matching_path() {
 
 #[test]
 fn no_color_or_piped_output_has_no_ansi_codes() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -926,8 +942,8 @@ fn no_color_or_piped_output_has_no_ansi_codes() {
 
 #[test]
 fn color_is_emitted_when_forced() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -944,8 +960,8 @@ fn color_is_emitted_when_forced() {
 
 #[test]
 fn reports_cleanly_when_there_are_no_matches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -960,8 +976,8 @@ fn reports_cleanly_when_there_are_no_matches() {
 
 #[test]
 fn search_output_carries_the_session_id_and_turn_handoff() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let projects = store.path().join("projects");
     let encoded = agsearch::encode_project_dir(&workdir.path().to_string_lossy());
     let project_dir = projects.join(encoded);
@@ -992,8 +1008,8 @@ fn search_output_carries_the_session_id_and_turn_handoff() {
 
 #[test]
 fn failed_lists_failures_by_structure_with_the_handoff_shape() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1017,8 +1033,8 @@ fn failed_lists_failures_by_structure_with_the_handoff_shape() {
 
 #[test]
 fn stats_aggregates_failures_into_a_counts_table_by_signature() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1043,8 +1059,8 @@ fn stats_aggregates_failures_into_a_counts_table_by_signature() {
 
 #[test]
 fn failed_query_filters_and_full_shows_everything() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1065,8 +1081,8 @@ fn failed_query_filters_and_full_shows_everything() {
 
 #[test]
 fn since_excludes_sessions_older_than_an_absolute_date() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Both Sessions in the cwd's own Project, so the default scope covers them.
     let project = store
         .path()
@@ -1101,8 +1117,8 @@ fn since_excludes_sessions_older_than_an_absolute_date() {
 
 #[test]
 fn since_rejects_an_unparseable_value() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1119,8 +1135,8 @@ fn since_rejects_an_unparseable_value() {
 
 #[test]
 fn session_scope_searches_only_the_named_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Two Sessions in the same Project; the Query matches both.
     plant_session(
         store.path(),
@@ -1150,8 +1166,8 @@ fn session_scope_searches_only_the_named_session() {
 
 #[test]
 fn session_scope_errors_on_an_ambiguous_prefix() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let line = r#"{"type":"user","message":{"role":"user","content":"x"}}"#;
     plant_session(store.path(), "E--projects-demo", "dupe1111-aaaa", line);
     plant_session(store.path(), "E--projects-demo", "dupe2222-bbbb", line);
@@ -1170,8 +1186,8 @@ fn session_scope_errors_on_an_ambiguous_prefix() {
 
 #[test]
 fn session_scope_requires_a_query() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_session(
         store.path(),
         "E--projects-demo",
@@ -1193,8 +1209,8 @@ fn session_scope_requires_a_query() {
 
 #[test]
 fn an_empty_query_errors_like_a_missing_one() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1211,8 +1227,8 @@ fn an_empty_query_errors_like_a_missing_one() {
 
 #[test]
 fn a_one_character_query_still_searches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1228,8 +1244,8 @@ fn a_one_character_query_still_searches() {
 
 #[test]
 fn a_whitespace_only_query_still_searches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1246,8 +1262,8 @@ fn a_whitespace_only_query_still_searches() {
 
 #[test]
 fn an_empty_failed_filter_means_no_filter() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1280,8 +1296,8 @@ fn session_scope_conflicts_with_all() {
 
 #[test]
 fn explicit_search_verb_behaves_like_a_bare_query() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1305,7 +1321,7 @@ fn plant_session(store_root: &std::path::Path, project: &str, id: &str, lines: &
 
 #[test]
 fn show_renders_a_transcript_resolved_from_a_session_id_prefix() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     let id = plant_session(
         store.path(),
         "E--projects-demo",
@@ -1335,7 +1351,7 @@ fn show_renders_a_transcript_resolved_from_a_session_id_prefix() {
 
 #[test]
 fn show_errors_cleanly_on_an_ambiguous_prefix() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     let line = r#"{"type":"user","message":{"role":"user","content":"x"}}"#;
     plant_session(store.path(), "E--projects-demo", "abc111-aaaa", line);
     plant_session(store.path(), "E--projects-demo", "abc222-bbbb", line);
@@ -1354,7 +1370,7 @@ fn show_errors_cleanly_on_an_ambiguous_prefix() {
 
 #[test]
 fn show_errors_cleanly_when_no_session_matches() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_session(
         store.path(),
         "E--projects-demo",
@@ -1374,7 +1390,7 @@ fn show_errors_cleanly_when_no_session_matches() {
 
 #[test]
 fn show_dash_reads_a_session_path_from_stdin() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     let dir = store.path().join("projects").join("E--projects-demo");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("piped.jsonl");
@@ -1397,7 +1413,7 @@ fn show_dash_reads_a_session_path_from_stdin() {
 
 #[test]
 fn show_dash_reads_a_relative_path_outside_configured_stores() {
-    let workdir = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
     fs::write(
         workdir.path().join("relative.jsonl"),
         r#"{"type":"user","message":{"role":"user","content":"relative path session"}}"#,
@@ -1418,7 +1434,7 @@ fn show_dash_reads_a_relative_path_outside_configured_stores() {
 
 #[test]
 fn show_around_windows_the_transcript_on_a_turn() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Six user prompts → turns 1..=6, each with a unique marker.
     let lines: String = (1..=6)
         .map(|i| {
@@ -1458,7 +1474,7 @@ fn show_around_windows_the_transcript_on_a_turn() {
 
 #[test]
 fn bare_show_is_unaffected_by_the_default_context() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines: String = (1..=6)
         .map(|i| {
             format!(
@@ -1489,7 +1505,7 @@ fn bare_show_is_unaffected_by_the_default_context() {
 
 #[test]
 fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
-    let store = tempfile::tempdir().unwrap();
+    let store = tempdir().unwrap();
     let id = plant_session(
         store.path(),
         "E--projects-demo",
@@ -1522,8 +1538,8 @@ fn show_collapses_thinking_by_default_and_expands_with_the_flag() {
 
 #[test]
 fn sessions_lists_the_current_projects_sessions_newest_first() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let project = store
         .path()
         .join("projects")
@@ -1570,8 +1586,8 @@ fn sessions_lists_the_current_projects_sessions_newest_first() {
 
 #[test]
 fn sessions_renders_untitled_and_omits_no_content_filter() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let project = store
         .path()
         .join("projects")
@@ -1600,8 +1616,8 @@ fn sessions_renders_untitled_and_omits_no_content_filter() {
 
 #[test]
 fn sessions_reports_cleanly_when_the_scope_is_empty() {
-    let workdir = tempfile::tempdir().unwrap(); // cwd has no Project in the Store
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap(); // cwd has no Project in the Store
+    let store = tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     agsearch_command()
@@ -1616,8 +1632,8 @@ fn sessions_reports_cleanly_when_the_scope_is_empty() {
 
 #[test]
 fn sessions_all_widens_scope_and_since_excludes_older() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Two other Projects, each with one Session of a different age.
     plant_project(
         store.path(),
@@ -1657,8 +1673,8 @@ fn sessions_all_widens_scope_and_since_excludes_older() {
 
 #[test]
 fn sessions_files_prints_paths_for_piping_into_show() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let project = store
         .path()
         .join("projects")
@@ -1689,8 +1705,8 @@ fn sessions_files_prints_paths_for_piping_into_show() {
 
 #[test]
 fn sessions_rejects_search_only_flags() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     for flag in ["--failed", "--thinking", "--tools", "--stats"] {
@@ -1709,8 +1725,8 @@ fn sessions_rejects_search_only_flags() {
 
 #[test]
 fn projects_lists_projects_by_real_cwd_with_counts_newest_first() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // A recent Project with two Sessions, and an older Project with one.
     plant_project(
         store.path(),
@@ -1751,8 +1767,8 @@ fn projects_lists_projects_by_real_cwd_with_counts_newest_first() {
 
 #[test]
 fn projects_since_and_project_filter_compose() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_project(
         store.path(),
         "E--projects-recent",
@@ -1793,8 +1809,8 @@ fn projects_since_and_project_filter_compose() {
 
 #[test]
 fn projects_reports_cleanly_when_the_store_is_empty() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     agsearch_command()
@@ -1809,8 +1825,8 @@ fn projects_reports_cleanly_when_the_store_is_empty() {
 
 #[test]
 fn projects_rejects_all_and_files_flags() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     for flag in ["--all", "-l"] {
@@ -1827,8 +1843,8 @@ fn projects_rejects_all_and_files_flags() {
 
 #[test]
 fn harness_flag_can_select_the_only_functional_claude_adapter() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1845,8 +1861,8 @@ fn harness_flag_can_select_the_only_functional_claude_adapter() {
 
 #[test]
 fn codex_harness_selection_ignores_the_claude_store() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -1863,8 +1879,8 @@ fn codex_harness_selection_ignores_the_claude_store() {
 
 #[test]
 fn current_fails_without_guessing_the_newest_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     plant_claude_session(
         claude.path(),
         workdir.path(),
@@ -1885,8 +1901,8 @@ fn current_fails_without_guessing_the_newest_session() {
 
 #[test]
 fn current_fails_when_a_claude_workers_parent_is_absent_from_the_store() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0030";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0031";
     plant_claude_subagent(
@@ -1911,8 +1927,8 @@ fn current_fails_when_a_claude_workers_parent_is_absent_from_the_store() {
 
 #[test]
 fn current_prints_claude_session_metadata() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0001";
     let path = plant_claude_session(
         claude.path(),
@@ -1946,8 +1962,8 @@ fn current_prints_claude_session_metadata() {
 
 #[test]
 fn current_resolves_a_claude_worker_to_the_top_level_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0020";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0021";
     let parent_path = plant_claude_session(
@@ -1988,8 +2004,8 @@ fn current_resolves_a_claude_worker_to_the_top_level_session() {
 
 #[test]
 fn current_id_only_prints_the_full_top_level_session_id() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0002";
     plant_claude_session(
         claude.path(),
@@ -2012,8 +2028,8 @@ fn current_id_only_prints_the_full_top_level_session_id() {
 
 #[test]
 fn current_path_prints_only_the_source_session_path() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0003";
     let path = plant_claude_session(
         claude.path(),
@@ -2036,9 +2052,9 @@ fn current_path_prints_only_the_source_session_path() {
 
 #[test]
 fn current_prints_codex_session_metadata_at_the_top_level() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de1001-0000-0000-0000-000000000000";
     let path = plant_codex_session(
         codex.path(),
@@ -2074,9 +2090,9 @@ fn current_prints_codex_session_metadata_at_the_top_level() {
 
 #[test]
 fn current_resolves_a_codex_worker_to_the_top_level_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let parent_id = "c0de2001-0000-0000-0000-000000000000";
     let worker_id = "c0de2002-0000-0000-0000-000000000000";
     let parent_path = plant_codex_session(
@@ -2133,8 +2149,8 @@ fn current_resolves_a_codex_worker_to_the_top_level_session() {
 
 #[test]
 fn current_fails_when_the_identity_is_absent_from_the_store() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     plant_claude_session(
         claude.path(),
         workdir.path(),
@@ -2161,9 +2177,9 @@ fn current_fails_when_the_identity_is_absent_from_the_store() {
 
 #[test]
 fn current_reports_ambiguity_when_both_harnesses_identify_a_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0010";
     let codex_id = "c0de3001-0000-0000-0000-000000000000";
     plant_claude_session(
@@ -2220,9 +2236,9 @@ fn current_reports_ambiguity_when_both_harnesses_identify_a_session() {
 
 #[test]
 fn current_ignores_a_stale_identity_when_the_other_harness_resolves() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let codex_id = "c0de4001-0000-0000-0000-000000000000";
     plant_codex_session(
         codex.path(),
@@ -2255,9 +2271,9 @@ fn current_ignores_a_stale_identity_when_the_other_harness_resolves() {
 
 #[test]
 fn current_does_not_resolve_an_identity_from_the_other_harness_store() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let shared_id = "c0de4002-0000-0000-0000-000000000000";
     plant_codex_session(
         codex.path(),
@@ -2284,8 +2300,8 @@ fn current_does_not_resolve_an_identity_from_the_other_harness_store() {
 
 #[test]
 fn include_subagents_does_not_expose_claude_workers() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0040";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0041";
     plant_claude_session(
@@ -2360,8 +2376,8 @@ fn agsearch_as_current(
 
 #[test]
 fn project_search_excludes_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2374,8 +2390,8 @@ fn project_search_excludes_the_current_session() {
 
 #[test]
 fn whole_store_search_excludes_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2389,9 +2405,9 @@ fn whole_store_search_excludes_the_current_session() {
 
 #[test]
 fn search_excludes_current_family_workers_under_include_subagents() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let current_id = "c0de5001-0000-0000-0000-000000000000";
     let worker_id = "c0de5002-0000-0000-0000-000000000000";
     let other_id = "c0de5003-0000-0000-0000-000000000000";
@@ -2472,8 +2488,8 @@ fn plant_current_and_earlier_failures(
 
 #[test]
 fn failed_excludes_the_current_session_family() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2486,8 +2502,8 @@ fn failed_excludes_the_current_session_family() {
 
 #[test]
 fn stats_excludes_the_current_session_family() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2500,8 +2516,8 @@ fn stats_excludes_the_current_session_family() {
 
 #[test]
 fn include_current_restores_the_family_for_search() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2517,8 +2533,8 @@ fn include_current_restores_the_family_for_search() {
 
 #[test]
 fn include_current_restores_the_family_for_failure_analysis() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_failures(workdir.path(), claude.path());
 
     let command = |mode: &str| {
@@ -2541,9 +2557,9 @@ fn include_current_restores_the_family_for_failure_analysis() {
 
 #[test]
 fn include_current_restores_family_workers_under_include_subagents() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let current_id = "c0de5101-0000-0000-0000-000000000000";
     let worker_id = "c0de5102-0000-0000-0000-000000000000";
     plant_codex_session(
@@ -2584,8 +2600,8 @@ fn include_current_restores_family_workers_under_include_subagents() {
 
 #[test]
 fn an_explicit_session_selector_searches_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2601,8 +2617,8 @@ fn an_explicit_session_selector_searches_the_current_session() {
 
 #[test]
 fn current_session_selector_searches_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2619,9 +2635,9 @@ fn current_session_selector_searches_the_current_session() {
 
 #[test]
 fn current_family_exclusion_is_qualified_by_harness() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let shared_id = "11111111-aaaa-bbbb-cccc-ddddeeee0130";
     plant_claude_session(
         claude.path(),
@@ -2657,8 +2673,8 @@ fn current_family_exclusion_is_qualified_by_harness() {
 
 #[test]
 fn sessions_still_lists_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2670,8 +2686,8 @@ fn sessions_still_lists_the_current_session() {
 
 #[test]
 fn projects_still_counts_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -2683,8 +2699,8 @@ fn projects_still_counts_the_current_session() {
 
 #[test]
 fn analysis_outside_a_harness_keeps_every_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     plant_current_and_earlier_session(workdir.path(), claude.path());
 
     agsearch_command()
@@ -2702,9 +2718,9 @@ fn analysis_outside_a_harness_keeps_every_session() {
 
 #[test]
 fn search_excludes_the_calling_thread_when_its_parent_is_missing() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let absent_parent_id = "c0de5201-0000-0000-0000-000000000000";
     let worker_id = "c0de5202-0000-0000-0000-000000000000";
     plant_codex_subagent(
@@ -2734,9 +2750,9 @@ fn search_excludes_the_calling_thread_when_its_parent_is_missing() {
 
 #[test]
 fn search_excludes_both_families_when_the_harnesses_disagree() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0120";
     let codex_id = "c0de5301-0000-0000-0000-000000000000";
     plant_claude_session(
@@ -2784,8 +2800,8 @@ fn search_excludes_both_families_when_the_harnesses_disagree() {
 
 #[test]
 fn show_current_renders_the_top_level_claude_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0200";
     plant_claude_session(
         claude.path(),
@@ -2810,8 +2826,8 @@ fn show_current_renders_the_top_level_claude_session() {
 
 #[test]
 fn show_current_thread_renders_the_calling_claude_worker_without_subagents() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0210";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0211";
     plant_claude_session(
@@ -2861,9 +2877,9 @@ fn show_current_thread_renders_the_calling_claude_worker_without_subagents() {
 
 #[test]
 fn show_current_and_current_thread_select_the_same_codex_session_at_the_top_level() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de6001-0000-0000-0000-000000000000";
     plant_codex_session(
         codex.path(),
@@ -2896,9 +2912,9 @@ fn show_current_and_current_thread_select_the_same_codex_session_at_the_top_leve
 
 #[test]
 fn session_selectors_search_only_the_selected_codex_thread() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let parent_id = "c0de6101-0000-0000-0000-000000000000";
     let worker_id = "c0de6102-0000-0000-0000-000000000000";
     plant_codex_session(
@@ -2958,8 +2974,8 @@ fn session_selectors_search_only_the_selected_codex_thread() {
 
 #[test]
 fn session_current_selectors_fail_with_the_resolver_error_when_unavailable() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     plant_claude_session(
         claude.path(),
         workdir.path(),
@@ -3000,9 +3016,9 @@ fn session_current_selectors_fail_with_the_resolver_error_when_unavailable() {
 
 #[test]
 fn session_current_selectors_report_ambiguity_like_current() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0220";
     let codex_id = "c0de6201-0000-0000-0000-000000000000";
     plant_claude_session(
@@ -3066,9 +3082,9 @@ fn session_current_selectors_report_ambiguity_like_current() {
 
 #[test]
 fn export_markdown_writes_claude_provenance_and_transcript() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0300";
     plant_claude_session(
         claude.path(),
@@ -3129,10 +3145,10 @@ fn export_markdown_writes_claude_provenance_and_transcript() {
 
 #[test]
 fn export_markdown_writes_codex_provenance_and_transcript() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "c0de7001-0000-0000-0000-000000000000";
     plant_codex_session(
         codex.path(),
@@ -3186,9 +3202,9 @@ fn export_markdown_writes_codex_provenance_and_transcript() {
 
 #[test]
 fn export_raw_copies_claude_bytes_exactly() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0310";
     let source = plant_claude_session(
         claude.path(),
@@ -3223,10 +3239,10 @@ fn export_raw_copies_claude_bytes_exactly() {
 
 #[test]
 fn export_raw_copies_codex_bytes_exactly() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "c0de7002-0000-0000-0000-000000000000";
     let source = plant_codex_session(
         codex.path(),
@@ -3262,8 +3278,8 @@ fn export_raw_copies_codex_bytes_exactly() {
 
 #[test]
 fn export_to_stdout_writes_markdown_without_a_file() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0320";
     plant_claude_session(
         claude.path(),
@@ -3292,8 +3308,8 @@ fn export_to_stdout_writes_markdown_without_a_file() {
 
 #[test]
 fn export_raw_to_stdout_writes_exact_source_bytes() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0321";
     let source = plant_claude_session(
         claude.path(),
@@ -3320,9 +3336,9 @@ fn export_raw_to_stdout_writes_exact_source_bytes() {
 
 #[test]
 fn export_markdown_snapshot_ignores_an_incomplete_trailing_record() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0330";
     let source = plant_claude_session(
         claude.path(),
@@ -3370,10 +3386,10 @@ fn export_markdown_snapshot_ignores_an_incomplete_trailing_record() {
 
 #[test]
 fn export_codex_snapshot_ignores_an_incomplete_trailing_record() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "c0de7003-0000-0000-0000-000000000000";
     let source = plant_codex_session(
         codex.path(),
@@ -3416,9 +3432,9 @@ fn export_codex_snapshot_ignores_an_incomplete_trailing_record() {
 
 #[test]
 fn export_refuses_to_overwrite_without_force_and_replaces_with_force() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let session_id = "11111111-aaaa-bbbb-cccc-ddddeeee0340";
     plant_claude_session(
         claude.path(),
@@ -3465,9 +3481,9 @@ fn export_refuses_to_overwrite_without_force_and_replaces_with_force() {
 
 #[test]
 fn export_current_exports_only_the_top_level_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0350";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0351";
     plant_claude_session(
@@ -3510,9 +3526,9 @@ fn export_current_exports_only_the_top_level_session() {
 
 #[test]
 fn export_current_thread_exports_the_calling_worker() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let parent_id = "11111111-aaaa-bbbb-cccc-ddddeeee0360";
     let worker_id = "11111111-aaaa-bbbb-cccc-ddddeeee0361";
     plant_claude_session(
@@ -3555,10 +3571,10 @@ fn export_current_thread_exports_the_calling_worker() {
 
 #[test]
 fn export_codex_thread_selectors_export_the_intended_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let parent_id = "c0de7101-0000-0000-0000-000000000000";
     let worker_id = "c0de7102-0000-0000-0000-000000000000";
     plant_codex_session(
@@ -3631,9 +3647,9 @@ fn export_codex_thread_selectors_export_the_intended_session() {
 
 #[test]
 fn export_reports_unresolved_selectors_and_missing_current_context() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let output = tempdir().unwrap();
     plant_claude_session(
         claude.path(),
         workdir.path(),
@@ -3668,10 +3684,10 @@ fn export_reports_unresolved_selectors_and_missing_current_context() {
 
 #[test]
 fn export_reports_ambiguity_like_current() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    let output = tempdir().unwrap();
     let claude_id = "11111111-aaaa-bbbb-cccc-ddddeeee0370";
     let codex_id = "c0de7201-0000-0000-0000-000000000000";
     plant_claude_session(
@@ -3719,8 +3735,8 @@ fn touch_use(id: &str, name: &str, input_json: &str) -> String {
 
 #[test]
 fn file_lists_touches_grouped_by_session_with_handoff_shape() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
         touch_use("t2", "Edit", r#"{"file_path":"docs/x.md"}"#),
@@ -3742,8 +3758,8 @@ fn file_lists_touches_grouped_by_session_with_handoff_shape() {
 
 #[test]
 fn file_suffix_matches_windows_unix_and_relative_paths() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
         touch_use("t2", "Read", r#"{"file_path":"/home/u/p/x.md"}"#),
@@ -3763,8 +3779,8 @@ fn file_suffix_matches_windows_unix_and_relative_paths() {
 
 #[test]
 fn file_multi_segment_selector_does_not_match_a_different_parent() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Read", r#"{"file_path":"docs/x.md"}"#),
         touch_use("t2", "Read", r#"{"file_path":"other/x.md"}"#),
@@ -3782,8 +3798,8 @@ fn file_multi_segment_selector_does_not_match_a_different_parent() {
 
 #[test]
 fn file_matching_is_case_insensitive_and_separator_agnostic() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = touch_use("t1", "Read", r#"{"file_path":"DOCS\\X.MD"}"#);
     let mut cmd = agsearch_in(workdir.path(), store.path(), &lines);
 
@@ -3797,8 +3813,8 @@ fn file_matching_is_case_insensitive_and_separator_agnostic() {
 
 #[test]
 fn file_absolute_selector_matches_only_that_file() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Read", r#"{"file_path":"E:\\p\\x.md"}"#),
         touch_use("t2", "Read", r#"{"file_path":"E:\\other\\x.md"}"#),
@@ -3817,8 +3833,8 @@ fn file_absolute_selector_matches_only_that_file() {
 
 #[test]
 fn file_kind_mapping_covers_all_write_tools_and_excludes_non_touch_tools() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("r1", "Read", r#"{"file_path":"x.md"}"#),
         touch_use("e1", "Edit", r#"{"file_path":"x.md"}"#),
@@ -3851,8 +3867,8 @@ fn file_kind_mapping_covers_all_write_tools_and_excludes_non_touch_tools() {
 
 #[test]
 fn file_failed_touch_is_listed_and_flagged() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Edit", r#"{"file_path":"x.md"}"#),
         r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"String to replace not found"}]}}"#.to_string(),
@@ -3870,8 +3886,8 @@ fn file_failed_touch_is_listed_and_flagged() {
 
 #[test]
 fn file_rows_are_capped_by_max_per_session_with_a_show_hint() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
         touch_use("t2", "Read", r#"{"file_path":"x.md"}"#),
@@ -3894,8 +3910,8 @@ fn file_rows_are_capped_by_max_per_session_with_a_show_hint() {
 
 #[test]
 fn file_files_flag_prints_only_session_paths() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -3914,8 +3930,8 @@ fn file_files_flag_prints_only_session_paths() {
 
 #[test]
 fn file_groups_by_session_newest_first() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_claude_session(
         store.path(),
         workdir.path(),
@@ -3954,8 +3970,8 @@ fn file_groups_by_session_newest_first() {
 
 #[test]
 fn file_session_scope_searches_only_the_named_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_session(
         store.path(),
         "E--projects-demo",
@@ -4015,8 +4031,8 @@ fn plant_current_and_earlier_touches(
 
 #[test]
 fn file_session_current_selects_only_the_current_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
 
     agsearch_as_current(workdir.path(), claude.path(), &current_id)
@@ -4031,8 +4047,8 @@ fn file_session_current_selects_only_the_current_session() {
 
 #[test]
 fn file_excludes_the_current_family_by_default_and_restores_with_include_current() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
 
     // Default: only earlier work.
@@ -4055,8 +4071,8 @@ fn file_excludes_the_current_family_by_default_and_restores_with_include_current
 
 #[test]
 fn file_all_widens_scope_beyond_the_current_project() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_project(
         store.path(),
         "E--projects-other",
@@ -4088,8 +4104,8 @@ fn file_all_widens_scope_beyond_the_current_project() {
 
 #[test]
 fn file_since_excludes_older_sessions() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let project = store
         .path()
         .join("projects")
@@ -4132,8 +4148,8 @@ fn file_since_excludes_older_sessions() {
 
 #[test]
 fn file_harness_claude_lists_claude_touches_and_codex_lists_none() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     plant_claude_session(
         claude.path(),
         workdir.path(),
@@ -4165,8 +4181,8 @@ fn file_harness_claude_lists_claude_touches_and_codex_lists_none() {
 
 #[test]
 fn file_rejects_failed_and_stats_with_a_clear_error() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let _ = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4198,8 +4214,8 @@ fn file_rejects_failed_and_stats_with_a_clear_error() {
 
 #[test]
 fn file_rejects_a_repeated_flag_with_a_clear_error() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let _ = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4221,8 +4237,8 @@ fn file_rejects_a_repeated_flag_with_a_clear_error() {
 
 #[test]
 fn file_rejects_an_empty_selector_with_a_clear_error() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let _ = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4244,8 +4260,8 @@ fn file_rejects_an_empty_selector_with_a_clear_error() {
 
 #[test]
 fn file_trailing_separator_is_ignored() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4261,8 +4277,8 @@ fn file_trailing_separator_is_ignored() {
 
 #[test]
 fn file_reports_the_standard_empty_message_when_nothing_touches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let mut cmd = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4278,8 +4294,8 @@ fn file_reports_the_standard_empty_message_when_nothing_touches() {
 
 #[test]
 fn sessions_and_projects_reject_file() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     fs::create_dir_all(store.path().join("projects")).unwrap();
 
     agsearch_command()
@@ -4304,8 +4320,8 @@ fn sessions_and_projects_reject_file() {
 
 #[test]
 fn file_project_flag_targets_a_named_project() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_project(
         store.path(),
         "E--projects-wanted",
@@ -4335,8 +4351,8 @@ fn file_project_flag_targets_a_named_project() {
 
 #[test]
 fn written_drops_read_rows_but_keeps_write_tools() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         touch_use("r1", "Read", r#"{"file_path":"x.md"}"#),
         touch_use("e1", "Edit", r#"{"file_path":"x.md"}"#),
@@ -4363,8 +4379,8 @@ fn written_drops_read_rows_but_keeps_write_tools() {
 
 #[test]
 fn written_drops_sessions_left_with_no_rows() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_claude_session(
         store.path(),
         workdir.path(),
@@ -4393,8 +4409,8 @@ fn written_drops_sessions_left_with_no_rows() {
 
 #[test]
 fn written_without_file_errors_clearly() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let _ = agsearch_in(
         workdir.path(),
         store.path(),
@@ -4413,8 +4429,8 @@ fn written_without_file_errors_clearly() {
 
 #[test]
 fn written_composes_with_files_flag_and_max_per_session() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // One read-only session (drops out under --written) plus one session
     // with a read and two writes (read drops, writes cap at 1).
     plant_claude_session(
@@ -4469,8 +4485,8 @@ fn written_composes_with_files_flag_and_max_per_session() {
 
 #[test]
 fn written_composes_with_session_current() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = plant_current_and_earlier_touches(workdir.path(), claude.path());
 
     // The current session's only Touch is a read, so --written finds nothing
@@ -4488,8 +4504,8 @@ fn written_composes_with_session_current() {
 
 #[test]
 fn written_keeps_writes_in_session_current() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
     let current_id = "cccccccc-0000-0000-0000-000000000400";
     plant_claude_session(
         claude.path(),
@@ -4518,8 +4534,8 @@ fn written_keeps_writes_in_session_current() {
 
 #[test]
 fn file_query_returns_matches_only_from_touching_sessions() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_claude_session(
         store.path(),
         workdir.path(),
@@ -4558,8 +4574,8 @@ fn file_query_returns_matches_only_from_touching_sessions() {
 
 #[test]
 fn file_query_omits_touching_sessions_with_no_match() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_claude_session(
         store.path(),
         workdir.path(),
@@ -4598,8 +4614,8 @@ fn file_query_omits_touching_sessions_with_no_match() {
 
 #[test]
 fn file_query_output_uses_the_standard_match_shape() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         r#"{"type":"user","message":{"role":"user","content":"tokio needle here"}}"#.to_string(),
         touch_use("t1", "Read", r#"{"file_path":"x.md"}"#),
@@ -4622,8 +4638,8 @@ fn file_query_output_uses_the_standard_match_shape() {
 
 #[test]
 fn file_query_written_restricts_to_write_touches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_claude_session(
         store.path(),
         workdir.path(),
@@ -4677,8 +4693,8 @@ fn file_query_written_restricts_to_write_touches() {
 
 #[test]
 fn file_query_keeps_thinking_and_tools_meaning() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // One Session whose only Match is in thinking, one whose only Match is in
     // tool content; both touch the selected file.
     plant_claude_session(
@@ -4758,8 +4774,8 @@ fn file_query_keeps_thinking_and_tools_meaning() {
 
 #[test]
 fn file_query_keeps_regex_and_case_meaning() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let lines = [
         r#"{"type":"user","message":{"role":"user","content":"reading the borrow checker docs"}}"#
             .to_string(),
@@ -4803,8 +4819,8 @@ fn file_query_keeps_regex_and_case_meaning() {
 
 #[test]
 fn file_query_composes_with_session_limit_and_files_flag() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     plant_session(
         store.path(),
         "E--projects-demo",
@@ -4860,8 +4876,8 @@ fn file_query_composes_with_session_limit_and_files_flag() {
         .stdout(predicates::str::contains("tokio in session").not());
 
     // -m caps the Matches per Session with the standard hint.
-    let capped_dir = tempfile::tempdir().unwrap();
-    let capped_store = tempfile::tempdir().unwrap();
+    let capped_dir = tempdir().unwrap();
+    let capped_store = tempdir().unwrap();
     let capped_lines = [
         r#"{"type":"user","message":{"role":"user","content":"zebra one"}}"#.to_string(),
         r#"{"type":"user","message":{"role":"user","content":"zebra two"}}"#.to_string(),
@@ -4976,8 +4992,8 @@ fn codex_file_command(workdir: &std::path::Path, codex_dir: &std::path::Path) ->
 
 #[test]
 fn codex_apply_patch_touching_two_files_yields_two_write_touches() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let patch = "*** Begin Patch\n*** Add File: a/x.md\n+hello\n*** Update File: b/x.md\n@@\n-old\n+new\n*** End Patch\n";
     let call = codex_apply_patch("patch-1", patch);
     let done = codex_message("done");
@@ -5014,8 +5030,8 @@ fn codex_apply_patch_touching_two_files_yields_two_write_touches() {
 
 #[test]
 fn codex_apply_patch_add_update_and_delete_hunks_all_count() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let patch = "*** Begin Patch\n*** Add File: docs/added.md\n+new\n*** Update File: docs/changed.md\n@@\n-old\n+new\n*** Delete File: docs/removed.md\n*** End Patch\n";
     // Exercise the `function_call.arguments` input shape here (the other
     // Codex tests use `custom_tool_call.input`).
@@ -5042,8 +5058,8 @@ fn codex_apply_patch_add_update_and_delete_hunks_all_count() {
 
 #[test]
 fn codex_shell_calls_produce_no_touch() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let shell = codex_shell("shell-1", "cat x.md");
     let done = codex_message("done");
     plant_codex_session(
@@ -5064,8 +5080,8 @@ fn codex_shell_calls_produce_no_touch() {
 
 #[test]
 fn codex_failed_apply_patch_is_listed_and_flagged() {
-    let workdir = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let patch = "*** Begin Patch\n*** Update File: docs/x.md\n@@\n-old\n+new\n*** End Patch\n";
     let call = codex_apply_patch("patch-1", patch);
     let output = codex_output(
@@ -5132,8 +5148,8 @@ fn claude_user_prompt(text: &str, timestamp: &str) -> String {
 
 #[test]
 fn usage_breakdown_lists_calls_in_turn_order_with_total() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let session_id = "aaaaaaaa-1111-2222-3333-444444444444";
     plant_claude_session(
         store.path(),
@@ -5195,8 +5211,8 @@ fn usage_breakdown_lists_calls_in_turn_order_with_total() {
 
 #[test]
 fn usage_breakdown_counts_shared_message_id_once() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let session_id = "bbbbbbbb-1111-2222-3333-444444444444";
     // One API call written as three Records sharing one message.id (thinking,
     // text, tool_use) with identical Usage, plus a second distinct call.
@@ -5283,8 +5299,8 @@ fn usage_breakdown_counts_shared_message_id_once() {
 
 #[test]
 fn usage_breakdown_shows_blank_cells_for_calls_without_usage() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let session_id = "cccccccc-1111-2222-3333-444444444444";
     let no_usage = serde_json::json!({
         "type": "assistant",
@@ -5342,8 +5358,8 @@ fn usage_breakdown_shows_blank_cells_for_calls_without_usage() {
 
 #[test]
 fn usage_breakdown_sort_total_orders_biggest_first() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let session_id = "dddddddd-1111-2222-3333-444444444444";
     plant_claude_session(
         store.path(),
@@ -5402,8 +5418,8 @@ fn usage_breakdown_sort_total_orders_biggest_first() {
 
 #[test]
 fn usage_current_and_current_thread_resolve_through_the_central_resolver() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let parent_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0200";
     let worker_id = "eeeeeeee-aaaa-bbbb-cccc-ddddeeee0201";
     plant_claude_session(
@@ -5479,8 +5495,8 @@ fn usage_current_and_current_thread_resolve_through_the_central_resolver() {
 
 #[test]
 fn usage_without_a_selector_ranks_instead_of_erroring() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
 
     agsearch_command()
         .current_dir(workdir.path())
@@ -5601,9 +5617,9 @@ fn codex_assistant_message(text: &str, timestamp: &str) -> String {
 
 #[test]
 fn usage_breakdown_codex_sums_token_counts_with_same_columns() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de0001-1111-2222-3333-444444444444";
     // Two calls. Input column shows non-cached input for cross-Harness
     // comparability (raw input minus cached minus cache-write), so:
@@ -5686,9 +5702,9 @@ fn usage_breakdown_codex_sums_token_counts_with_same_columns() {
 
 #[test]
 fn usage_breakdown_codex_mismatch_warns_and_keeps_sum() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de0002-1111-2222-3333-444444444444";
     let tc1 = codex_token_count(
         "2026-08-28T10:01:00.000Z",
@@ -5741,9 +5757,9 @@ fn usage_breakdown_codex_mismatch_warns_and_keeps_sum() {
 
 #[test]
 fn usage_breakdown_codex_empty_with_no_token_counts() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de0003-1111-2222-3333-444444444444";
     // Messages only: no token_count Records -> empty table, zero total (unlike
     // Claude, whose Messages become blank-usage rows).
@@ -5814,9 +5830,9 @@ fn plant_ranking_claude(
 
 #[test]
 fn usage_ranking_orders_both_harnesses_by_total_descending() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     // Claude: 10 + 2000 + 30000 + 50 = 32060.
     let claude_id = "aaaaaaaa-1111-2222-3333-444444444444";
     plant_ranking_claude(
@@ -5887,8 +5903,8 @@ fn usage_ranking_orders_both_harnesses_by_total_descending() {
 
 #[test]
 fn usage_ranking_sort_output_input_calls_reorder() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // big: 1 call, input 50000, output 1000 -> total 51000.
     let big_id = "bbbbbbbb-1111-2222-3333-444444444444";
     plant_ranking_claude(
@@ -5980,8 +5996,8 @@ fn usage_ranking_sort_output_input_calls_reorder() {
 
 #[test]
 fn usage_ranking_limit_truncates() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     for (id, total_out) in [
         ("eeeeeee1-1111-2222-3333-444444444444", 50000u64),
         ("eeeeeee2-1111-2222-3333-444444444444", 40000u64),
@@ -6029,9 +6045,9 @@ fn usage_ranking_limit_truncates() {
 
 #[test]
 fn usage_ranking_all_and_project_scope_like_sessions() {
-    let workdir = tempfile::tempdir().unwrap();
-    let other = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let other = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let current_id = "f0f0f0f0-1111-2222-3333-444444444444";
     plant_ranking_claude(
         store.path(),
@@ -6107,9 +6123,9 @@ fn usage_ranking_all_and_project_scope_like_sessions() {
 
 #[test]
 fn usage_ranking_harness_narrows_like_sessions() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let claude_id = "11112222-1111-2222-3333-444444444444";
     plant_ranking_claude(
         claude.path(),
@@ -6158,8 +6174,8 @@ fn usage_ranking_harness_narrows_like_sessions() {
 
 #[test]
 fn usage_ranking_since_filters_like_sessions() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let old_id = "22223333-1111-2222-3333-444444444444";
     plant_ranking_claude(
         store.path(),
@@ -6202,8 +6218,8 @@ fn usage_ranking_since_filters_like_sessions() {
 
 #[test]
 fn usage_ranking_excludes_current_family_by_default() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let current_id = "44445555-aaaa-bbbb-cccc-ddddeeee0100";
     plant_ranking_claude(
         store.path(),
@@ -6263,8 +6279,8 @@ fn usage_ranking_excludes_current_family_by_default() {
 
 #[test]
 fn usage_ranking_omits_sessions_without_usage_and_reports_skipped() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let used_id = "66667777-1111-2222-3333-444444444444";
     plant_ranking_claude(
         store.path(),
@@ -6359,8 +6375,8 @@ fn plant_claude_parent_with_worker(
 
 #[test]
 fn usage_ranking_folds_claude_worker_into_parent() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Distinct prefixes so parent and worker rows are distinguishable.
     let parent_id = "a1a1a1a1-1111-2222-3333-444444444444";
     let worker_id = "b2b2b2b2-1111-2222-3333-444444444444";
@@ -6397,8 +6413,8 @@ fn usage_ranking_folds_claude_worker_into_parent() {
 
 #[test]
 fn usage_ranking_include_subagents_lists_claude_workers_separately() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let parent_id = "a3a3a3a3-1111-2222-3333-444444444444";
     let worker_id = "b4b4b4b4-1111-2222-3333-444444444444";
     plant_claude_parent_with_worker(
@@ -6429,8 +6445,8 @@ fn usage_ranking_include_subagents_lists_claude_workers_separately() {
 
 #[test]
 fn usage_breakdown_claude_parent_includes_marked_worker_and_matches_ranking() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let parent_id = "a5a5a5a5-1111-2222-3333-444444444444";
     let worker_id = "b6b6b6b6-1111-2222-3333-444444444444";
     plant_claude_parent_with_worker(
@@ -6484,8 +6500,8 @@ fn usage_breakdown_claude_parent_includes_marked_worker_and_matches_ranking() {
 
 #[test]
 fn usage_breakdown_resolves_a_claude_worker_id_directly() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let parent_id = "a7a7a7a7-1111-2222-3333-444444444444";
     let worker_id = "b8b8b8b8-1111-2222-3333-444444444444";
     plant_claude_parent_with_worker(
@@ -6519,9 +6535,9 @@ fn usage_breakdown_resolves_a_claude_worker_id_directly() {
 
 #[test]
 fn usage_breakdown_codex_malformed_final_disables_the_check() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let session_id = "c0de0009-1111-2222-3333-444444444444";
     // One valid call, but the final total is not an object: no usable counts,
     // so the mismatch check disables itself instead of warning on zeros.
@@ -6570,9 +6586,9 @@ fn usage_breakdown_codex_malformed_final_disables_the_check() {
 
 #[test]
 fn usage_ranking_folds_codex_worker_into_parent() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let parent_id = "c0de1111-0000-0000-0000-000000000000";
     let worker_id = "c0de2222-0000-0000-0000-000000000000";
     // Parent: raw 10000-2000-500=7500 input, total 7500+500+2000+100=10,100.
@@ -6644,9 +6660,9 @@ fn usage_ranking_folds_codex_worker_into_parent() {
 
 #[test]
 fn usage_ranking_include_subagents_lists_codex_workers_separately() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let parent_id = "c0de3333-0000-0000-0000-000000000000";
     let worker_id = "c0de4444-0000-0000-0000-000000000000";
     let parent_tc = codex_token_count(
@@ -6715,9 +6731,9 @@ fn usage_ranking_include_subagents_lists_codex_workers_separately() {
 
 #[test]
 fn usage_breakdown_codex_parent_includes_marked_worker_and_matches_ranking() {
-    let workdir = tempfile::tempdir().unwrap();
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
     let parent_id = "c0de5555-0000-0000-0000-000000000000";
     let worker_id = "c0de6666-0000-0000-0000-000000000000";
     let parent_tc = codex_token_count(
@@ -6799,8 +6815,8 @@ fn usage_breakdown_codex_parent_includes_marked_worker_and_matches_ranking() {
 
 #[test]
 fn usage_ranking_folds_transitive_claude_grandchild_into_root() {
-    let workdir = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let store = tempdir().unwrap();
     // Three-level family: parent -> worker -> grandchild. Every descendant's
     // Usage folds into the root (spec: "every descendant thread").
     let parent_id = "c1c1c1c1-1111-2222-3333-444444444444";
