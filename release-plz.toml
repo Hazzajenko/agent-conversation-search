@@ -4,3 +4,20 @@ git_release_enable = false
 git_tag_name = "v{{ version }}"
 changelog_update = true
 pr_labels = ["release"]
+
+[changelog]
+# Keep the release heading to the bare version: cargo-dist reuses it as the
+# GitHub Release title, and GitHub already shows the release date.
+body = """
+## [{{ version | trim_start_matches(pat="v") }}]({{ release_link }})
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+{%- if commit.scope -%}
+- *({{commit.scope}})* {{ commit.message }}{%- if commit.links %} ({% for link in commit.links %}[{{link.text}}]({{link.href}}) {% endfor -%}){% endif %}
+{% else -%}
+- {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endif -%}
+{% endfor -%}
+{% endfor -%}
+"""
