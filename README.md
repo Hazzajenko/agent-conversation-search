@@ -22,12 +22,12 @@ $ agsearch current             # inspect the Session that invoked this command
 The transcripts use Harness-specific layouts and JSON formats. `agsearch`
 turns them into six jobs:
 
-- **find** a conversation — `agsearch <query>`
-- **read** a conversation — `agsearch show <id>`
-- **inspect** the Current Session — `agsearch current`
-- **preserve** a conversation — `agsearch export <id> <file>`
-- **analyse** what went wrong — `agsearch --failed` / `--stats`
-- **measure** token Usage — `agsearch usage` / `agsearch usage <id>`
+- **find** a conversation with `agsearch <query>`
+- **read** a conversation with `agsearch show <id>`
+- **inspect** the Current Session with `agsearch current`
+- **preserve** a conversation with `agsearch export <id> <file>`
+- **analyse** what went wrong with `agsearch --failed` or `--stats`
+- **measure** token Usage with `agsearch usage` or `agsearch usage <id>`
 
 > **Status: early.** `agsearch` is at 0.x. Verbs and flags can still change
 > between minor versions. Open an issue if something breaks for you.
@@ -65,14 +65,14 @@ has the Sessions, or point the Store flags at the other environment.
 
 ## The core workflow
 
-Every verb is welded together by one identifier: the **short session-id** (a
-git-style unique prefix). `search` and `--failed` print it; `show` resolves it.
-That is the whole loop — find something, copy its id, open it:
+Every verb is welded together by one identifier: the **short session-id**. It is a
+git-style unique prefix. `search` and `--failed` print it, and `show` resolves it.
+That is the whole loop. Find something, copy its id, open it:
 
 ```console
-$ agsearch "diesel migration"      # find — note the id in each header
-$ agsearch show 4c28878f           # read — the full transcript
-$ agsearch show 4c28878f --around 220   # read — just the turns around turn 220
+$ agsearch "diesel migration"      # find, then note the id in each header
+$ agsearch show 4c28878f           # read the full transcript
+$ agsearch show 4c28878f --around 220   # read just the turns around turn 220
 ```
 
 You can also pipe by path instead of copying ids:
@@ -96,15 +96,15 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `--thinking` | also search assistant thinking blocks |
 | `--tools` | also search tool calls and tool results |
 | `--all-content` | search everything (`--thinking --tools`) |
-| `-m`, `--max-per-session <N>` | cap matches shown per Session (`0` = unlimited; default 3) |
+| `-m`, `--max-per-session <N>` | cap matches shown per Session (`0` = unlimited, default 3) |
 | `-l`, `--files` | print only matching file paths, for piping |
-| `--file <SELECTOR>` | list file Touches by File Selector; with a Query, search text only inside Sessions touching the file |
+| `--file <SELECTOR>` | list file Touches by File Selector. With a Query, search text only inside Sessions touching the file |
 | `--written` | with `--file`, show only write Touches (Edit, Write, MultiEdit, NotebookEdit, Codex apply_patch) |
 | `--harness <claude\|codex>` | search only one Harness |
 | `--include-subagents` | include Codex subagent Sessions and mark them in output |
 | `--include-current` | include the Current Session Family (excluded by default) |
 
-By default only Prompts, Replies, and Titles are searched — thinking and tool
+By default only Prompts, Replies, and Titles are searched. Thinking and tool
 content are opt-in.
 
 Search covers **historical** conversations. When a Harness identifies the
@@ -113,8 +113,8 @@ search from matching the Prompt that started the search.
 
 Pass `--include-current` to include the family. Pass `--session current` to
 search the top-level Current Session directly, or `--session current-thread`
-to search the calling thread (the same Session at the top level, the worker's
-own thread when called from a spawned worker). A Session id selects that
+to search the calling thread. At the top level that is the same Session. From a
+spawned worker it is the worker's own thread. A Session id selects that
 Session even when it belongs to the family.
 
 The exclusion also covers `--failed` and `--stats`. When
@@ -127,22 +127,22 @@ If both Harnesses identify a Session, search excludes both families. If a
 family ancestor is missing from the Store, search still excludes the calling
 thread and its workers.
 
-### `show` — read a whole conversation
+### `show` reads a whole conversation
 
-`agsearch show <id>` renders a Session as a readable transcript (tool calls
-collapse to one-liners; failed tool calls are flagged; thinking is hidden).
+`agsearch show <id>` renders a Session as a readable transcript. Tool calls
+collapse to one-liners, failed tool calls are flagged, and thinking is hidden.
 
 | Flag | Effect |
 |------|--------|
 | `--thinking` | expand assistant thinking blocks |
-| `--around <turn>` | show only the turns around this turn (e.g. a search hit) |
+| `--around <turn>` | show only the turns around this turn, such as a search hit |
 | `--context <N>` | turns of context on either side of `--around` (default 3) |
 
-`<id>` is a git-style prefix resolved across your whole history; `current`
+`<id>` is a git-style prefix resolved across your whole history. `current`
 renders the top-level Current Session and `current-thread` renders the calling
-thread (the same Session at the top level); `-` reads a file path from stdin.
+thread, which is the same Session at the top level. `-` reads a file path from stdin.
 
-### `current` — inspect the invoking Session
+### `current` inspects the invoking Session
 
 `agsearch current` prints the Current Session identified by the Harness that
 launched the command: Harness, full Session ID, Project, title, source path,
@@ -155,8 +155,8 @@ conversation.
 | `--path` | print only the source Session path |
 
 Claude identity comes from `$CLAUDE_CODE_SESSION_ID`. Codex identity comes from
-`$CODEX_SESSION_ID` (the top-level Session) and `$CODEX_THREAD_ID` (the
-calling thread). At the top level those two identify the same Session; a
+`$CODEX_SESSION_ID` for the top-level Session and `$CODEX_THREAD_ID` for the
+calling thread. At the top level those two identify the same Session. A
 spawned worker still resolves `current` to the top-level Session.
 
 If no supported Harness identity is available, the command fails rather than
@@ -177,17 +177,17 @@ $ agsearch current --id-only
 11111111-aaaa-bbbb-cccc-ddddeeee0001
 ```
 
-### `export` — preserve a Session snapshot
+### `export` preserves a Session snapshot
 
 `agsearch export <SESSION> <DEST>` writes one point-in-time snapshot of one
 Session to one destination. The Session accepts a unique id prefix, `current`
 for the top-level Current Session, or `current-thread` for the calling thread.
 `current` exports only the top-level Session, never a combined family document.
-The destination is required; `-` writes the Export to standard output.
+The destination is required. `-` writes the Export to standard output.
 
 | Flag | Effect |
 |------|--------|
-| `--format markdown\|raw` | readable document (the default) or an exact raw copy |
+| `--format markdown\|raw` | readable document by default, or an exact raw copy |
 | `--force` | overwrite the destination when it already exists |
 | `--thinking` | expand assistant thinking blocks in Markdown Export |
 
@@ -195,16 +195,16 @@ Readable Export (Markdown) is a portable document with provenance followed by
 the Transcript. Provenance carries the title, full Session ID, Harness,
 Project, source timestamp, export timestamp, and snapshot status, so the file
 identifies its origin without `agsearch`. The Transcript body uses the same
-renderer as `show` — Messages only, tool calls as compact one-liners, failed
+renderer as `show`: Messages only, tool calls as compact one-liners, failed
 tool results flagged, thinking hidden unless `--thinking` is passed.
 
 Raw Export (`--format raw`) copies the Harness Session file exactly, with no
 added metadata and no interactive confirmation beyond the explicit format
 option. It is the way to preserve the source data.
 
-Every Export is a snapshot: it captures the content available when the command
+Every Export is a snapshot. It captures the content available when the command
 runs and finishes without waiting for the Harness. A Markdown snapshot renders
-every complete Record and ignores an incomplete trailing JSONL record; the
+every complete Record and ignores an incomplete trailing JSONL record. The
 document identifies itself as a snapshot so nobody mistakes it for a final
 transcript. A raw snapshot contains the source bytes captured by the operation.
 
@@ -219,10 +219,10 @@ $ agsearch export 4c28878f - | less             # pipe through stdout
 $ agsearch export 4c28878f raw.jsonl --format raw --force
 ```
 
-### `sessions` — list conversations
+### `sessions` lists conversations
 
-`agsearch sessions` lists the Sessions in scope, newest first, one per line —
-for when you want to reopen a recent conversation but don't remember anything to
+`agsearch sessions` lists the Sessions in scope, newest first, one per line.
+Use it when you want to reopen a recent conversation but don't remember anything to
 search for. Each row is paste-able into `show`.
 
 ```console
@@ -231,9 +231,9 @@ codex · de151981 · E:\projects\rust\demo · Test app runtime and functionality
 claude · d712581e · E:\projects\rust\demo · Lifetimes and the borrow checker · 2026-06-02 · main
 ```
 
-### `projects` — list projects
+### `projects` lists projects
 
-`agsearch projects` lists every Project in your history (whole-Store), newest
+`agsearch projects` lists every Project across the whole Store, newest
 first, with how many Sessions each holds and when it was last touched. The name
 is the real path, recovered from the transcripts.
 
@@ -243,13 +243,13 @@ E:\projects\rust\agent-conversation-search · 7 sessions · 2026-06-02
 E:\projects\games\creature-game · 43 sessions · 2026-06-01
 ```
 
-### `usage` — rank Sessions by token Usage
+### `usage` ranks Sessions by token Usage
 
-`agsearch usage` ranks the Sessions in scope by total token Usage (tokens
-only, no money), biggest first — for when you want to find which
+`agsearch usage` ranks the Sessions in scope by total token Usage, biggest first. It counts tokens
+only, not money. Use it to find which
 conversations burned the most tokens. `agsearch usage <id>` shows one row
-per model call inside that Session, in turn order (Claude Code) or file
-order (Codex `token_count` Records), with a total line.
+per model call inside that Session, in turn order for Claude Code or file
+order for Codex `token_count` Records, with a total line.
 
 ```console
 $ agsearch usage
@@ -266,18 +266,18 @@ total                                               215        1,200     165,000
 
 | Flag | Effect |
 |------|--------|
-| `--sort {total,output,input,calls}` | rank by this column (default `total`); on the breakdown only `total` is valid (biggest-first, default is turn order for Claude Code, file order for Codex) |
-| `--limit <N>` | maximum Sessions in the ranking (default 20; ranking only) |
+| `--sort {total,output,input,calls}` | rank by this column, default `total`. On the breakdown only `total` is valid. It sorts biggest first, and the default is turn order for Claude Code and file order for Codex |
+| `--limit <N>` | maximum Sessions in the ranking (default 20, ranking only) |
 | `--all`, `--project <substr>`, `--harness <claude\|codex>`, `--since <when>` | scope the ranking like `sessions` (current Project by default) |
 | `--include-subagents` | list subagent threads as their own rows instead of folding them into the parent |
 | `--include-current` | put the Current Session Family back into the ranking (excluded by default) |
 
-Subagent threads fold into their parent row by default (the `subagents`
-column shows how many were folded); the breakdown of a parent includes its
+Subagent threads fold into their parent row by default. The `subagents`
+column shows how many were folded. The breakdown of a parent includes its
 workers' calls marked in the `subagent` column, so its total matches the
 ranking row. Sessions with no Usage are omitted with a `skipped N sessions
-with no usage` line. The selector accepts the same forms as `show` (id
-prefix, `current`, `current-thread`). A Codex Session whose summed turns
+with no usage` line. The selector accepts the same forms as `show`: id
+prefix, `current`, `current-thread`. A Codex Session whose summed turns
 disagree with its final running total keeps the sums and warns on stderr.
 
 ## Failure analysis
@@ -300,16 +300,16 @@ $ agsearch --stats
 ```
 
 One-off signatures fold into the trailing `+N more` line so the table stays
-readable at `--all` scale (unless every row is a one-off, in which case they
-are shown). Use `--failed` to see every failure individually.
+readable at `--all` scale. If every row is a one-off, all rows
+are shown. Use `--failed` to see every failure individually.
 
 Add `--full` to a `--failed` listing to print each failure's complete error text
 instead of the single salient line.
 
 ## Scope and filters
 
-These compose with `search`, `--failed`, `--stats`, and (where noted) the
-listing verbs:
+These compose with `search`, `--failed`, `--stats`, and the listing verbs
+where noted:
 
 | Flag | Effect | Applies to |
 |------|--------|-----------|
@@ -317,42 +317,43 @@ listing verbs:
 | `--all` | every Project in your history | search, sessions, usage |
 | `--project <substr>` | Projects whose name contains the substring | search, sessions, projects, usage |
 | `--session <selector>` | one Session, selected by id-prefix, `current`, or `current-thread`. The selected Session remains included when it belongs to the Current Session Family | search |
-| `--file <SELECTOR>` | list Touches of the selected file; with a Query, restrict Matches to touching Sessions | search |
+| `--file <SELECTOR>` | list Touches of the selected file. With a Query, restrict Matches to touching Sessions | search |
 | `--written` | with `--file`, keep only write Touches | search |
 | `--include-current` | put the Current Session Family back into the results | search, `--failed`, `--stats`, usage |
 | `--since <when>` | only Sessions/Projects touched since a duration (`3d`, `2w`, `1h`) or ISO date (`2026-05-01`) | all |
 
 The default scope merges Sessions from both Harnesses by their encoded working
 directory. `projects` shows one row when both Harnesses used the same directory.
-Subagent threads stay excluded unless you pass `--include-subagents`
-(`usage` instead folds workers into the parent row unless you pass it).
+Subagent threads stay excluded unless you pass `--include-subagents`.
+`usage` instead folds workers into the parent row unless you pass it.
 `sessions` and `projects` are inventory verbs. They keep listing and counting
-the Current Session; `usage` ranking excludes the Current Session Family like
+the Current Session. `usage` ranking excludes the Current Session Family like
 search and failure analysis.
 
 ## Output and exit codes
 
 - Output is colorized on a TTY and plain when piped or under `NO_COLOR`.
 - "No matches" / "No sessions" / "No projects" / "No sessions with usage"
-  exit **0** — an empty result is not an error.
-- Bad input (unparseable regex, unparseable `--since`, an ambiguous id, a
-  missing Session, unavailable or ambiguous current context, an existing Export
-  destination without `--force`) exits **non-zero** with a readable message.
+  exit **0**. An empty result is not an error.
+- Bad input exits **non-zero** with a readable message. Bad input is an
+  unparseable regex, an unparseable `--since`, an ambiguous id, a missing
+  Session, unavailable or ambiguous current context, or an existing Export
+  destination without `--force`.
 
 ## As a Claude Code plugin
 
-This repo also ships a Claude Code skill (`skills/agsearch`, declared in
-`.claude-plugin/plugin.json`) that lets Claude recall past conversations for you
-— "did we ever discuss X?", "find the session where we set up Y". The skill is
+This repo also ships a Claude Code skill in `skills/agsearch`, declared in
+`.claude-plugin/plugin.json`. It lets Claude recall past conversations for you,
+for example "did we ever discuss X?" or "find the session where we set up Y". The skill is
 thin glue over the same binary, so install `agsearch` on your PATH first.
 
 ## Concepts
 
-The precise vocabulary this tool is built around — **Harness, Project, Session,
-Record, Message, Query, Match, Failure, Usage, Store** — lives in [`CONTEXT.md`](CONTEXT.md).
+The precise vocabulary this tool is built around lives in [`CONTEXT.md`](CONTEXT.md):
+**Harness, Project, Session, Record, Message, Query, Match, Failure, Usage, Store**.
 The reasoning behind the bigger design decisions is in
-[`docs/adr/`](docs/adr/) (locating Projects, the verb/handoff model, failure
-grouping, the listing verbs).
+[`docs/adr/`](docs/adr/). They cover locating Projects, the verb/handoff model,
+failure grouping, and the listing verbs.
 
 ## License
 
