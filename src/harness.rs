@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::opencode::OpenCodeAdapter;
 use crate::session::Session;
 use crate::{ProjectKey, Scope, SessionIdentity, ShortIds};
 
@@ -13,6 +14,7 @@ use crate::{ProjectKey, Scope, SessionIdentity, ShortIds};
 pub enum Harness {
     Claude,
     Codex,
+    OpenCode,
 }
 
 /// Where a Session lives in its Store. Claude Code and Codex keep each Session
@@ -56,6 +58,7 @@ impl Harness {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::OpenCode => "opencode",
         }
     }
 }
@@ -840,6 +843,15 @@ impl Stores {
         Self::from_adapters(vec![
             Box::new(ClaudeAdapter::discover(claude_dir)),
             Box::new(CodexAdapter::discover(codex_dir)),
+        ])
+    }
+
+    /// Every Harness Store. A missing Store lists nothing.
+    pub fn with_all(claude_dir: &Path, codex_dir: &Path, opencode_dir: &Path) -> Self {
+        Self::from_adapters(vec![
+            Box::new(ClaudeAdapter::discover(claude_dir)),
+            Box::new(CodexAdapter::discover(codex_dir)),
+            Box::new(OpenCodeAdapter::discover(opencode_dir)),
         ])
     }
 

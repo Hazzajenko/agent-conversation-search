@@ -2,6 +2,7 @@
 
 mod current;
 mod harness;
+mod opencode;
 mod session;
 mod short_id;
 
@@ -228,6 +229,24 @@ pub fn resolve_codex_dir(
         .map(Path::to_path_buf)
         .or_else(|| env_codex_home.map(PathBuf::from))
         .or_else(|| home.map(|directory| directory.join(".codex")))
+}
+
+/// Resolve the OpenCode Store from `--opencode-dir`, then
+/// `$XDG_DATA_HOME/opencode` when that is set and not empty, then `<home>/.local/share/opencode`, in that
+/// order. OpenCode uses this path on every platform, Windows included.
+pub fn resolve_opencode_dir(
+    cli_override: Option<&Path>,
+    env_xdg_data_home: Option<&str>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    cli_override
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            env_xdg_data_home
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| Path::new(dir).join("opencode"))
+        })
+        .or_else(|| home.map(|dir| dir.join(".local/share/opencode")))
 }
 
 /// Which Projects a search covers.
@@ -782,7 +801,7 @@ fn resolve_prefix_from(sessions: Vec<SessionHandle>, prefix: &str) -> StoreSessi
     }
     let mut matches: Vec<SessionHandle> = sessions
         .into_iter()
-        .filter(|session| session.info.session_id.starts_with(prefix))
+        .filter(|session| opencode::id_has_prefix(&session.info.session_id, prefix))
         .collect();
     matches.sort_by(|a, b| a.info.session_id.cmp(&b.info.session_id));
     match matches.len() {
@@ -4048,6 +4067,24 @@ mod tests {
     #[test]
     fn resolves_to_none_when_no_source_is_available() {
         assert_eq!(resolve_claude_dir(None, None, None), None);
+    }
+
+    #[test]
+    fn the_opencode_store_follows_override_then_xdg_then_home() {
+        let home = Some(Path::new("/home/alice"));
+        assert_eq!(
+            resolve_opencode_dir(Some(Path::new("/explicit")), Some("/xdg"), home),
+            Some(PathBuf::from("/explicit"))
+        );
+        assert_eq!(
+            resolve_opencode_dir(None, Some("/xdg"), home),
+            Some(Path::new("/xdg").join("opencode"))
+        );
+        assert_eq!(
+            resolve_opencode_dir(None, Some(""), home),
+            Some(Path::new("/home/alice").join(".local/share/opencode"))
+        );
+        assert_eq!(resolve_opencode_dir(None, None, None), None);
     }
 
     #[test]
