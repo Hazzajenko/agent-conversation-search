@@ -23,6 +23,7 @@ fn tempdir() -> std::io::Result<tempfile::TempDir> {
 fn agsearch_command() -> Command {
     let mut command = Command::cargo_bin("agsearch").unwrap();
     command.env("CODEX_HOME", "__agsearch_test_missing_codex_store__");
+    command.env("XDG_DATA_HOME", "__agsearch_test_missing_data_home__");
     // Isolate current-context detection from the developer's real Harness.
     command
         .env_remove("CLAUDE_CODE_SESSION_ID")
@@ -7077,4 +7078,342 @@ fn short_ids_stay_unique_against_sessions_outside_the_scope() {
         .assert()
         .success()
         .stdout(predicates::str::contains("claude · abcdefghij1 ·"));
+}
+
+/// The `session`, `message`, and `part` tables as OpenCode 1.18 creates them.
+const OPENCODE_SCHEMA: &str = "
+CREATE TABLE `session` (
+  `id` text PRIMARY KEY,
+  `project_id` text NOT NULL,
+  `workspace_id` text,
+  `parent_id` text,
+  `slug` text NOT NULL,
+  `directory` text NOT NULL,
+  `path` text,
+  `title` text NOT NULL,
+  `version` text NOT NULL,
+  `share_url` text,
+  `summary_additions` integer,
+  `summary_deletions` integer,
+  `summary_files` integer,
+  `summary_diffs` text,
+  `metadata` text,
+  `cost` real DEFAULT 0 NOT NULL,
+  `tokens_input` integer DEFAULT 0 NOT NULL,
+  `tokens_output` integer DEFAULT 0 NOT NULL,
+  `tokens_reasoning` integer DEFAULT 0 NOT NULL,
+  `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+  `tokens_cache_write` integer DEFAULT 0 NOT NULL,
+  `revert` text,
+  `permission` text,
+  `agent` text,
+  `model` text,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `time_compacting` integer,
+  `time_archived` integer
+);
+CREATE TABLE `message` (
+  `id` text PRIMARY KEY,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL
+);
+CREATE TABLE `part` (
+  `id` text PRIMARY KEY,
+  `message_id` text NOT NULL,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL
+);
+";
+
+/// 2026-08-28T10:00:00Z in epoch milliseconds, the unit OpenCode stores.
+const OPENCODE_AUG_28: i64 = 1_787_911_200_000;
+/// 2026-01-01T10:00:00Z in epoch milliseconds.
+const OPENCODE_JAN_1: i64 = 1_767_261_600_000;
+
+const OPENCODE_A: &str = "ses_f36c0fcffffeYOE6LLg4PRibgr";
+const OPENCODE_B: &str = "ses_f36c0fcf1ffeZevQ12apJFoNBL";
+const OPENCODE_CHILD: &str = "ses_a1b2c3d4effe01IgDuAmyIFsyA";
+
+/// One `session` row for [`plant_opencode_session`].
+struct OpenCodeSession<'a> {
+    id: &'a str,
+    parent_id: Option<&'a str>,
+    directory: String,
+    title: &'a str,
+    time_updated: i64,
+    archived: bool,
+}
+
+impl<'a> OpenCodeSession<'a> {
+    fn new(id: &'a str, directory: &std::path::Path, title: &'a str) -> Self {
+        Self {
+            id,
+            parent_id: None,
+            // OpenCode records Windows directories with forward slashes.
+            directory: directory.to_string_lossy().replace('\\', "/"),
+            title,
+            time_updated: OPENCODE_AUG_28,
+            archived: false,
+        }
+    }
+}
+
+/// Add a Session row to the `opencode.db` in `store`, creating the database
+/// from [`OPENCODE_SCHEMA`] on first use.
+fn plant_opencode_session(store: &std::path::Path, session: OpenCodeSession) {
+    let path = store.join("opencode.db");
+    let fresh = !path.exists();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    if fresh {
+        db.execute_batch(OPENCODE_SCHEMA).unwrap();
+    }
+    db.execute(
+        "INSERT INTO session (id, project_id, parent_id, slug, directory, title, version,
+            time_created, time_updated, time_archived)
+         VALUES (?1, 'prj_fixture', ?2, 'fixture-slug', ?3, ?4, '1.18.32', ?5, ?5, ?6)",
+        rusqlite::params![
+            session.id,
+            session.parent_id,
+            session.directory,
+            session.title,
+            session.time_updated,
+            session.archived.then_some(session.time_updated),
+        ],
+    )
+    .unwrap();
+}
+
+/// A command with only the given OpenCode Store configured.
+fn agsearch_with_opencode(workdir: &std::path::Path, opencode: &std::path::Path) -> Command {
+    let mut command = agsearch_command();
+    command
+        .current_dir(workdir)
+        .arg("--claude-dir")
+        .arg(workdir.join("missing-claude"))
+        .arg("--opencode-dir")
+        .arg(opencode);
+    command
+}
+
+#[test]
+fn sessions_lists_opencode_sessions_with_their_identity() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(OPENCODE_A, workdir.path(), "Fix the parser"),
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession {
+            time_updated: OPENCODE_JAN_1,
+            ..OpenCodeSession::new(
+                OPENCODE_B,
+                workdir.path(),
+                "New session - 2026-01-01T10:00:00.000Z",
+            )
+        },
+    );
+
+    let directory = workdir.path().to_string_lossy().replace('\\', "/");
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "opencode · f36c0fcff · {directory} · Fix the parser · 2026-08-28\n"
+        )))
+        .stdout(predicates::str::contains(format!(
+            "opencode · f36c0fcf1 · {directory} · (untitled) · 2026-01-01\n"
+        )))
+        .stdout(predicates::str::contains("ses_").not());
+}
+
+#[test]
+fn projects_merge_opencode_with_claude_code() {
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "11111111-2222-3333-4444-555555555555",
+        &prompt_line("claude side"),
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(OPENCODE_A, workdir.path(), "OpenCode side"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--opencode-dir")
+        .arg(opencode.path())
+        .arg("projects")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(" · 2 sessions · "))
+        .stdout(predicates::str::contains(" · 1 session · ").not());
+}
+
+#[test]
+fn opencode_child_sessions_are_opt_in_and_archived_sessions_are_listed() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession {
+            archived: true,
+            ..OpenCodeSession::new(OPENCODE_A, workdir.path(), "Archived parent")
+        },
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession {
+            parent_id: Some(OPENCODE_A),
+            ..OpenCodeSession::new(OPENCODE_CHILD, workdir.path(), "Review (@general subagent)")
+        },
+    );
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Archived parent"))
+        .stdout(predicates::str::contains("a1b2c3d4").not());
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["sessions", "--include-subagents"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode · a1b2c3d4 · "));
+}
+
+#[test]
+fn harness_project_and_since_filter_opencode_sessions() {
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "11111111-2222-3333-4444-555555555555",
+        &prompt_line("claude side"),
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(OPENCODE_A, workdir.path(), "Recent work"),
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession {
+            time_updated: OPENCODE_JAN_1,
+            ..OpenCodeSession::new(OPENCODE_B, workdir.path(), "Old work")
+        },
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(
+            OPENCODE_CHILD,
+            std::path::Path::new("/elsewhere/other-repo"),
+            "Other repo",
+        ),
+    );
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--opencode-dir")
+            .arg(opencode.path());
+        command
+    };
+
+    command()
+        .args(["--harness", "opencode", "sessions", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Recent work"))
+        .stdout(predicates::str::contains("Other repo"))
+        .stdout(predicates::str::contains("claude ·").not());
+    command()
+        .args(["sessions", "--project", "other-repo"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Other repo"))
+        .stdout(predicates::str::contains("Recent work").not());
+    command()
+        .args(["--harness", "opencode", "sessions", "--since", "2026-08-01"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Recent work"))
+        .stdout(predicates::str::contains("Old work").not());
+}
+
+#[test]
+fn an_opencode_dir_without_a_database_is_a_silent_missing_store() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["sessions", "--all"])
+        .assert()
+        .success()
+        .stderr("")
+        .stdout("No sessions.\n");
+}
+
+#[test]
+fn the_default_opencode_store_follows_xdg_data_home() {
+    let workdir = tempdir().unwrap();
+    let data = tempdir().unwrap();
+    let opencode = data.path().join("opencode");
+    fs::create_dir_all(&opencode).unwrap();
+    plant_opencode_session(
+        &opencode,
+        OpenCodeSession::new(OPENCODE_A, workdir.path(), "From XDG"),
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .env("XDG_DATA_HOME", data.path())
+        .arg("--claude-dir")
+        .arg(workdir.path().join("missing-claude"))
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("From XDG"));
+}
+
+#[test]
+fn an_opencode_id_resolves_with_or_without_its_ses_prefix() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(OPENCODE_A, workdir.path(), "First"),
+    );
+    plant_opencode_session(
+        opencode.path(),
+        OpenCodeSession::new(OPENCODE_B, workdir.path(), "Second"),
+    );
+
+    for selector in ["f36c0fcff", "ses_f36c0fcff", OPENCODE_A] {
+        agsearch_with_opencode(workdir.path(), opencode.path())
+            .args(["show", selector])
+            .assert()
+            .success();
+    }
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["show", "f36c0fcf"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
 }

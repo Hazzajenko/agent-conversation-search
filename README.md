@@ -57,8 +57,11 @@ cargo install --path .
 ```
 
 `agsearch` reads `$CLAUDE_CONFIG_DIR` or `~/.claude` for Claude Code and
-`$CODEX_HOME` or `~/.codex` for Codex. Use `--claude-dir <PATH>` or
-`--codex-dir <PATH>` to override a Store. A missing Store is skipped.
+`$CODEX_HOME` or `~/.codex` for Codex. For OpenCode it reads `opencode.db` in
+`$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`, on every platform. Use
+`--claude-dir <PATH>`, `--codex-dir <PATH>`, or `--opencode-dir <PATH>` to
+override a Store. A missing Store is skipped. `sessions` and `projects` list
+OpenCode Sessions. Search and `show` do not read OpenCode messages yet.
 
 Windows and WSL keep separate histories. Run `agsearch` in the environment that
 has the Sessions, or point the Store flags at the other environment.
@@ -102,8 +105,8 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `-l`, `--files` | print only matching file paths, for piping |
 | `--file <SELECTOR>` | list file Touches by File Selector. With a Query, search text only inside Sessions touching the file |
 | `--written` | with `--file`, show only write Touches (Edit, Write, MultiEdit, NotebookEdit, Codex apply_patch) |
-| `--harness <claude\|codex>` | search only one Harness |
-| `--include-subagents` | include Codex subagent Sessions and mark them in output |
+| `--harness <claude\|codex\|opencode>` | search only one Harness |
+| `--include-subagents` | include Codex subagent Sessions and OpenCode child sessions and mark them in output |
 | `--include-current` | include the Current Session Family (excluded by default) |
 
 By default only Prompts, Replies, and Titles are searched. Thinking and tool

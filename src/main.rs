@@ -12,7 +12,7 @@ use agsearch::{
     format_transcript_for_harness, format_usage_breakdown, format_usage_ranking,
     format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
     parse_store_transcript, parse_transcript_locator, resolve_claude_dir, resolve_codex_dir,
-    resolve_current_context, resolve_current_session, resolve_current_thread,
+    resolve_current_context, resolve_current_session, resolve_current_thread, resolve_opencode_dir,
     resolve_store_session_prefix, resolve_store_session_prefix_including_subagents,
     search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
     since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
@@ -38,6 +38,11 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     codex_dir: Option<PathBuf>,
 
+    /// Override the OpenCode data directory. Defaults to
+    /// $XDG_DATA_HOME/opencode, then ~/.local/share/opencode.
+    #[arg(long, value_name = "PATH", global = true)]
+    opencode_dir: Option<PathBuf>,
+
     /// Search only one Harness. By default every available Store is searched.
     #[arg(long, value_enum, global = true)]
     harness: Option<HarnessChoice>,
@@ -58,6 +63,8 @@ struct Cli {
 enum HarnessChoice {
     Claude,
     Codex,
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 #[derive(Subcommand)]
@@ -98,7 +105,7 @@ enum Command {
     /// breakdown.
     ///
     /// Ranking scope reuses the `sessions` flags: `--all`, `--project <SUBSTR>`,
-    /// `--harness <claude|codex>`, `--since <WHEN>`, `--include-subagents`,
+    /// `--harness <claude|codex|opencode>`, `--since <WHEN>`, `--include-subagents`,
     /// and `--include-current` (the ranking excludes the Current Session Family
     /// by default). Subagent threads fold into their parent row by default;
     /// `--include-subagents` lists them as their own rows instead. Ranking
@@ -380,6 +387,7 @@ fn main() -> ExitCode {
 
     let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let env_codex_home = std::env::var("CODEX_HOME").ok();
+    let env_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
     let home = dirs::home_dir();
     let Some(claude_dir) = resolve_claude_dir(
         cli.claude_dir.as_deref(),
@@ -403,12 +411,24 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     };
+    let Some(opencode_dir) = resolve_opencode_dir(
+        cli.opencode_dir.as_deref(),
+        env_xdg_data_home.as_deref(),
+        home.as_deref(),
+    ) else {
+        eprintln!(
+            "agsearch: could not determine the OpenCode data directory; \
+             pass --opencode-dir or set $XDG_DATA_HOME"
+        );
+        return ExitCode::FAILURE;
+    };
 
     let selected = cli.harness.map(|choice| match choice {
         HarnessChoice::Claude => Harness::Claude,
         HarnessChoice::Codex => Harness::Codex,
+        HarnessChoice::OpenCode => Harness::OpenCode,
     });
-    let stores = Stores::with_claude_and_codex(&claude_dir, &codex_dir)
+    let stores = Stores::with_all(&claude_dir, &codex_dir, &opencode_dir)
         .selecting(selected)
         .including_subagents(cli.include_subagents);
 

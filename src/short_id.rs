@@ -1,7 +1,10 @@
 //! The short session-id is the shortest prefix of a `sessionId` that is unique
-//! across all Stores, with a minimum of 8 characters. See ADR 0017.
+//! across all Stores, with a minimum of 8 characters. The `ses_` prefix of an
+//! OpenCode id is not shown. See ADR 0017.
 
 use std::collections::HashMap;
+
+use crate::opencode::without_id_prefix;
 
 /// The fewest characters a short session-id shows, even when fewer are unique.
 const MIN_LEN: usize = 8;
@@ -17,7 +20,10 @@ pub struct ShortIds {
 
 impl ShortIds {
     pub fn from_ids(ids: impl IntoIterator<Item = String>) -> Self {
-        let mut ids: Vec<String> = ids.into_iter().collect();
+        let mut ids: Vec<String> = ids
+            .into_iter()
+            .map(|id| without_id_prefix(&id).to_string())
+            .collect();
         ids.sort();
         ids.dedup();
         // In sorted order, the id that shares the longest prefix with an id
@@ -37,6 +43,7 @@ impl ShortIds {
 
     /// The short session-id to print for `session_id`.
     pub fn of(&self, session_id: &str) -> String {
+        let session_id = without_id_prefix(session_id);
         let len = self.lengths.get(session_id).copied().unwrap_or(MIN_LEN);
         session_id.chars().take(len).collect()
     }
@@ -67,14 +74,22 @@ mod tests {
 
     #[test]
     fn ids_that_share_a_long_prefix_grow_until_they_differ() {
+        let ids = table(&["2a7f9c1d4Xaaaa", "2a7f9c1d4Ybbbb", "9zzzzzzzzzzzzz"]);
+        assert_eq!(ids.of("2a7f9c1d4Xaaaa"), "2a7f9c1d4X");
+        assert_eq!(ids.of("2a7f9c1d4Ybbbb"), "2a7f9c1d4Y");
+        assert_eq!(ids.of("9zzzzzzzzzzzzz"), "9zzzzzzz");
+    }
+
+    #[test]
+    fn opencode_ids_show_without_ses() {
         let ids = table(&[
             "ses_2a7f9c1d4Xaaaa",
             "ses_2a7f9c1d4Ybbbb",
             "ses_9zzzzzzzzzzzzz",
         ]);
-        assert_eq!(ids.of("ses_2a7f9c1d4Xaaaa"), "ses_2a7f9c1d4X");
-        assert_eq!(ids.of("ses_2a7f9c1d4Ybbbb"), "ses_2a7f9c1d4Y");
-        assert_eq!(ids.of("ses_9zzzzzzzzzzzzz"), "ses_9zzz");
+        assert_eq!(ids.of("ses_2a7f9c1d4Xaaaa"), "2a7f9c1d4X");
+        assert_eq!(ids.of("ses_2a7f9c1d4Ybbbb"), "2a7f9c1d4Y");
+        assert_eq!(ids.of("ses_9zzzzzzzzzzzzz"), "9zzzzzzz");
     }
 
     #[test]

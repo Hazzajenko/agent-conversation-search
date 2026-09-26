@@ -28,6 +28,7 @@ regex = "1.12.3"
 anyhow = "1.0.102"
 anstream = "1.0.0"
 owo-colors = "4.3.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 proptest = "1"
