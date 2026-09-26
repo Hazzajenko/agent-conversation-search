@@ -7654,3 +7654,89 @@ fn an_opencode_search_sees_committed_rows_during_an_open_wal_write() {
 
     writer.execute_batch("ROLLBACK").unwrap();
 }
+
+/// One OpenCode Session with a `read` call that errored and a `bash` call that
+/// exited non-zero but completed.
+fn plant_opencode_failures(store: &std::path::Path, workdir: &std::path::Path) {
+    plant_opencode_session(
+        store,
+        OpenCodeSession::new(OPENCODE_A, workdir, "Failure work"),
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_001",
+        "user",
+        OPENCODE_AUG_28,
+        &[r#"{"type":"text","text":"read the parser"}"#],
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_002",
+        "assistant",
+        OPENCODE_AUG_28 + 1_000,
+        &[
+            r#"{"type":"tool","tool":"read","callID":"call_1","state":{"status":"error","input":{"filePath":"src/parser.rs"},"error":"File not found: src/parser.rs"}}"#,
+            r#"{"type":"tool","tool":"bash","callID":"call_2","state":{"status":"completed","input":{"command":"cargo test"},"output":"error: test failed\nExit code 101","metadata":{"exit":101}}}"#,
+        ],
+    );
+}
+
+#[test]
+fn failed_lists_an_opencode_tool_call_with_status_error() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_failures(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("--failed")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode · f36c0fcf · "))
+        .stdout(predicates::str::contains("[2] ✗ read  src/parser.rs"))
+        .stdout(predicates::str::contains("File not found: src/parser.rs"))
+        .stdout(predicates::str::contains("cargo test").not());
+}
+
+#[test]
+fn stats_counts_opencode_failures_with_other_harnesses() {
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_failures(opencode.path(), workdir.path());
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "11111111-aaaa-bbbb-cccc-ddddeeee0120",
+        &[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"src/lexer.rs"}}]},"timestamp":"2026-08-01T10:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"File does not exist."}]}}"#,
+        ]
+        .join("\n"),
+    );
+    let command = || {
+        let mut command = agsearch_command();
+        command
+            .current_dir(workdir.path())
+            .arg("--claude-dir")
+            .arg(claude.path())
+            .arg("--opencode-dir")
+            .arg(opencode.path());
+        command
+    };
+
+    command()
+        .arg("--stats")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("✗ read"))
+        .stdout(predicates::str::contains("✗ Read"))
+        .stdout(predicates::str::contains("bash").not());
+    command()
+        .args(["--harness", "opencode", "--failed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("✗ read  src/parser.rs"))
+        .stdout(predicates::str::contains("src/lexer.rs").not());
+}
