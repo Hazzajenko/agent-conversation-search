@@ -60,8 +60,9 @@ cargo install --path .
 `$CODEX_HOME` or `~/.codex` for Codex. For OpenCode it reads `opencode.db` in
 `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`, on every platform. Use
 `--claude-dir <PATH>`, `--codex-dir <PATH>`, or `--opencode-dir <PATH>` to
-override a Store. A missing Store is skipped. `sessions` and `projects` list
-OpenCode Sessions. Search and `show` do not read OpenCode messages yet.
+override a Store. A missing Store is skipped. Search, `show`, `sessions`, and
+`projects` cover OpenCode Sessions. For an OpenCode Session, `-l` prints
+`<path to opencode.db>#<session id>`, and `show -` accepts that form.
 
 Windows and WSL keep separate histories. Run `agsearch` in the environment that
 has the Sessions, or point the Store flags at the other environment.

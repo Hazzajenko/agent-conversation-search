@@ -239,7 +239,8 @@ struct SearchArgs {
 struct ShowArgs {
     /// A git-style unique prefix of a session-id (resolved across the whole
     /// Store), `current` for the top-level Current Session, `current-thread`
-    /// for the calling thread, or `-` to read a Session file path from stdin.
+    /// for the calling thread, or `-` to read a Session locator from stdin, as
+    /// `-l` prints it.
     session: String,
 
     /// Expand assistant thinking blocks (collapsed to a count by default).
@@ -1064,8 +1065,8 @@ fn run_usage_ranking(stores: Stores, args: &UsageArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Read the first non-empty line of stdin as a Session file path (for
-/// `agsearch -l … | … | agsearch show -`).
+/// Read the first non-empty line of stdin as a Session locator, a file path
+/// or `<opencode.db path>#<session id>` (for `agsearch -l … | … | agsearch show -`).
 fn read_locator_from_stdin() -> Option<SessionLocator> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok()?;
@@ -1073,5 +1074,5 @@ fn read_locator_from_stdin() -> Option<SessionLocator> {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| SessionLocator::File(PathBuf::from(line)))
+        .map(SessionLocator::parse)
 }
