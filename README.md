@@ -60,8 +60,10 @@ cargo install --path .
 `$CODEX_HOME` or `~/.codex` for Codex. For OpenCode it reads `opencode.db` in
 `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`, on every platform. Use
 `--claude-dir <PATH>`, `--codex-dir <PATH>`, or `--opencode-dir <PATH>` to
-override a Store. A missing Store is skipped. Search, `show`, `sessions`, and
-`projects` cover OpenCode Sessions. For an OpenCode Session, `-l` prints
+override a Store. A missing Store is skipped. Search, `show`, `sessions`,
+`projects`, `--failed`, and `--stats` cover OpenCode Sessions. An OpenCode
+Failure is a tool call with status `error`. A shell command that exits non-zero
+but completes is not a Failure. For an OpenCode Session, `-l` prints
 `<path to opencode.db>#<session id>`, and `show -` accepts that form.
 
 Windows and WSL keep separate histories. Run `agsearch` in the environment that
