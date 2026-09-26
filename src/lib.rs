@@ -869,8 +869,8 @@ pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option
 }
 
 /// Parse a Session directly from a locator, inferring its Harness from
-/// the JSONL envelope. This keeps the path-pipe form of `show -` independent of
-/// configured Store discovery.
+/// the JSONL envelope or the database locator. This keeps the path-pipe
+/// form of `show -` independent of configured Store discovery.
 pub fn parse_transcript_locator(locator: &SessionLocator) -> Option<(Harness, Vec<Turn>)> {
     let (harness, parsed) = harness::parse_session_locator(locator)?;
     Some((harness, turns_from_session(&parsed)))

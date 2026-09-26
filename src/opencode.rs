@@ -4,9 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
+use serde_json::Value;
 
 use crate::harness::{Harness, HarnessAdapter, SessionLocator};
-use crate::session::{Session, SessionMeta};
+use crate::session::{
+    AssistantBlock, Record, RecordBuilder, RecordKind, Session, SessionMeta, UserBlock,
+};
 use crate::{ProjectKey, SessionIdentity};
 
 /// The prefix of every OpenCode Session id. Display drops it (ADR 0017).
@@ -34,30 +37,37 @@ impl OpenCodeAdapter {
         Some((path, Connection::open_with_flags(path, flags).ok()?))
     }
 
+    /// The adapter for one database file, as a `show -` locator names it.
+    pub(crate) fn for_database(database: &Path) -> Self {
+        Self {
+            database: database.is_file().then(|| database.to_path_buf()),
+        }
+    }
+
     /// Every `session` row, child sessions included. A read failure lists
     /// nothing, the same as a missing Store.
     fn rows(&self) -> Vec<SessionRow> {
         let Some((path, db)) = self.open() else {
             return Vec::new();
         };
-        let Ok(mut query) =
-            db.prepare("SELECT id, parent_id, directory, title, time_updated FROM session")
-        else {
+        let Ok(mut query) = db.prepare(&format!("{SESSION_COLUMNS} FROM session")) else {
             return Vec::new();
         };
-        let Ok(rows) = query.query_map([], |row| {
-            Ok(SessionRow {
-                database: path.to_path_buf(),
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                directory: row.get(2)?,
-                title: row.get(3)?,
-                time_updated: row.get(4)?,
-            })
-        }) else {
+        let Ok(rows) = query.query_map([], |row| SessionRow::read(path, row)) else {
             return Vec::new();
         };
         rows.flatten().collect()
+    }
+
+    /// The `session` row with the exact id `session_id`.
+    fn row(&self, db: &Connection, session_id: &str) -> Option<SessionRow> {
+        let path = self.database.as_deref()?;
+        db.query_row(
+            &format!("{SESSION_COLUMNS} FROM session WHERE id = ?1"),
+            [session_id],
+            |row| SessionRow::read(path, row),
+        )
+        .ok()
     }
 
     fn sessions(&self, prefix: Option<&str>, include_subagents: bool) -> Vec<SessionIdentity> {
@@ -95,14 +105,14 @@ impl HarnessAdapter for OpenCodeAdapter {
         self.rows().into_iter().map(|row| row.id).collect()
     }
 
-    /// The Session metadata. Messages are not read yet, so the Session has no
-    /// Records.
+    /// The Session metadata from its `session` row and one Record per
+    /// `message` row (ADR 0016).
     fn parse(&self, locator: &SessionLocator) -> Option<Session> {
         let SessionLocator::Database { session_id, .. } = locator else {
             return None;
         };
-        let row = self.rows().into_iter().find(|row| &row.id == session_id)?;
-        let identity = row.into_identity();
+        let (_, db) = self.open()?;
+        let identity = self.row(&db, session_id)?.into_identity();
         Some(Session {
             meta: SessionMeta {
                 title: identity.title,
@@ -110,9 +120,149 @@ impl HarnessAdapter for OpenCodeAdapter {
                 cwd: identity.cwd,
                 ..SessionMeta::default()
             },
-            records: Vec::new(),
+            records: read_records(&db, session_id)?,
         })
     }
+}
+
+/// The Records of one Session, in turn order. Each `message` row is one
+/// Message. Its `text`, `reasoning`, and `tool` parts become Blocks, and the
+/// other part kinds are noise.
+fn read_records(db: &Connection, session_id: &str) -> Option<Vec<Record>> {
+    let mut query = db
+        .prepare(
+            "SELECT m.id, m.time_created, m.data, p.data
+             FROM message m LEFT JOIN part p ON p.message_id = m.id
+             WHERE m.session_id = ?1
+             ORDER BY m.time_created, m.id, p.id",
+        )
+        .ok()?;
+    let rows = query
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .ok()?;
+    let mut messages: Vec<MessageRow> = Vec::new();
+    for (id, time_created, data, part) in rows.flatten() {
+        if messages.last().is_none_or(|message| message.id != id) {
+            messages.push(MessageRow {
+                id,
+                time_created,
+                data: serde_json::from_str(&data).unwrap_or(Value::Null),
+                parts: Vec::new(),
+            });
+        }
+        if let Some(part) = part.and_then(|data| serde_json::from_str(&data).ok()) {
+            messages.last_mut()?.parts.push(part);
+        }
+    }
+    let mut records = RecordBuilder::default();
+    for message in &messages {
+        let timestamp = Some(iso8601_from_millis(message.time_created));
+        match message.data.get("role").and_then(Value::as_str) {
+            Some("user") => records.message(user_kind(&message.parts), timestamp, None),
+            Some("assistant") => {
+                let (blocks, results) = assistant_blocks(&message.parts);
+                records.message(Some(RecordKind::Assistant(blocks)), timestamp.clone(), None);
+                if !results.is_empty() {
+                    records.same_message(Some(RecordKind::UserBlocks(results)), timestamp, None);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(records.finish())
+}
+
+/// One `message` row with its parts, in part order.
+struct MessageRow {
+    id: String,
+    /// Epoch milliseconds.
+    time_created: i64,
+    data: Value,
+    parts: Vec<Value>,
+}
+
+/// The Prompt of a user Message is its `text` parts joined. OpenCode marks text
+/// it adds itself, such as file contents, as `synthetic`. That text is not
+/// what the person typed, so it is left out.
+fn user_kind(parts: &[Value]) -> Option<RecordKind> {
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter(|part| part_type(part) == Some("text"))
+        .filter(|part| !flag(part, "synthetic") && !flag(part, "ignored"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    (!texts.is_empty()).then(|| RecordKind::Prompt(texts.join("\n")))
+}
+
+/// The Blocks of an assistant Message and the tool results it holds. A `tool`
+/// part is both the call and, once it has finished, its result.
+fn assistant_blocks(parts: &[Value]) -> (Vec<AssistantBlock>, Vec<UserBlock>) {
+    let mut blocks = Vec::new();
+    let mut results = Vec::new();
+    for part in parts {
+        let text = || {
+            part.get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        match part_type(part) {
+            Some("text") => blocks.push(AssistantBlock::Text(text())),
+            Some("reasoning") => blocks.push(AssistantBlock::Thinking(text())),
+            Some("tool") => {
+                let id = part
+                    .get("callID")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let state = part.get("state");
+                let field = |key: &str| {
+                    state
+                        .and_then(|state| state.get(key))
+                        .and_then(Value::as_str)
+                };
+                blocks.push(AssistantBlock::ToolUse {
+                    id: id.clone(),
+                    name: part
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    input: state
+                        .and_then(|state| state.get("input"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                });
+                let (is_error, text) = match field("status") {
+                    Some("completed") => (false, field("output")),
+                    Some("error") => (true, field("error")),
+                    _ => continue,
+                };
+                results.push(UserBlock::ToolResult {
+                    is_error,
+                    exit_code: None,
+                    tool_use_id: id,
+                    text: text.unwrap_or_default().to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    (blocks, results)
+}
+
+fn part_type(part: &Value) -> Option<&str> {
+    part.get("type").and_then(Value::as_str)
+}
+
+fn flag(part: &Value, key: &str) -> bool {
+    part.get(key).and_then(Value::as_bool) == Some(true)
 }
 
 /// The `session` columns the adapter reads.
@@ -126,7 +276,21 @@ struct SessionRow {
     time_updated: i64,
 }
 
+/// The `SELECT` list that [`SessionRow::read`] expects.
+const SESSION_COLUMNS: &str = "SELECT id, parent_id, directory, title, time_updated";
+
 impl SessionRow {
+    fn read(database: &Path, row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            database: database.to_path_buf(),
+            id: row.get(0)?,
+            parent_id: row.get(1)?,
+            directory: row.get(2)?,
+            title: row.get(3)?,
+            time_updated: row.get(4)?,
+        })
+    }
+
     fn into_identity(self) -> SessionIdentity {
         SessionIdentity {
             harness: Harness::OpenCode,
@@ -247,6 +411,61 @@ mod tests {
                 .find(|session| session.session_id == "ses_child")
                 .and_then(|session| session.parent_id.as_deref()),
             Some("ses_parent")
+        );
+    }
+
+    #[test]
+    fn the_adapter_reads_one_record_per_message() {
+        let store = tempfile::tempdir().unwrap();
+        let db = Connection::open(store.path().join("opencode.db")).unwrap();
+        db.execute_batch(
+            r#"CREATE TABLE session (id text PRIMARY KEY, parent_id text, directory text NOT NULL,
+                title text NOT NULL, time_updated integer NOT NULL);
+             CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL,
+                time_created integer NOT NULL, data text NOT NULL);
+             CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL,
+                data text NOT NULL);
+             INSERT INTO session VALUES ('ses_a', NULL, 'E:/projects/demo', 'Demo', 1787911200000);
+             INSERT INTO message VALUES
+                ('msg_1', 'ses_a', 1787911200000, '{"role":"user"}'),
+                ('msg_2', 'ses_a', 1787911201000, '{"role":"assistant"}'),
+                ('msg_3', 'ses_a', 1787911202000, '{"role":"user"}');
+             INSERT INTO part VALUES
+                ('prt_1', 'msg_1', '{"type":"text","text":"typed"}'),
+                ('prt_2', 'msg_1', '{"type":"text","text":"file body","synthetic":true}'),
+                ('prt_3', 'msg_2', '{"type":"step-start"}'),
+                ('prt_4', 'msg_2', '{"type":"tool","tool":"read","callID":"c1","state":{"status":"error","input":{"filePath":"a.rs"},"error":"missing"}}'),
+                ('prt_5', 'msg_2', '{"type":"tool","tool":"bash","callID":"c2","state":{"status":"running","input":{"command":"ls"}}}'),
+                ('prt_6', 'msg_2', '{"type":"unknown-kind","text":"ignored"}'),
+                ('prt_7', 'msg_2', '{"type":"text","text":"reply"}');"#,
+        )
+        .unwrap();
+        drop(db);
+        let adapter = OpenCodeAdapter::discover(store.path());
+
+        let session = adapter
+            .parse(&SessionLocator::Database {
+                path: store.path().join("opencode.db"),
+                session_id: "ses_a".into(),
+            })
+            .unwrap();
+
+        let turns: Vec<_> = session.records.iter().map(|record| record.turn).collect();
+        assert_eq!(turns, vec![Some(1), Some(2), Some(2)]);
+        assert_eq!(session.records[0].kind, RecordKind::Prompt("typed".into()));
+        let RecordKind::Assistant(blocks) = &session.records[1].kind else {
+            panic!("expected an assistant Record");
+        };
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[2], AssistantBlock::Text("reply".into()));
+        assert_eq!(
+            session.records[2].kind,
+            RecordKind::UserBlocks(vec![UserBlock::ToolResult {
+                is_error: true,
+                exit_code: None,
+                tool_use_id: Some("c1".into()),
+                text: "missing".into(),
+            }])
         );
     }
 

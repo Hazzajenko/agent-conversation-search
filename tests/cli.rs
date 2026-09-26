@@ -7417,3 +7417,240 @@ fn an_opencode_id_resolves_with_or_without_its_ses_prefix() {
         .failure()
         .stderr(predicates::str::contains("ambiguous"));
 }
+
+/// Add a `message` row and its `part` rows to a Session planted with
+/// [`plant_opencode_session`]. Each part is its `data` JSON, in order.
+fn plant_opencode_message(
+    store: &std::path::Path,
+    session_id: &str,
+    message_id: &str,
+    role: &str,
+    time_created: i64,
+    parts: &[&str],
+) {
+    let db = rusqlite::Connection::open(store.join("opencode.db")).unwrap();
+    db.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?3, ?4)",
+        rusqlite::params![
+            message_id,
+            session_id,
+            time_created,
+            format!(r#"{{"role":"{role}","time":{{"created":{time_created}}}}}"#),
+        ],
+    )
+    .unwrap();
+    for (index, data) in parts.iter().enumerate() {
+        db.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            rusqlite::params![
+                format!("prt_{message_id}_{index:03}"),
+                message_id,
+                session_id,
+                time_created,
+                data,
+            ],
+        )
+        .unwrap();
+    }
+}
+
+/// One OpenCode Session with a Prompt, a Reply with reasoning and a tool call,
+/// and noise parts that all mention `noise-needle`.
+fn plant_opencode_conversation(store: &std::path::Path, workdir: &std::path::Path) {
+    plant_opencode_session(
+        store,
+        OpenCodeSession::new(OPENCODE_A, workdir, "Parser work"),
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_001",
+        "user",
+        OPENCODE_AUG_28,
+        &[
+            r#"{"type":"text","text":"find the parser prompt-needle"}"#,
+            r#"{"type":"file","mime":"text/plain","filename":"noise-needle.txt","url":"file:///noise-needle.txt"}"#,
+        ],
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_002",
+        "assistant",
+        OPENCODE_AUG_28 + 1_000,
+        &[
+            r#"{"type":"step-start","snapshot":"noise-needle"}"#,
+            r#"{"type":"reasoning","text":"think about reasoning-needle"}"#,
+            r#"{"type":"tool","tool":"bash","callID":"call_1","state":{"status":"completed","input":{"command":"cargo test"},"output":"tool-output-needle"}}"#,
+            r#"{"type":"text","text":"the parser reply-needle is fixed"}"#,
+            r#"{"type":"patch","hash":"abc","files":["noise-needle.rs"]}"#,
+            r#"{"type":"future-kind","text":"noise-needle from a newer OpenCode"}"#,
+            r#"{"type":"step-finish","reason":"noise-needle","tokens":{"input":1,"output":1}}"#,
+        ],
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_003",
+        "user",
+        OPENCODE_AUG_28 + 2_000,
+        &[r#"{"type":"text","text":"thanks, last-needle"}"#],
+    );
+}
+
+#[test]
+fn a_query_matches_opencode_prompts_and_replies() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("needle")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode · f36c0fcf · "))
+        .stdout(predicates::str::contains(
+            "[1] user: find the parser prompt-needle",
+        ))
+        .stdout(predicates::str::contains(
+            "[2] assistant: the parser reply-needle is fixed",
+        ))
+        .stdout(predicates::str::contains("[3] user: thanks, last-needle"))
+        .stdout(predicates::str::contains("reasoning-needle").not());
+}
+
+#[test]
+fn opencode_reasoning_matches_only_with_thinking() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("reasoning-needle")
+        .assert()
+        .success()
+        .stdout("No matches.\n");
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["reasoning-needle", "--thinking"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "[2] thinking: think about reasoning-needle",
+        ));
+}
+
+#[test]
+fn opencode_noise_parts_never_match() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["noise-needle", "--all-content"])
+        .assert()
+        .success()
+        .stdout("No matches.\n");
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["tool-output-needle", "--tools"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[2] tool: tool-output-needle"));
+}
+
+#[test]
+fn show_renders_an_opencode_transcript_on_the_search_turn() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["show", "f36c0fcf"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode\n"))
+        .stdout(predicates::str::contains("find the parser prompt-needle"))
+        .stdout(predicates::str::contains(
+            "the parser reply-needle is fixed",
+        ))
+        .stdout(predicates::str::contains("→ bash cargo test"))
+        .stdout(predicates::str::contains("← tool-output-needle"))
+        .stdout(predicates::str::contains("noise-needle").not());
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["show", "f36c0fcf", "--around", "2", "--context", "0"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "the parser reply-needle is fixed",
+        ))
+        .stdout(predicates::str::contains("prompt-needle").not())
+        .stdout(predicates::str::contains("last-needle").not());
+}
+
+#[test]
+fn show_dash_reads_an_opencode_locator_from_sessions_l() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+
+    let listed = agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["sessions", "-l"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed = String::from_utf8(listed).unwrap();
+    assert_eq!(
+        listed,
+        format!(
+            "{}#{OPENCODE_A}\n",
+            opencode.path().join("opencode.db").display()
+        )
+    );
+
+    let by_id = agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["show", "f36c0fcf"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    agsearch_command()
+        .current_dir(workdir.path())
+        .args(["show", "-"])
+        .write_stdin(listed)
+        .assert()
+        .success()
+        .stdout(by_id);
+}
+
+#[test]
+fn an_opencode_search_sees_committed_rows_during_an_open_wal_write() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_conversation(opencode.path(), workdir.path());
+    let writer = rusqlite::Connection::open(opencode.path().join("opencode.db")).unwrap();
+    writer
+        .query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+        .unwrap();
+    writer
+        .execute_batch(
+            r#"UPDATE part SET data = '{"type":"text","text":"committed-needle"}'
+                WHERE id = 'prt_msg_003_000';
+             BEGIN IMMEDIATE;
+             UPDATE part SET data = '{"type":"text","text":"pending-needle"}'
+                WHERE id = 'prt_msg_003_000';"#,
+        )
+        .unwrap();
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .arg("needle")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[3] user: committed-needle"))
+        .stdout(predicates::str::contains("pending-needle").not());
+
+    writer.execute_batch("ROLLBACK").unwrap();
+}

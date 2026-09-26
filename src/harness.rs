@@ -27,6 +27,23 @@ pub enum SessionLocator {
 }
 
 impl SessionLocator {
+    /// Read a locator as `sessions -l` prints it. `<path>#<session id>` names a
+    /// Session inside an `opencode.db`. Any other text is a Session file path,
+    /// so a file name that contains `#` still works.
+    pub fn parse(text: &str) -> Self {
+        if let Some((path, session_id)) = text.rsplit_once('#') {
+            let path = Path::new(path);
+            if !session_id.is_empty() && path.file_name().is_some_and(|name| name == "opencode.db")
+            {
+                return Self::Database {
+                    path: path.to_path_buf(),
+                    session_id: session_id.to_string(),
+                };
+            }
+        }
+        Self::File(PathBuf::from(text))
+    }
+
     /// The Session file, or `None` for a Session inside a database.
     pub fn file(&self) -> Option<&Path> {
         match self {
@@ -786,7 +803,13 @@ fn codex_text_exit_code(text: &str) -> Option<i64> {
 }
 
 pub(crate) fn parse_session_locator(locator: &SessionLocator) -> Option<(Harness, Session)> {
-    let path = locator.file()?;
+    let path = match locator {
+        SessionLocator::File(path) => path,
+        SessionLocator::Database { path, .. } => {
+            let session = OpenCodeAdapter::for_database(path).parse(locator)?;
+            return Some((Harness::OpenCode, session));
+        }
+    };
     let text = std::fs::read_to_string(path).ok()?;
     let adapters: [Box<dyn HarnessAdapter>; 2] = [
         Box::new(CodexAdapter::for_session_path(path)),
@@ -1169,6 +1192,18 @@ mod tests {
             locator.to_string(),
             format!("{}#ses_abc", Path::new("/data/opencode.db").display())
         );
+    }
+
+    #[test]
+    fn a_printed_locator_parses_back() {
+        let database = SessionLocator::Database {
+            path: PathBuf::from("/data/opencode.db"),
+            session_id: "ses_abc".into(),
+        };
+        let file = SessionLocator::File(PathBuf::from("/store/proj/a#b.jsonl"));
+
+        assert_eq!(SessionLocator::parse(&database.to_string()), database);
+        assert_eq!(SessionLocator::parse(&file.to_string()), file);
     }
 
     #[test]

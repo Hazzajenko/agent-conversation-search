@@ -26,6 +26,7 @@ const TOOL_ARG_KEYS: &[&str] = &[
     "command",
     "cmd",
     "file_path",
+    "filePath",
     "pattern",
     "path",
     "url",
@@ -218,6 +219,18 @@ impl RecordBuilder {
                 usage,
             });
         }
+    }
+
+    /// A Record that belongs to the last Message, such as the tool results an
+    /// OpenCode assistant Message holds. It takes that Message's turn.
+    pub(crate) fn same_message(
+        &mut self,
+        kind: Option<RecordKind>,
+        timestamp: Option<String>,
+        usage: Option<Usage>,
+    ) {
+        let turn = (self.turn > 0).then_some(self.turn);
+        self.push(kind, turn, timestamp, usage);
     }
 
     pub(crate) fn metadata(
