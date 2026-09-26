@@ -356,7 +356,7 @@ pub fn format_current(context: &CurrentContext) -> String {
         context.session.session_id,
         context.session.display_project(),
         context.session.title.as_deref().unwrap_or("(untitled)"),
-        context.session.path.display(),
+        context.session.locator,
         caller
     )
 }

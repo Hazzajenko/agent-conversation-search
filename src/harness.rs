@@ -15,6 +15,34 @@ pub enum Harness {
     Codex,
 }
 
+/// Where a Session lives in its Store. Claude Code and Codex keep each Session
+/// in its own `.jsonl` file. A database Harness keeps many Sessions in one
+/// file, so its locator also names the Session id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SessionLocator {
+    File(PathBuf),
+    Database { path: PathBuf, session_id: String },
+}
+
+impl SessionLocator {
+    /// The Session file, or `None` for a Session inside a database.
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Database { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SessionLocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "{}", path.display()),
+            Self::Database { path, session_id } => write!(f, "{}#{session_id}", path.display()),
+        }
+    }
+}
+
 /// A Session id qualified by its Harness. Session ids can coincide across
 /// Stores, so Store-wide filters must use both fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,11 +75,19 @@ pub(crate) trait HarnessAdapter: Send + Sync {
         self.matching(prefix, true)
     }
 
-    fn parse(&self, path: &Path) -> Option<Session> {
-        let text = std::fs::read_to_string(path).ok()?;
+    fn parse(&self, locator: &SessionLocator) -> Option<Session> {
+        let text = std::fs::read_to_string(locator.file()?).ok()?;
         self.recognizes(&text)
             .then(|| self.parse_text(&text))
             .flatten()
+    }
+
+    /// The Session exactly as the Harness stored it, for a raw Export.
+    fn read_raw(&self, locator: &SessionLocator) -> std::io::Result<Vec<u8>> {
+        match locator.file() {
+            Some(path) => std::fs::read(path),
+            None => Err(std::io::ErrorKind::Unsupported.into()),
+        }
     }
 }
 
@@ -117,14 +153,15 @@ impl ClaudeAdapter {
         session_id: String,
         path: PathBuf,
     ) -> Option<SessionIdentity> {
-        let parsed = self.parse(&path)?;
         let parent_id = claude_parent_id(&path);
+        let locator = SessionLocator::File(path);
+        let parsed = self.parse(&locator)?;
         Some(SessionIdentity {
             harness: Harness::Claude,
             subagent: None,
             project: Some(ProjectKey::from_encoded(project)),
             session_id,
-            path,
+            locator,
             title: parsed.meta.title,
             timestamp: parsed.meta.timestamp,
             branch: parsed.meta.branch,
@@ -298,7 +335,7 @@ fn codex_session_info(
         subagent,
         project: cwd.as_deref().map(ProjectKey::from_cwd),
         session_id,
-        path,
+        locator: SessionLocator::File(path),
         title,
         timestamp: parsed.meta.timestamp,
         branch: parsed.meta.branch,
@@ -715,7 +752,8 @@ fn codex_text_exit_code(text: &str) -> Option<i64> {
         })
 }
 
-pub(crate) fn parse_session_path(path: &Path) -> Option<(Harness, Session)> {
+pub(crate) fn parse_session_locator(locator: &SessionLocator) -> Option<(Harness, Session)> {
+    let path = locator.file()?;
     let text = std::fs::read_to_string(path).ok()?;
     let adapters: [Box<dyn HarnessAdapter>; 2] = [
         Box::new(CodexAdapter::for_session_path(path)),
@@ -823,7 +861,7 @@ impl Stores {
             b.info
                 .timestamp
                 .cmp(&a.info.timestamp)
-                .then_with(|| a.info.path.cmp(&b.info.path))
+                .then_with(|| a.info.locator.cmp(&b.info.locator))
         });
         sessions
     }
@@ -867,7 +905,14 @@ impl Stores {
     pub(crate) fn parse(&self, session: &SessionHandle) -> Option<Session> {
         self.adapters
             .get(session.adapter_index)?
-            .parse(&session.info.path)
+            .parse(&session.info.locator)
+    }
+
+    pub fn read_raw(&self, session: &SessionHandle) -> std::io::Result<Vec<u8>> {
+        match self.adapters.get(session.adapter_index) {
+            Some(adapter) => adapter.read_raw(&session.info.locator),
+            None => Err(std::io::ErrorKind::NotFound.into()),
+        }
     }
 
     pub(crate) fn configured_harnesses(&self) -> Vec<Harness> {
@@ -955,7 +1000,7 @@ impl Stores {
             b.info
                 .timestamp
                 .cmp(&a.info.timestamp)
-                .then_with(|| a.info.path.cmp(&b.info.path))
+                .then_with(|| a.info.locator.cmp(&b.info.locator))
         });
         sessions
     }
@@ -1035,6 +1080,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_file_locator_prints_as_its_path() {
+        let path = PathBuf::from("/store/proj/abc.jsonl");
+
+        let locator = SessionLocator::File(path.clone());
+
+        assert_eq!(locator.to_string(), path.display().to_string());
+    }
+
+    #[test]
+    fn a_database_locator_prints_the_database_path_and_session_id() {
+        let locator = SessionLocator::Database {
+            path: PathBuf::from("/data/opencode.db"),
+            session_id: "ses_abc".into(),
+        };
+
+        assert_eq!(
+            locator.to_string(),
+            format!("{}#ses_abc", Path::new("/data/opencode.db").display())
+        );
+    }
+
+    #[test]
+    fn a_file_adapter_cannot_parse_a_database_locator() {
+        let adapter = ClaudeAdapter::discover(Path::new("/missing"));
+        let locator = SessionLocator::Database {
+            path: PathBuf::from("/data/opencode.db"),
+            session_id: "ses_abc".into(),
+        };
+
+        assert!(adapter.parse(&locator).is_none());
+    }
+
+    #[test]
     fn claude_adapter_enumerates_and_parses_sessions() {
         let store = tempfile::tempdir().unwrap();
         let project = store.path().join("projects").join("E--projects-demo");
@@ -1048,9 +1126,10 @@ mod tests {
         let adapter = ClaudeAdapter::discover(store.path());
 
         let sessions = adapter.enumerate(false);
-        let parsed = adapter.parse(&path).unwrap();
+        let parsed = adapter.parse(&sessions[0].locator).unwrap();
 
         assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].locator, SessionLocator::File(path));
         assert_eq!(
             sessions[0].project.as_ref().map(ProjectKey::as_str),
             Some("E--projects-demo")
@@ -1085,7 +1164,7 @@ mod tests {
         let adapter = CodexAdapter::discover(store.path());
 
         let sessions = adapter.enumerate(false);
-        let parsed = adapter.parse(&path).unwrap();
+        let parsed = adapter.parse(&SessionLocator::File(path)).unwrap();
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(
@@ -1178,7 +1257,7 @@ mod tests {
         let adapter = CodexAdapter::discover(store.path());
 
         let matches = adapter.matching("meta1234", false);
-        let parsed = adapter.parse(&path).unwrap();
+        let parsed = adapter.parse(&SessionLocator::File(path)).unwrap();
 
         assert_eq!(matches.len(), 1);
         assert_eq!(

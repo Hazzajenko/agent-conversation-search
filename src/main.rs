@@ -11,13 +11,13 @@ use agsearch::{
     format_session_paths, format_sessions, format_stats, format_touch_paths, format_touches,
     format_transcript_for_harness, format_usage_breakdown, format_usage_ranking,
     format_windowed_for_harness, group_failures, list_store_projects, list_store_sessions,
-    parse_store_transcript, parse_transcript_path, resolve_claude_dir, resolve_codex_dir,
+    parse_store_transcript, parse_transcript_locator, resolve_claude_dir, resolve_codex_dir,
     resolve_current_context, resolve_current_session, resolve_current_thread,
     resolve_store_session_prefix, resolve_store_session_prefix_including_subagents,
     search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
     since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
     usage_calls_for_session, usage_ranking, ContentSet, FileSelector, Matcher, Scope,
-    SessionHandle, SessionUsage, StoreSessionRef, Stores, UsageRankingSort,
+    SessionHandle, SessionLocator, SessionUsage, StoreSessionRef, Stores, UsageRankingSort,
 };
 
 /// Search local coding conversation history across Harnesses.
@@ -452,7 +452,7 @@ fn run_current(stores: &Stores, args: &CurrentArgs) -> ExitCode {
             let rendered = if args.id_only {
                 format!("{}\n", context.session.session_id)
             } else if args.path {
-                format!("{}\n", context.session.path.display())
+                format!("{}\n", context.session.locator)
             } else {
                 format_current(&context)
             };
@@ -808,11 +808,11 @@ fn build_scope(all: bool, project: Option<&str>, cwd: &Path) -> Scope {
 /// selector, or a path from stdin), then render it as a Transcript.
 fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
     let (turns, harness) = if args.session == "-" {
-        match read_path_from_stdin() {
-            Some(path) => match parse_transcript_path(&path) {
+        match read_locator_from_stdin() {
+            Some(locator) => match parse_transcript_locator(&locator) {
                 Some((harness, turns)) => (turns, harness),
                 None => {
-                    eprintln!("agsearch: cannot read {}", path.display());
+                    eprintln!("agsearch: cannot read {locator}");
                     return ExitCode::FAILURE;
                 }
             },
@@ -827,7 +827,7 @@ fn run_show(stores: &Stores, args: &ShowArgs) -> ExitCode {
             Err(code) => return code,
         };
         let Some(turns) = parse_store_transcript(stores, &session) else {
-            eprintln!("agsearch: cannot read {}", session.info.path.display());
+            eprintln!("agsearch: cannot read {}", session.info.locator);
             return ExitCode::FAILURE;
         };
         (turns, session.info.harness)
@@ -861,13 +861,10 @@ fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
 
     match args.format {
         ExportFormat::Raw => {
-            let bytes = match std::fs::read(&handle.info.path) {
+            let bytes = match stores.read_raw(&handle) {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    eprintln!(
-                        "agsearch: cannot read {}: {err}",
-                        handle.info.path.display()
-                    );
+                    eprintln!("agsearch: cannot read {}: {err}", handle.info.locator);
                     return ExitCode::FAILURE;
                 }
             };
@@ -899,7 +896,7 @@ fn run_export(stores: &Stores, args: &ExportArgs) -> ExitCode {
         }
         ExportFormat::Markdown => {
             let Some(turns) = parse_store_transcript(stores, &handle) else {
-                eprintln!("agsearch: cannot read {}", handle.info.path.display());
+                eprintln!("agsearch: cannot read {}", handle.info.locator);
                 return ExitCode::FAILURE;
             };
             let rendered = format_export_markdown(
@@ -972,7 +969,7 @@ fn run_usage_breakdown(stores: &Stores, args: &UsageArgs, selector: &str) -> Exi
     };
 
     let Some(breakdown) = usage_calls_for_session(stores, &handle) else {
-        eprintln!("agsearch: cannot read {}", handle.info.path.display());
+        eprintln!("agsearch: cannot read {}", handle.info.locator);
         return ExitCode::FAILURE;
     };
     // A Codex Session whose summed turns disagree with its final running
@@ -1031,12 +1028,12 @@ fn run_usage_ranking(stores: Stores, args: &UsageArgs) -> ExitCode {
 
 /// Read the first non-empty line of stdin as a Session file path (for
 /// `agsearch -l … | … | agsearch show -`).
-fn read_path_from_stdin() -> Option<PathBuf> {
+fn read_locator_from_stdin() -> Option<SessionLocator> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok()?;
     input
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(PathBuf::from)
+        .map(|line| SessionLocator::File(PathBuf::from(line)))
 }

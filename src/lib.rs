@@ -16,7 +16,7 @@ pub use current::{
     format_current, resolve_current_context, resolve_current_session, resolve_current_thread,
     CurrentContext, CurrentContextError,
 };
-pub use harness::{Harness, SessionHandle, Stores};
+pub use harness::{Harness, SessionHandle, SessionLocator, Stores};
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
 /// [`regex::Regex`], so the search pipeline has a single match path. Literal
@@ -290,7 +290,7 @@ pub fn search_stores(
     results.sort_by(|a, b| {
         b.timestamp
             .cmp(&a.timestamp)
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.locator.cmp(&b.locator))
     });
     results
 }
@@ -336,7 +336,7 @@ pub fn search_stores_with_file(
     results.sort_by(|a, b| {
         b.timestamp
             .cmp(&a.timestamp)
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.locator.cmp(&b.locator))
     });
     results
 }
@@ -420,8 +420,8 @@ pub struct SessionIdentity {
     pub project: Option<ProjectKey>,
     /// The Session id (the `.jsonl` file stem) — what `show <prefix>` resolves.
     pub session_id: String,
-    /// Full path to the Session file (for `-l` / piping into `show -`).
-    pub path: PathBuf,
+    /// Where the Session lives in its Store (for `-l` / piping into `show -`).
+    pub locator: SessionLocator,
     /// The Session's AI-generated Title, if it has one.
     pub title: Option<String>,
     /// The newest record timestamp (raw ISO 8601), the recency key — `None` if
@@ -498,7 +498,7 @@ fn group_projects(sessions: Vec<SessionIdentity>) -> Vec<ProjectInfo> {
             members.sort_by(|a, b| {
                 b.timestamp
                     .cmp(&a.timestamp)
-                    .then_with(|| a.path.cmp(&b.path))
+                    .then_with(|| a.locator.cmp(&b.locator))
             });
             let newest = &members[0];
             let name = newest.display_project().to_string();
@@ -643,7 +643,7 @@ fn session_header(session: &SessionIdentity) -> String {
 pub fn format_paths(results: &[SessionMatches]) -> String {
     let mut out = String::new();
     for s in results {
-        out.push_str(&s.path.to_string_lossy());
+        out.push_str(&s.locator.to_string());
         out.push('\n');
     }
     out
@@ -696,7 +696,7 @@ pub fn format_projects(projects: &[ProjectInfo]) -> String {
 pub fn format_session_paths(sessions: &[SessionIdentity]) -> String {
     let mut out = String::new();
     for s in sessions {
-        out.push_str(&s.path.to_string_lossy());
+        out.push_str(&s.locator.to_string());
         out.push('\n');
     }
     out
@@ -853,11 +853,11 @@ pub fn parse_store_transcript(stores: &Stores, handle: &SessionHandle) -> Option
         .map(|session| turns_from_session(&session))
 }
 
-/// Parse a Session directly from a readable path, inferring its Harness from
+/// Parse a Session directly from a locator, inferring its Harness from
 /// the JSONL envelope. This keeps the path-pipe form of `show -` independent of
 /// configured Store discovery.
-pub fn parse_transcript_path(path: &Path) -> Option<(Harness, Vec<Turn>)> {
-    let (harness, parsed) = harness::parse_session_path(path)?;
+pub fn parse_transcript_locator(locator: &SessionLocator) -> Option<(Harness, Vec<Turn>)> {
+    let (harness, parsed) = harness::parse_session_locator(locator)?;
     Some((harness, turns_from_session(&parsed)))
 }
 
@@ -1187,7 +1187,7 @@ pub fn format_export_markdown(
     out.push_str(&format!("- Session: {}\n", session.session_id));
     out.push_str(&format!("- Harness: {}\n", session.harness.as_str()));
     out.push_str(&format!("- Project: {}\n", session.display_project()));
-    out.push_str(&format!("- Source: {}\n", session.path.display()));
+    out.push_str(&format!("- Source: {}\n", session.locator));
     out.push_str(&format!("- Source timestamp: {source_timestamp}\n"));
     out.push_str(&format!("- Exported: {export_timestamp}\n"));
     out.push_str("- Snapshot: point-in-time snapshot (the Session may still be active)\n");
@@ -1494,7 +1494,7 @@ pub fn failed_in_stores(
     results.sort_by(|a, b| {
         b.timestamp
             .cmp(&a.timestamp)
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.locator.cmp(&b.locator))
     });
     results
 }
@@ -1968,7 +1968,7 @@ pub fn touches_in_stores(
     results.sort_by(|a, b| {
         b.timestamp
             .cmp(&a.timestamp)
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.locator.cmp(&b.locator))
     });
     results
 }
@@ -2096,7 +2096,7 @@ pub fn format_touches(results: &[SessionTouches], max_per_session: usize) -> Str
 pub fn format_touch_paths(results: &[SessionTouches]) -> String {
     let mut out = String::new();
     for s in results {
-        out.push_str(&s.path.to_string_lossy());
+        out.push_str(&s.locator.to_string());
         out.push('\n');
     }
     out
@@ -3337,7 +3337,7 @@ mod tests {
             Some("E--projects-demo")
         );
         assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
-        assert_eq!(s.path, path);
+        assert_eq!(s.locator, SessionLocator::File(path));
         assert_eq!(s.title.as_deref(), Some("Borrow checker chat"));
         assert_eq!(
             s.matches,
@@ -3416,7 +3416,9 @@ mod tests {
             subagent: None,
             project: Some(ProjectKey::from_encoded("E--projects-demo")),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
-            path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
+            locator: SessionLocator::File(PathBuf::from(
+                "/x/abcd1234-0000-0000-0000-000000000000.jsonl",
+            )),
             title: None,
             timestamp: Some("2026-06-01T10:00:00.000Z".into()),
             branch: Some("main".into()),
@@ -3445,7 +3447,9 @@ mod tests {
             subagent: None,
             project: Some(ProjectKey::from_encoded("E--projects-demo")),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
-            path: PathBuf::from("/x/abcd1234-0000-0000-0000-000000000000.jsonl"),
+            locator: SessionLocator::File(PathBuf::from(
+                "/x/abcd1234-0000-0000-0000-000000000000.jsonl",
+            )),
             title: Some("Demo chat".into()),
             timestamp: Some("2026-06-01T10:00:00.000Z".into()),
             branch: Some("main".into()),
@@ -3467,7 +3471,7 @@ mod tests {
             subagent: None,
             project: Some(ProjectKey::from_encoded(dir)),
             session_id: id.into(),
-            path: PathBuf::from(format!("/store/{dir}/{id}.jsonl")),
+            locator: SessionLocator::File(PathBuf::from(format!("/store/{dir}/{id}.jsonl"))),
             title: None,
             timestamp: timestamp.map(Into::into),
             branch: None,
@@ -3572,7 +3576,9 @@ mod tests {
                 subagent: None,
                 project: Some(ProjectKey::from_encoded(project)),
                 session_id: "11111111-2222-3333-4444-555555555555".into(),
-                path: PathBuf::from("/x/11111111-2222-3333-4444-555555555555.jsonl"),
+                locator: SessionLocator::File(PathBuf::from(
+                    "/x/11111111-2222-3333-4444-555555555555.jsonl",
+                )),
                 title: title.map(Into::into),
                 timestamp: None,
                 branch: None,
@@ -3745,7 +3751,7 @@ mod tests {
                 subagent: None,
                 project: Some(ProjectKey::from_encoded("p")),
                 session_id: "abcd1234-rest".into(),
-                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                locator: SessionLocator::File(PathBuf::from("/x/abcd1234-rest.jsonl")),
                 title: Some("Borrow chat".into()),
                 timestamp: None,
                 branch: None,
@@ -3940,7 +3946,7 @@ mod tests {
                 text: "x".into(),
             }],
         );
-        a.path = PathBuf::from("/store/proj/aaa.jsonl");
+        a.locator = SessionLocator::File(PathBuf::from("/store/proj/aaa.jsonl"));
         let mut b = session(
             "p",
             Some("t"),
@@ -3949,7 +3955,7 @@ mod tests {
                 text: "x".into(),
             }],
         );
-        b.path = PathBuf::from("/store/proj/bbb.jsonl");
+        b.locator = SessionLocator::File(PathBuf::from("/store/proj/bbb.jsonl"));
 
         let out = format_paths(&[a, b]);
 
@@ -4492,7 +4498,7 @@ mod tests {
                 subagent: None,
                 project: Some(ProjectKey::from_encoded("E--projects-demo")),
                 session_id: "abcd1234-rest".into(),
-                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                locator: SessionLocator::File(PathBuf::from("/x/abcd1234-rest.jsonl")),
                 title: None,
                 timestamp: None,
                 branch: None,
@@ -4634,7 +4640,7 @@ mod tests {
                 subagent: None,
                 project: Some(ProjectKey::from_encoded("E--projects-demo")),
                 session_id: "abcd1234-rest".into(),
-                path: PathBuf::from("/x/abcd1234-rest.jsonl"),
+                locator: SessionLocator::File(PathBuf::from("/x/abcd1234-rest.jsonl")),
                 title: Some("Build chat".into()),
                 timestamp: None,
                 branch: None,
@@ -4942,7 +4948,7 @@ mod tests {
         else {
             panic!("expected a unique Session");
         };
-        assert_eq!(found.info.path, target);
+        assert_eq!(found.info.locator, SessionLocator::File(target));
     }
 
     #[test]
@@ -4985,7 +4991,7 @@ mod tests {
         let StoreSessionRef::Unique(found) = resolve_store_session_prefix(&stores, "abc111") else {
             panic!("expected an exact Session");
         };
-        assert_eq!(found.info.path, exact);
+        assert_eq!(found.info.locator, SessionLocator::File(exact));
     }
 
     // --- transcript parsing + rendering ----------------------------------
@@ -5241,9 +5247,9 @@ mod tests {
             subagent: None,
             project: Some(ProjectKey::from_encoded("E--projects-demo")),
             session_id: "abcd1234-0000-0000-0000-000000000000".into(),
-            path: PathBuf::from(
+            locator: SessionLocator::File(PathBuf::from(
                 "/store/E--projects-demo/abcd1234-0000-0000-0000-000000000000.jsonl",
-            ),
+            )),
             title: Some("Borrow checker chat".into()),
             timestamp: Some("2026-08-01T10:00:00.000Z".into()),
             branch: None,
