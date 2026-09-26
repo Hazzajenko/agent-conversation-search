@@ -16,7 +16,7 @@ use agsearch::{
     resolve_store_session_prefix, resolve_store_session_prefix_including_subagents,
     search_store_session, search_store_session_with_file, search_stores, search_stores_with_file,
     since_cutoff, timestamp_is_since, touches_in_store_session, touches_in_stores,
-    usage_calls_for_session, usage_ranking, ContentSet, FileSelector, Matcher, Scope,
+    usage_calls_for_session, usage_ranking, ContentSet, FileSelector, Harness, Matcher, Scope,
     SessionHandle, SessionLocator, SessionUsage, StoreSessionRef, Stores, UsageRankingSort,
 };
 
@@ -404,12 +404,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let stores = match cli.harness {
-        Some(HarnessChoice::Codex) => Stores::with_codex(&codex_dir),
-        Some(HarnessChoice::Claude) => Stores::with_claude(&claude_dir),
-        None => Stores::with_claude_and_codex(&claude_dir, &codex_dir),
-    }
-    .including_subagents(cli.include_subagents);
+    let selected = cli.harness.map(|choice| match choice {
+        HarnessChoice::Claude => Harness::Claude,
+        HarnessChoice::Codex => Harness::Codex,
+    });
+    let stores = Stores::with_claude_and_codex(&claude_dir, &codex_dir)
+        .selecting(selected)
+        .including_subagents(cli.include_subagents);
 
     match cli.command {
         Some(Command::Show(args)) => run_show(&stores, &args),
@@ -490,7 +491,7 @@ fn run_sessions(stores: &Stores, args: &SessionsArgs) -> ExitCode {
     let rendered = if args.files {
         format_session_paths(&sessions)
     } else {
-        format_sessions(&sessions)
+        format_sessions(&sessions, &stores.short_ids())
     };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
@@ -703,7 +704,13 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
             let rendered = if args.files {
                 format_paths(&results)
             } else {
-                format_results(&results, matcher, args.max_per_session, color)
+                format_results(
+                    &results,
+                    matcher,
+                    args.max_per_session,
+                    color,
+                    &stores.short_ids(),
+                )
             };
             let _ = write!(anstream::stdout(), "{rendered}");
             return ExitCode::SUCCESS;
@@ -723,7 +730,7 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
         let rendered = if args.files {
             format_touch_paths(&results)
         } else {
-            format_touches(&results, args.max_per_session)
+            format_touches(&results, args.max_per_session, &stores.short_ids())
         };
         let _ = write!(anstream::stdout(), "{rendered}");
         return ExitCode::SUCCESS;
@@ -745,7 +752,12 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
         let rendered = if args.stats {
             format_stats(&group_failures(&results))
         } else {
-            format_failures(&results, args.max_per_session, args.full)
+            format_failures(
+                &results,
+                args.max_per_session,
+                args.full,
+                &stores.short_ids(),
+            )
         };
         let _ = write!(anstream::stdout(), "{rendered}");
         return ExitCode::SUCCESS;
@@ -781,7 +793,13 @@ fn run_search(stores: Stores, args: &SearchArgs) -> ExitCode {
     let rendered = if args.files {
         format_paths(&results)
     } else {
-        format_results(&results, &matcher, args.max_per_session, color)
+        format_results(
+            &results,
+            &matcher,
+            args.max_per_session,
+            color,
+            &stores.short_ids(),
+        )
     };
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
@@ -978,7 +996,7 @@ fn run_usage_breakdown(stores: &Stores, args: &UsageArgs, selector: &str) -> Exi
         eprintln!("agsearch: warning: {warning}");
     }
     let sort_total = matches!(args.sort, Some(UsageSort::Total));
-    let rendered = format_usage_breakdown(&breakdown.calls, sort_total);
+    let rendered = format_usage_breakdown(&breakdown.calls, sort_total, &stores.short_ids());
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
 }
@@ -1021,7 +1039,7 @@ fn run_usage_ranking(stores: Stores, args: &UsageArgs) -> ExitCode {
         usage_ranking(&stores, &scope, cutoff, sort);
     rows.truncate(args.limit);
 
-    let rendered = format_usage_ranking(&rows, skipped);
+    let rendered = format_usage_ranking(&rows, skipped, &stores.short_ids());
     let _ = write!(anstream::stdout(), "{rendered}");
     ExitCode::SUCCESS
 }

@@ -66,7 +66,9 @@ has the Sessions, or point the Store flags at the other environment.
 ## The core workflow
 
 Every verb is welded together by one identifier: the **short session-id**. It is a
-git-style unique prefix. `search` and `--failed` print it, and `show` resolves it.
+git-style unique prefix. It is the shortest prefix of the session-id that no
+other Session in any Store shares, with at least 8 characters. `search` and `--failed`
+print it, and `show` resolves it.
 That is the whole loop. Find something, copy its id, open it:
 
 ```console

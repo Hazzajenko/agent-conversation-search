@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::session::Session;
-use crate::{ProjectKey, Scope, SessionIdentity};
+use crate::{ProjectKey, Scope, SessionIdentity, ShortIds};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
@@ -73,6 +73,15 @@ pub(crate) trait HarnessAdapter: Send + Sync {
 
     fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
         self.matching(prefix, true)
+    }
+
+    /// The id of every Session in the Store, subagent threads included. Only
+    /// the ids are needed, so an adapter can skip parsing the Sessions.
+    fn session_ids(&self) -> Vec<String> {
+        self.enumerate_including_subagents()
+            .into_iter()
+            .map(|info| info.session_id)
+            .collect()
     }
 
     fn parse(&self, locator: &SessionLocator) -> Option<Session> {
@@ -207,6 +216,13 @@ impl HarnessAdapter for ClaudeAdapter {
     fn matching_including_subagents(&self, prefix: &str) -> Vec<SessionIdentity> {
         self.sessions(Some(prefix), true)
     }
+
+    fn session_ids(&self) -> Vec<String> {
+        self.session_paths(true)
+            .into_iter()
+            .map(|(_, session_id, _)| session_id)
+            .collect()
+    }
 }
 
 pub(crate) struct CodexAdapter {
@@ -286,6 +302,20 @@ impl HarnessAdapter for CodexAdapter {
 
     fn matching(&self, prefix: &str, include_subagents: bool) -> Vec<SessionIdentity> {
         self.sessions(Some(prefix), include_subagents)
+    }
+
+    fn session_ids(&self) -> Vec<String> {
+        self.rollout_paths()
+            .into_iter()
+            .filter_map(|path| {
+                let meta = codex_meta(&read_first_line(&path)?)?;
+                let session_id = meta
+                    .pointer("/payload/id")
+                    .or_else(|| meta.pointer("/payload/session_id"))?
+                    .as_str()?;
+                Some(session_id.to_string())
+            })
+            .collect()
     }
 }
 
@@ -788,6 +818,9 @@ pub struct SessionHandle {
 
 pub struct Stores {
     adapters: Vec<Box<dyn HarnessAdapter>>,
+    /// Stores of Harnesses that `--harness` left out. They are not searched,
+    /// but their Session ids still count for short-id uniqueness (ADR 0017).
+    unselected: Vec<Box<dyn HarnessAdapter>>,
     include_subagents: bool,
     /// Sessions hidden from scope enumeration: the Current Session Family
     /// under multi-Session analysis (ADR 0011). Explicit lookup ignores it.
@@ -813,9 +846,34 @@ impl Stores {
     fn from_adapters(adapters: Vec<Box<dyn HarnessAdapter>>) -> Self {
         Self {
             adapters,
+            unselected: Vec::new(),
             include_subagents: false,
             excluded_sessions: HashSet::new(),
         }
+    }
+
+    /// Keep only the Store of `harness` for enumeration and lookup. `None`
+    /// keeps every Store.
+    pub fn selecting(mut self, harness: Option<Harness>) -> Self {
+        if let Some(harness) = harness {
+            let (selected, unselected) = std::mem::take(&mut self.adapters)
+                .into_iter()
+                .partition(|adapter| adapter.harness() == harness);
+            self.adapters = selected;
+            self.unselected.extend(unselected);
+        }
+        self
+    }
+
+    /// The short session-id table for every Session in every Store, whatever
+    /// the scope, the `--harness` selection, or the subagent opt-in (ADR 0017).
+    pub fn short_ids(&self) -> ShortIds {
+        ShortIds::from_ids(
+            self.adapters
+                .iter()
+                .chain(&self.unselected)
+                .flat_map(|adapter| adapter.session_ids()),
+        )
     }
 
     pub fn including_subagents(mut self, include: bool) -> Self {

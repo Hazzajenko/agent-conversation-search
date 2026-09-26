@@ -6895,3 +6895,186 @@ fn usage_ranking_folds_transitive_claude_grandchild_into_root() {
         .stdout(predicates::str::contains("63,620"))
         .stdout(predicates::str::contains("3 calls"));
 }
+
+// --- short session-id: shortest unique prefix (ADR 0017) ----------------
+
+const SHARED_A: &str = "abcdefghij1-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const SHARED_B: &str = "abcdefghij2-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+fn prompt_line(text: &str) -> String {
+    serde_json::json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+}
+
+#[test]
+fn sessions_that_share_10_characters_show_distinct_short_ids_that_open_them() {
+    let store = tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        SHARED_A,
+        &prompt_line("alpha prompt"),
+    );
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        SHARED_B,
+        &prompt_line("beta prompt"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .args(["sessions", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude · abcdefghij1 ·"))
+        .stdout(predicates::str::contains("claude · abcdefghij2 ·"));
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .args(["search", "--all", "prompt"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude · abcdefghij1 ·"))
+        .stdout(predicates::str::contains("claude · abcdefghij2 ·"));
+
+    for (short, text) in [
+        ("abcdefghij1", "alpha prompt"),
+        ("abcdefghij2", "beta prompt"),
+    ] {
+        agsearch_command()
+            .arg("--claude-dir")
+            .arg(store.path())
+            .args(["show", short])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(text));
+    }
+}
+
+#[test]
+fn the_more_hint_and_failed_header_print_the_unique_short_id() {
+    let store = tempdir().unwrap();
+    let lines = [
+        prompt_line("needle one"),
+        prompt_line("needle two"),
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#.to_string(),
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"error: boom"}]}}"#.to_string(),
+    ]
+    .join("\n");
+    plant_session(store.path(), "E--projects-demo", SHARED_A, &lines);
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        SHARED_B,
+        &prompt_line("other"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .args(["search", "--all", "--max-per-session", "1", "needle"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agsearch show abcdefghij1\n"));
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .args(["search", "--all", "--failed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude · abcdefghij1 ·"));
+}
+
+#[test]
+fn claude_and_codex_ids_with_distinct_first_8_characters_show_8() {
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        "11111111-2222-3333-4444-555555555555",
+        &prompt_line("claude prompt"),
+    );
+    plant_codex_session(
+        codex.path(),
+        "22222222-2222-3333-4444-555555555555",
+        workdir.path(),
+        "user",
+        &[],
+    );
+
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude · 11111111 ·"))
+        .stdout(predicates::str::contains("codex · 22222222 ·"));
+}
+
+#[test]
+fn an_ambiguous_prefix_still_reports_the_candidates() {
+    let store = tempdir().unwrap();
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        SHARED_A,
+        &prompt_line("a"),
+    );
+    plant_session(
+        store.path(),
+        "E--projects-demo",
+        SHARED_B,
+        &prompt_line("b"),
+    );
+
+    agsearch_command()
+        .arg("--claude-dir")
+        .arg(store.path())
+        .args(["show", "abcdefghij"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"))
+        .stderr(predicates::str::contains(SHARED_A))
+        .stderr(predicates::str::contains(SHARED_B));
+}
+
+#[test]
+fn short_ids_stay_unique_against_sessions_outside_the_scope() {
+    let workdir = tempdir().unwrap();
+    let claude = tempdir().unwrap();
+    let codex = tempdir().unwrap();
+    plant_claude_session(
+        claude.path(),
+        workdir.path(),
+        SHARED_A,
+        &prompt_line("in scope"),
+    );
+    plant_session(
+        claude.path(),
+        "E--projects-elsewhere",
+        "abcdefghij3-cccc",
+        &prompt_line("x"),
+    );
+    plant_codex_session(codex.path(), SHARED_B, workdir.path(), "user", &[]);
+
+    // The other Project and the unselected Codex Store still count.
+    agsearch_command()
+        .current_dir(workdir.path())
+        .arg("--claude-dir")
+        .arg(claude.path())
+        .arg("--codex-dir")
+        .arg(codex.path())
+        .args(["--harness", "claude", "sessions"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude · abcdefghij1 ·"));
+}
