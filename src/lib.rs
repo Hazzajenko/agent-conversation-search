@@ -3,6 +3,7 @@
 mod current;
 mod harness;
 mod session;
+mod short_id;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ pub use current::{
     CurrentContext, CurrentContextError,
 };
 pub use harness::{Harness, SessionHandle, SessionLocator, Stores};
+pub use short_id::ShortIds;
 
 /// A compiled Query matcher. Both literal and regex Queries compile to one
 /// [`regex::Regex`], so the search pipeline has a single match path. Literal
@@ -607,20 +609,13 @@ fn date_prefix(timestamp: &str) -> Option<&str> {
     timestamp.get(..10)
 }
 
-/// The short session-id shown in headers and the `show` hint: the first 8
-/// characters of the session-id (git-style), or the whole id if shorter. This
-/// is what `show <prefix>` resolves against (ADR 0002).
-fn short_id(session_id: &str) -> String {
-    session_id.chars().take(8).collect()
-}
-
 /// The one-line Session header shared by search and `--failed`: leads with the
 /// short session-id (paste-able into `show`), then `project · title · date ·
 /// branch`, omitting date/branch when absent.
-fn session_header(session: &SessionIdentity) -> String {
+fn session_header(session: &SessionIdentity, short_ids: &ShortIds) -> String {
     let mut header = vec![
         session.harness.as_str().to_string(),
-        short_id(&session.session_id),
+        short_ids.of(&session.session_id),
         session.display_project().to_string(),
         session.title.as_deref().unwrap_or("(untitled)").to_string(),
     ];
@@ -654,13 +649,13 @@ pub fn format_paths(results: &[SessionMatches]) -> String {
 /// line search prints above its Snippets (ADR 0004) — newest first. An empty
 /// listing renders a clear "no sessions" line. The header carries no colour
 /// (search colours only Snippets), so this output is plain text.
-pub fn format_sessions(sessions: &[SessionIdentity]) -> String {
+pub fn format_sessions(sessions: &[SessionIdentity], short_ids: &ShortIds) -> String {
     if sessions.is_empty() {
         return "No sessions.\n".to_string();
     }
     let mut out = String::new();
     for s in sessions {
-        out.push_str(&session_header(s));
+        out.push_str(&session_header(s, short_ids));
         out.push('\n');
     }
     out
@@ -713,14 +708,15 @@ pub fn format_results(
     matcher: &Matcher,
     max_per_session: usize,
     color: bool,
+    short_ids: &ShortIds,
 ) -> String {
     if results.is_empty() {
         return "No matches.\n".to_string();
     }
     let mut out = String::new();
     for s in results {
-        let short = short_id(&s.session_id);
-        out.push_str(&session_header(&s.session));
+        let short = short_ids.of(&s.session_id);
+        out.push_str(&session_header(&s.session, short_ids));
         out.push('\n');
 
         // A cap of 0 means show every Match.
@@ -1615,14 +1611,19 @@ pub fn group_failures(results: &[SessionFailures]) -> Vec<FailureGroup> {
 /// each Failure as two lines — `[turn] ✗ <tool>  <command>` and the salient
 /// error line (or the whole error text when `full`). At most `max_per_session`
 /// per Session (`0` = unlimited), with an actionable `+N more  ›  show` hint.
-pub fn format_failures(results: &[SessionFailures], max_per_session: usize, full: bool) -> String {
+pub fn format_failures(
+    results: &[SessionFailures],
+    max_per_session: usize,
+    full: bool,
+    short_ids: &ShortIds,
+) -> String {
     if results.is_empty() {
         return "No failures.\n".to_string();
     }
     let mut out = String::new();
     for s in results {
-        let short = short_id(&s.session_id);
-        out.push_str(&session_header(&s.session));
+        let short = short_ids.of(&s.session_id);
+        out.push_str(&session_header(&s.session, short_ids));
         out.push('\n');
 
         let shown = if max_per_session == 0 {
@@ -2054,14 +2055,18 @@ fn touches_in_parsed_session(
 /// most `max_per_session` per Session (`0` = unlimited), with an actionable
 /// `+N more  ›  show` hint. An empty result set renders the standard empty
 /// search message, so scripts behave predictably.
-pub fn format_touches(results: &[SessionTouches], max_per_session: usize) -> String {
+pub fn format_touches(
+    results: &[SessionTouches],
+    max_per_session: usize,
+    short_ids: &ShortIds,
+) -> String {
     if results.is_empty() {
         return "No matches.\n".to_string();
     }
     let mut out = String::new();
     for s in results {
-        let short = short_id(&s.session_id);
-        out.push_str(&session_header(&s.session));
+        let short = short_ids.of(&s.session_id);
+        out.push_str(&session_header(&s.session, short_ids));
         out.push('\n');
 
         let shown = if max_per_session == 0 {
@@ -2424,7 +2429,11 @@ fn format_opt_thousands(v: Option<u64>) -> String {
 /// Codex worker (empty preview) is still marked. Always ends with a `total`
 /// line summing the Usage-bearing calls, so the reader never adds the column
 /// themselves — and so the total matches the ranking row's folded total.
-pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
+pub fn format_usage_breakdown(
+    calls: &[UsageCall],
+    sort_total: bool,
+    short_ids: &ShortIds,
+) -> String {
     let mut rows: Vec<&UsageCall> = calls.iter().collect();
     if sort_total {
         // Biggest total first; no-Usage (None) sorts last; ties keep
@@ -2490,7 +2499,11 @@ pub fn format_usage_breakdown(calls: &[UsageCall], sort_total: bool) -> String {
         let cr = format_opt_thousands(c.cache_read);
         let out = format_opt_thousands(c.output);
         let tot = c.total().map(format_thousands).unwrap_or_default();
-        let sub = c.subagent.as_deref().map(short_id).unwrap_or_default();
+        let sub = c
+            .subagent
+            .as_deref()
+            .map(|id| short_ids.of(id))
+            .unwrap_or_default();
         w_turn = w_turn.max(turn.chars().count());
         w_ts = w_ts.max(ts.chars().count());
         w_model = w_model.max(model.chars().count());
@@ -2897,7 +2910,7 @@ pub fn sort_usage_ranking(rows: &mut [SessionUsage], sort: UsageRankingSort) {
 /// truncates to `--limit` before rendering. Sessions with no Usage never
 /// appear; when `skipped` is nonzero a final line reports how many were
 /// omitted. An empty ranking renders a clear "no sessions with usage" line.
-pub fn format_usage_ranking(rows: &[SessionUsage], skipped: usize) -> String {
+pub fn format_usage_ranking(rows: &[SessionUsage], skipped: usize, short_ids: &ShortIds) -> String {
     if rows.is_empty() {
         let mut out = "No sessions with usage.\n".to_string();
         if skipped > 0 {
@@ -2935,7 +2948,7 @@ pub fn format_usage_ranking(rows: &[SessionUsage], skipped: usize) -> String {
     }
     let mut rendered: Vec<RankingRow> = Vec::with_capacity(rows.len());
     for r in rows {
-        let session = short_id(&r.session.session_id);
+        let session = short_ids.of(&r.session.session_id);
         let project = r.session.display_project().to_string();
         let harness = r.session.harness.as_str().to_string();
         let title = r
@@ -3425,7 +3438,7 @@ mod tests {
             cwd: None,
             parent_id: None,
         };
-        let out = format_sessions(std::slice::from_ref(&info));
+        let out = format_sessions(std::slice::from_ref(&info), &ShortIds::default());
         // Byte-identical to a search Session header (ADR 0004): short-id leads,
         // (untitled) fallback, date sliced to its prefix, branch last.
         assert_eq!(
@@ -3433,7 +3446,7 @@ mod tests {
             "claude · abcd1234 · E--projects-demo · (untitled) · 2026-06-01 · main\n"
         );
 
-        assert_eq!(format_sessions(&[]), "No sessions.\n");
+        assert_eq!(format_sessions(&[], &ShortIds::default()), "No sessions.\n");
     }
 
     #[test]
@@ -3456,7 +3469,7 @@ mod tests {
             cwd: Some(r"E:\projects\demo".into()),
             parent_id: None,
         };
-        let out = format_sessions(std::slice::from_ref(&info));
+        let out = format_sessions(std::slice::from_ref(&info), &ShortIds::default());
         assert_eq!(
             out,
             "claude · abcd1234 · E:\\projects\\demo · Demo chat · 2026-06-01 · main\n"
@@ -3606,7 +3619,7 @@ mod tests {
             ],
         )];
 
-        let out = format_results(&results, &lit("borrow"), 0, false);
+        let out = format_results(&results, &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(
             out.contains("E--projects-demo"),
@@ -3640,7 +3653,7 @@ mod tests {
         );
         s.cwd = Some(r"E:\projects\demo".into());
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(
             out.contains(r"E:\projects\demo"),
@@ -3664,7 +3677,7 @@ mod tests {
         );
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(
             out.contains("2026-06-01"),
@@ -3689,7 +3702,7 @@ mod tests {
         s.timestamp = Some("2026-06-01T10:00:00.000Z".into());
         s.branch = Some("feature/search".into());
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(out.contains("feature/search"), "header shows branch: {out}");
     }
@@ -3705,7 +3718,7 @@ mod tests {
             }],
         );
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         // The helper's session_id is 11111111-2222-… so the short id is 11111111.
         assert!(
@@ -3731,7 +3744,7 @@ mod tests {
             ],
         );
 
-        let out = format_results(&[s], &lit("alpha"), 0, false);
+        let out = format_results(&[s], &lit("alpha"), 0, false, &ShortIds::default());
 
         assert!(
             out.contains("[1] user:"),
@@ -3767,7 +3780,7 @@ mod tests {
             }],
         };
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(
             out.contains("  title: Borrow chat"),
@@ -3787,7 +3800,7 @@ mod tests {
             }],
         );
 
-        let out = format_results(&[s], &lit("NEEDLE"), 0, false);
+        let out = format_results(&[s], &lit("NEEDLE"), 0, false, &ShortIds::default());
         // The match line is the indented one carrying NEEDLE.
         let line = out
             .lines()
@@ -3822,7 +3835,7 @@ mod tests {
             }],
         );
 
-        let out = format_results(&[s], &lit("NEEDLE"), 0, false);
+        let out = format_results(&[s], &lit("NEEDLE"), 0, false, &ShortIds::default());
         let snippet = out
             .lines()
             .find(|l| l.contains("NEEDLE"))
@@ -3850,7 +3863,7 @@ mod tests {
             }],
         )];
 
-        let out = format_results(&results, &lit("line"), 0, false);
+        let out = format_results(&results, &lit("line"), 0, false, &ShortIds::default());
 
         assert!(out.contains("line one line two"), "collapsed: {out}");
         assert!(
@@ -3888,7 +3901,7 @@ mod tests {
             ],
         );
 
-        let out = format_results(&[s], &lit("match"), 3, false);
+        let out = format_results(&[s], &lit("match"), 3, false, &ShortIds::default());
 
         assert!(
             out.contains("match-one") && out.contains("match-three"),
@@ -3930,7 +3943,7 @@ mod tests {
             ],
         );
 
-        let out = format_results(&[s], &lit("match"), 0, false);
+        let out = format_results(&[s], &lit("match"), 0, false, &ShortIds::default());
 
         assert!(out.contains("match-four"), "no cap applied: {out}");
         assert!(!out.contains("more"), "no '+N more' line: {out}");
@@ -3973,7 +3986,7 @@ mod tests {
             }],
         );
 
-        let out = format_results(&[s], &lit("borrow"), 0, true);
+        let out = format_results(&[s], &lit("borrow"), 0, true, &ShortIds::default());
 
         assert!(
             out.contains('\u{1b}'),
@@ -3996,7 +4009,7 @@ mod tests {
             }],
         );
 
-        let out = format_results(&[s], &lit("borrow"), 0, false);
+        let out = format_results(&[s], &lit("borrow"), 0, false, &ShortIds::default());
 
         assert!(
             !out.contains('\u{1b}'),
@@ -4006,7 +4019,7 @@ mod tests {
 
     #[test]
     fn renders_a_clear_message_when_there_are_no_matches() {
-        let out = format_results(&[], &lit("anything"), 0, false);
+        let out = format_results(&[], &lit("anything"), 0, false, &ShortIds::default());
         assert!(out.to_lowercase().contains("no match"), "{out}");
     }
 
@@ -4661,7 +4674,7 @@ mod tests {
             error_text: "Exit code 101\nerror[E0433]: failed to resolve".into(),
         });
 
-        let out = format_failures(&[s], 3, false);
+        let out = format_failures(&[s], 3, false, &ShortIds::default());
 
         assert!(
             out.starts_with("claude · abcd1234"),
@@ -4686,7 +4699,7 @@ mod tests {
         });
         s.cwd = Some(r"E:\projects\demo".into());
 
-        let out = format_failures(&[s], 3, false);
+        let out = format_failures(&[s], 3, false, &ShortIds::default());
 
         assert!(
             out.contains(r"E:\projects\demo"),
@@ -4708,7 +4721,7 @@ mod tests {
             error_text: "Exit code 101\nline two\nerror[E0433]: failed".into(),
         });
 
-        let out = format_failures(&[s], 3, true);
+        let out = format_failures(&[s], 3, true, &ShortIds::default());
 
         assert!(
             out.contains("line two"),
@@ -4722,7 +4735,7 @@ mod tests {
 
     #[test]
     fn format_failures_reports_cleanly_when_there_are_none() {
-        assert!(format_failures(&[], 3, false)
+        assert!(format_failures(&[], 3, false, &ShortIds::default())
             .to_lowercase()
             .contains("no failures"));
     }
