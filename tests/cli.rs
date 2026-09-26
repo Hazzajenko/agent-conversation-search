@@ -7730,9 +7730,7 @@ fn stats_counts_opencode_failures_with_other_harnesses() {
         .arg("--stats")
         .assert()
         .success()
-        .stdout(predicates::str::contains("✗ read"))
-        .stdout(predicates::str::contains("✗ Read"))
-        .stdout(predicates::str::contains("bash").not());
+        .stdout("1  ✗ Read  does not exist\n1  ✗ read  File not found: <path>\n");
     command()
         .args(["--harness", "opencode", "--failed"])
         .assert()
