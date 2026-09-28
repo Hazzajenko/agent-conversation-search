@@ -7738,3 +7738,78 @@ fn stats_counts_opencode_failures_with_other_harnesses() {
         .stdout(predicates::str::contains("✗ read  src/parser.rs"))
         .stdout(predicates::str::contains("src/lexer.rs").not());
 }
+
+// --- --file lists OpenCode Touches (issue 60) ---
+
+/// One OpenCode Session with file tool calls, a shell command that opens a
+/// file, and a `patch` part that names a file.
+fn plant_opencode_touches(store: &std::path::Path, workdir: &std::path::Path) {
+    plant_opencode_session(
+        store,
+        OpenCodeSession::new(OPENCODE_A, workdir, "Touch work"),
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_001",
+        "user",
+        OPENCODE_AUG_28,
+        &[r#"{"type":"text","text":"fix the library"}"#],
+    );
+    plant_opencode_message(
+        store,
+        OPENCODE_A,
+        "msg_002",
+        "assistant",
+        OPENCODE_AUG_28 + 1_000,
+        &[
+            r#"{"type":"tool","tool":"read","callID":"call_1","state":{"status":"completed","input":{"filePath":"src/lib.rs"},"output":"fn main() {}"}}"#,
+            r#"{"type":"tool","tool":"bash","callID":"call_2","state":{"status":"completed","input":{"command":"cat src/lib.rs"},"output":"fn main() {}"}}"#,
+            r#"{"type":"tool","tool":"edit","callID":"call_3","state":{"status":"completed","input":{"filePath":"E:/p/src/lib.rs","oldString":"a","newString":"b"},"output":""}}"#,
+            r#"{"type":"tool","tool":"write","callID":"call_4","state":{"status":"error","input":{"filePath":"src/lib.rs","content":"x"},"error":"denied"}}"#,
+            r#"{"type":"tool","tool":"patch","callID":"call_5","state":{"status":"completed","input":{"patchText":"*** Begin Patch\n*** Update File: src/other/lib.rs\n@@\n-a\n+b\n*** End Patch"},"output":""}}"#,
+            r#"{"type":"tool","tool":"apply_patch","callID":"call_6","state":{"status":"completed","input":{"filePath":"src/single/lib.rs"},"output":""}}"#,
+            r#"{"type":"patch","hash":"abc","files":["E:/p/src/snapshot/lib.rs"]}"#,
+        ],
+    );
+}
+
+#[test]
+fn file_lists_opencode_read_and_write_touches() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_touches(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["-m", "0", "--file", "lib.rs"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode · f36c0fcf · "))
+        .stdout(predicates::str::contains("[2] read read src/lib.rs"))
+        .stdout(predicates::str::contains("[2] write edit E:/p/src/lib.rs"))
+        .stdout(predicates::str::contains("[2] write write src/lib.rs"))
+        .stdout(predicates::str::contains(
+            "[2] write patch src/other/lib.rs",
+        ))
+        .stdout(predicates::str::contains(
+            "[2] write apply_patch src/single/lib.rs",
+        ))
+        .stdout(predicates::str::contains("bash").not())
+        .stdout(predicates::str::contains("snapshot").not());
+}
+
+#[test]
+fn file_written_keeps_only_opencode_write_touches() {
+    let workdir = tempdir().unwrap();
+    let opencode = tempdir().unwrap();
+    plant_opencode_touches(opencode.path(), workdir.path());
+
+    agsearch_with_opencode(workdir.path(), opencode.path())
+        .args(["-m", "0", "--file", "src/lib.rs", "--written"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("write edit E:/p/src/lib.rs"))
+        .stdout(predicates::str::contains("write write src/lib.rs"))
+        .stdout(predicates::str::contains("read read").not())
+        .stdout(predicates::str::contains("src/other/lib.rs").not());
+}

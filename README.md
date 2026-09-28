@@ -107,7 +107,7 @@ verb, so the word `search` is optional (`agsearch foo` ≡ `agsearch search foo`
 | `-m`, `--max-per-session <N>` | cap matches shown per Session (`0` = unlimited, default 3) |
 | `-l`, `--files` | print only matching file paths, for piping |
 | `--file <SELECTOR>` | list file Touches by File Selector. With a Query, search text only inside Sessions touching the file |
-| `--written` | with `--file`, show only write Touches (Edit, Write, MultiEdit, NotebookEdit, Codex apply_patch) |
+| `--written` | with `--file`, show only write Touches (Edit, Write, MultiEdit, NotebookEdit, Codex apply_patch, OpenCode edit, write, and patch) |
 | `--harness <claude\|codex\|opencode>` | search only one Harness |
 | `--include-subagents` | include Codex subagent Sessions and OpenCode child sessions and mark them in output |
 | `--include-current` | include the Current Session Family (excluded by default) |
