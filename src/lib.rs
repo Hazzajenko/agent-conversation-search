@@ -1745,10 +1745,11 @@ fn render_failure(out: &mut String, f: &Failure, full: bool) {
 
 // --- file touches: finding file reads/writes by structure -------------
 
-/// Which kind of [`Touch`] it is. `Read` comes from the `Read`
-/// tool; `Write` comes from `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`
-/// (Claude Code) and `apply_patch` (Codex). Found by structure, like a
-/// Failure, not by a Query.
+/// Which kind of [`Touch`] it is. `Read` comes from the `Read` tool
+/// (Claude Code) and the `read` tool (OpenCode). `Write` comes from `Edit`,
+/// `Write`, `MultiEdit`, and `NotebookEdit` (Claude Code), `apply_patch`
+/// (Codex), and `edit`, `write`, `patch`, and `apply_patch` (OpenCode). Found
+/// by structure, like a Failure, not by a Query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchKind {
     Read,
@@ -1774,9 +1775,10 @@ pub struct Touch {
     pub kind: TouchKind,
     /// The tool that touched the file (e.g. `Read`, `Edit`, `apply_patch`).
     pub tool: String,
-    /// The raw file path from the tool input (`file_path`, or `notebook_path`
-    /// for `NotebookEdit`; one file header in the patch body for Codex
-    /// `apply_patch`).
+    /// The raw file path from the tool input. It is `file_path` for Claude
+    /// Code, or `notebook_path` for `NotebookEdit`. It is `filePath` for
+    /// OpenCode. For `apply_patch` and OpenCode `patch` it is one file header
+    /// in the patch body.
     pub path: String,
     /// Whether the call failed (its `tool_result` was `is_error`), joined via
     /// `tool_use_id` like a Failure. A failed Touch is still listed, flagged.
@@ -1833,19 +1835,22 @@ fn split_path_segments(path: &str) -> Vec<String> {
         .collect()
 }
 
-/// The tool kind of a Claude Code `tool_use`, or `None` when the tool never
-/// produces a Touch (e.g. `Glob`, `Grep`, `Bash`).
+/// The tool kind of a Claude Code or OpenCode `tool_use`, or `None` when the
+/// tool never produces a Touch (e.g. `Glob`, `Grep`, `Bash`, `bash`).
 fn touch_kind_for_tool(name: &str) -> Option<TouchKind> {
     match name {
-        "Read" => Some(TouchKind::Read),
-        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Some(TouchKind::Write),
+        "Read" | "read" => Some(TouchKind::Read),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "edit" | "write" => {
+            Some(TouchKind::Write)
+        }
         _ => None,
     }
 }
 
-/// The file path a Claude Code Touch tool carries: `file_path`, except
+/// The file path a Touch tool carries: `file_path` for Claude Code, except
 /// `NotebookEdit` which uses `notebook_path` (falling back to `file_path`).
-/// `None` when the input carries no usable path.
+/// The OpenCode `read`, `edit`, and `write` tools use `filePath`. `None` when
+/// the input carries no usable path.
 fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> {
     let key = if name == "NotebookEdit" {
         input
@@ -1853,24 +1858,30 @@ fn touch_path_for_tool(name: &str, input: &serde_json::Value) -> Option<String> 
             .and_then(|v| v.as_str())
             .map(|_| "notebook_path")
             .unwrap_or("file_path")
+    } else if matches!(name, "read" | "edit" | "write") {
+        "filePath"
     } else {
         "file_path"
     };
     input.get(key)?.as_str().map(str::to_string)
 }
 
-/// The file paths a Codex `apply_patch` call touches: one per `Add` / `Update`
-/// / `Delete File:` header in the patch body, kind always `Write`. Paths are
-/// raw strings from the patch; matching applies the same trailing-segment rule
-/// with no cwd resolution.
-fn codex_patch_paths(input: &serde_json::Value) -> Vec<String> {
+/// The file paths named in the patch body of a Codex `apply_patch` or an
+/// OpenCode `patch` or `apply_patch` call. There is one path per `Add`,
+/// `Update`, or `Delete File:` header. Paths are raw strings from the patch.
+/// Matching applies the same trailing-segment rule with no cwd resolution.
+fn patch_paths(input: &serde_json::Value) -> Vec<String> {
     // Real Codex transcripts carry the patch as the raw `input` string
-    // (`"*** Begin Patch\n..."`); keep one back-compat `{"patch": ...}`
-    // object shape and ignore everything else so unrelated string fields
-    // can never become phantom Touches.
+    // (`"*** Begin Patch\n..."`), and OpenCode carries it as `patchText`.
+    // Keep one back-compat `{"patch": ...}` object shape and ignore
+    // everything else so unrelated string fields can never become phantom
+    // Touches.
     let candidates: Vec<&str> = match input {
         serde_json::Value::String(text) => vec![text.as_str()],
-        serde_json::Value::Object(map) => match map.get("patch").and_then(|v| v.as_str()) {
+        serde_json::Value::Object(map) => match ["patch", "patchText"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(|v| v.as_str()))
+        {
             Some(text) => vec![text],
             None => vec![],
         },
@@ -1894,12 +1905,24 @@ fn codex_patch_paths(input: &serde_json::Value) -> Vec<String> {
     paths
 }
 
-/// All `(kind, path)` Touches one `tool_use` contributes. Claude Code tools
-/// yield at most one; Codex `apply_patch` yields one per file named in the
-/// patch body; anything else (Glob, Grep, Bash, Codex shell) yields none.
+/// All `(kind, path)` Touches one `tool_use` contributes. Claude Code and
+/// OpenCode file tools yield at most one. `apply_patch` and OpenCode `patch`
+/// yield one write Touch per file named in the patch body, or the OpenCode
+/// `filePath` when the body names none. Other tools, such as Glob, Grep,
+/// Bash, Codex shell, and OpenCode bash, yield none. An OpenCode `patch` part
+/// is a snapshot diff, not a `tool_use`, so it never reaches here.
 fn touches_for_tool_use(name: &str, input: &serde_json::Value) -> Vec<(TouchKind, String)> {
-    if name == "apply_patch" {
-        return codex_patch_paths(input)
+    if name == "apply_patch" || name == "patch" {
+        let mut paths = patch_paths(input);
+        if paths.is_empty() {
+            paths.extend(
+                input
+                    .get("filePath")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            );
+        }
+        return paths
             .into_iter()
             .map(|path| (TouchKind::Write, path))
             .collect();
