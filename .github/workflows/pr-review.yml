@@ -60,4 +60,4 @@ jobs:
           use_github_token: true
           # The action turns a comment that is only /review into "Summarize this
           # thread". An empty prompt keeps the action's own prompt.
-          prompt: ${{ github.event_name == 'issue_comment' && github.event.comment.body == '/review' && 'Review this pull request' || '' }}
+          prompt: ${{ github.event_name != 'pull_request' && github.event.comment.body == '/review' && 'Review this pull request' || '' }}
