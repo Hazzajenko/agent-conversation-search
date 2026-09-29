@@ -45,6 +45,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # A comment event checks out main here. The OpenCode action then checks out
+      # the PR branch itself, so the diff below is the PR diff.
       # The agents run `git diff main...HEAD`. A pull_request checkout has no local main branch.
       - name: Create local main
         run: git show-ref --verify --quiet refs/heads/main || git branch main origin/main
@@ -58,6 +60,8 @@ jobs:
           mentions: /review
           share: false
           use_github_token: true
-          # The action turns a comment that is only /review into "Summarize this
-          # thread". An empty prompt keeps the action's own prompt.
+          # The action turns a PR conversation comment that is only /review into
+          # "Summarize this thread", so that case gets a review prompt. An empty
+          # prompt keeps the action's own prompt. A bare /review on a diff line
+          # keeps it on purpose: it reviews the commented lines. See monopoly-deal#264.
           prompt: ${{ github.event_name == 'issue_comment' && github.event.comment.body == '/review' && 'Review this pull request' || '' }}
