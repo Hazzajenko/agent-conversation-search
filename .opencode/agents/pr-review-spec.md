@@ -46,7 +46,7 @@ Answer one question: does the diff faithfully do what the originating issue asks
 
 1. Collect the issue numbers from the pull request body that you were given (`Closes #<n>`) and from `git log main..HEAD --oneline`.
 2. Read each issue with `gh issue view <n> --json title,body,labels,comments`. The acceptance criteria in the issue are the main requirements. Read the parent issue that its `## Parent` section names, for context.
-3. Read the ADRs in `docs/adr/` that the issue or the diff touches. Use the terms in `CONTEXT.md`.
+3. Read the ADRs in `docs/adr/` that the issue or the diff touches. Use the terms in `GLOSSARY.md`.
 
 If you find no issue, report "no spec available" and stop.
 

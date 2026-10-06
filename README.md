@@ -357,7 +357,7 @@ thin glue over the same binary, so install `agsearch` on your PATH first.
 
 ## Concepts
 
-The precise vocabulary this tool is built around lives in [`CONTEXT.md`](CONTEXT.md):
+The precise vocabulary this tool is built around lives in [`GLOSSARY.md`](GLOSSARY.md):
 **Harness, Project, Session, Record, Message, Query, Match, Failure, Usage, Store**.
 The reasoning behind the bigger design decisions is in
 [`docs/adr/`](docs/adr/). They cover locating Projects, the verb/handoff model,

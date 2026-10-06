@@ -1,6 +1,6 @@
 # Project is the logical working directory, derived per Harness
 
-The tool now searches two Harnesses (CONTEXT.md). Claude Code materialises
+The tool now searches two Harnesses (GLOSSARY.md). Claude Code materialises
 Projects as directories under its Store, and ADR 0005 made that directory the
 Project's identity. Codex has no per-project directories at all — its Store is a
 date-partitioned tree of rollout files, and the only project evidence is the

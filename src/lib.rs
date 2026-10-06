@@ -1047,7 +1047,7 @@ fn push_wrapped(out: &mut String, text: &str) {
     }
 }
 
-/// Render parsed [`Turn`]s as a human-readable Transcript (see CONTEXT.md):
+/// Render parsed [`Turn`]s as a human-readable Transcript (see GLOSSARY.md):
 /// `you` / Harness speaker headers, prose wrapped readably, tool calls as
 /// compact one-liners, Failures flagged loudly with `✗ … FAILED`. Thinking is
 /// collapsed to a one-line count unless `show_thinking` is set. A Session with
@@ -1181,7 +1181,7 @@ pub fn export_timestamp_now() -> String {
 }
 
 /// Render one Session as a portable Markdown Export document: provenance
-/// followed by the readable Transcript (see CONTEXT.md Export).
+/// followed by the readable Transcript (see GLOSSARY.md Export).
 ///
 /// Provenance carries the title, full Session ID, Harness, Project, source
 /// timestamp, export timestamp, and snapshot status, so the document identifies
@@ -1453,7 +1453,7 @@ fn exit_code(error_text: &str) -> Option<i64> {
     digits.parse().ok()
 }
 
-/// A Failure (see CONTEXT.md): a `tool_result` that errored, joined via its
+/// A Failure (see GLOSSARY.md): a `tool_result` that errored, joined via its
 /// `tool_use_id` back to the `tool_use` that triggered it for the tool name and
 /// command. Found by structure, not by a Query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1765,7 +1765,7 @@ impl TouchKind {
     }
 }
 
-/// A Touch (see CONTEXT.md): a tool call in a Session that reads or writes a
+/// A Touch (see GLOSSARY.md): a tool call in a Session that reads or writes a
 /// specific file. Found by structure, not by a Query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Touch {
@@ -1785,7 +1785,7 @@ pub struct Touch {
     pub failed: bool,
 }
 
-/// A File Selector (see CONTEXT.md): the path fragment a user passes to select
+/// A File Selector (see GLOSSARY.md): the path fragment a user passes to select
 /// Touches. Matches when its segments equal the trailing segments of the
 /// Touch's path, case-insensitive, with `/` and `\` treated as equal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2151,7 +2151,7 @@ pub fn format_touch_paths(results: &[SessionTouches]) -> String {
 
 // --- usage: per-call token breakdown for one Session ---------------------
 
-/// One model call's token Usage for the `usage` breakdown (see CONTEXT.md
+/// One model call's token Usage for the `usage` breakdown (see GLOSSARY.md
 /// Usage). A call is one API call: for Claude Code, all Records sharing one
 /// `message.id` collapse to one row and its Usage is counted once; for Codex,
 /// each `token_count` Record is one call. A call with no Usage still appears,
