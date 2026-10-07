@@ -6,9 +6,9 @@
 
 ## Considered and rejected
 
-- **Result index / MRU (`show 1`).** Ergonomic to type, but it forces persistent state between two separate process runs — contradicting the "Store is not a cache" principle in CONTEXT.md — and "last search" is ambiguous (which cwd?) and goes stale the moment you search again. Rejected in favour of a stateless session-id prefix.
+- **Result index / MRU (`show 1`).** Ergonomic to type, but it forces persistent state between two separate process runs — contradicting the "Store is not a cache" principle in GLOSSARY.md — and "last search" is ambiguous (which cwd?) and goes stale the moment you search again. Rejected in favour of a stateless session-id prefix.
 - **Built-in pager** (git-style auto-paging when stdout is a TTY). Beloved in git *because git ships its own pager*; on Windows/PowerShell `less` usually isn't installed and `more` is weak, so cross-platform pager spawning is fragile. Rejected — `show` stays a pure text emitter, and windowing (`--around`) keeps output small enough that `| more` is the rare escape.
-- **Overloading the positional** (one argument that is a Query *or* a session-id). Collides Query with session-id — exactly the confusion CONTEXT.md warns against — and breaks the day a Query looks like a hex prefix. Rejected: session-id is always a flag / `show` argument; Query is always the positional.
+- **Overloading the positional** (one argument that is a Query *or* a session-id). Collides Query with session-id — exactly the confusion GLOSSARY.md warns against — and breaks the day a Query looks like a hex prefix. Rejected: session-id is always a flag / `show` argument; Query is always the positional.
 
 ## Consequences
 

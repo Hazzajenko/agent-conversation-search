@@ -40,7 +40,7 @@ further Harnesses; adding one means adding one adapter, touching no projection.
   structural flag), the *adapter* owns the inference, so projections keep a
   single Failure semantics. Codex failure inference may lag search/show —
   parity is delivered incrementally.
-- Subagent-thread exclusion (CONTEXT.md, Session) is enforced at enumeration
+- Subagent-thread exclusion (GLOSSARY.md, Session) is enforced at enumeration
   time by the Codex adapter; projections never see excluded files.
 - ADR 0002's transparent `sessionId` handoff extends across Stores: lookup
   tries every Harness's enumeration; UUIDs make collisions a non-concern.

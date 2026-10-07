@@ -114,7 +114,7 @@ pub(crate) enum RecordKind {
     TokenCount,
 }
 
-/// Token Usage for one model call (see CONTEXT.md Usage). Carried on each
+/// Token Usage for one model call (see GLOSSARY.md Usage). Carried on each
 /// assistant [`Record`] (Claude Code) or [`RecordKind::TokenCount`]
 /// Record (Codex), so every projection sees the same numbers. Claude Code
 /// attaches it to each assistant Message (`message.usage` plus `message.model`
