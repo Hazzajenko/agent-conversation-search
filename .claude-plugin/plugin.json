@@ -8,5 +8,5 @@
   },
   "license": "MIT",
   "keywords": ["search", "conversation-history", "claude-code", "codex", "recall"],
-  "skills": ["./skills/agsearch"]
+  "skills": ["./skills/agsearch", "./skills/retro-sessions"]
 }

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Retro Sessions"
+  short_description: "Run a retrospective across many past coding agent sessions with agsearch."
+policy:
+  allow_implicit_invocation: false

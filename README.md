@@ -355,6 +355,11 @@ This repo also ships a Claude Code skill in `skills/agsearch`, declared in
 for example "did we ever discuss X?" or "find the session where we set up Y". The skill is
 thin glue over the same binary, so install `agsearch` on your PATH first.
 
+The plugin also ships `/retro-sessions` in `skills/retro-sessions`. It reads
+past sessions through `agsearch` and suggests repo changes that answer a focus
+you give it, for example `/retro-sessions read my last 10 sessions and find
+where agents took too long to find information`. Only you can start it.
+
 ## Concepts
 
 The precise vocabulary this tool is built around lives in [`CONTEXT.md`](CONTEXT.md):
