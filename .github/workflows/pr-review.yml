@@ -50,7 +50,7 @@ jobs:
       # The agents run `git diff main...HEAD`. A pull_request checkout has no local main branch.
       - name: Create local main
         run: git show-ref --verify --quiet refs/heads/main || git branch main origin/main
-      - uses: anomalyco/opencode/github@v1.18.32
+      - uses: anomalyco/opencode/github@v2.0.22
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
