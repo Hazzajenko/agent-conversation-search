@@ -1,6 +1,6 @@
 # One parser for the on-disk format; projections own drop-policy
 
-The on-disk transcript format — the tool's whole domain (CONTEXT.md) — was
+The on-disk transcript format — the tool's whole domain (GLOSSARY.md) — was
 parsed independently by five functions: `search_one_session`, `session_info`,
 `failures_in_one_session`, `parse_transcript`, and `segments_from_value`. Each
 re-derived where text lives in the JSON, three re-accumulated the same Session
@@ -50,5 +50,5 @@ decides for itself what to drop. Turn numbering lives only in `read`, so ADR
   Accepted: transcript files are small and `--failed` / `show` already collect a
   per-file vector; a streaming projection can be reintroduced for `search` alone
   if profiling ever demands it.
-- "Block" is now a named domain type (recorded in CONTEXT.md); the previously
+- "Block" is now a named domain type (recorded in GLOSSARY.md); the previously
   `pub`-but-test-only `parse_line` is removed.

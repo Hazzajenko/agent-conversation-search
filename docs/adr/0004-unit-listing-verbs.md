@@ -15,5 +15,5 @@ ADR 0002 established the action-verb model — `search` (find a Session) and `sh
 ## Consequences
 
 - The tool now mixes action-verbs (`search`, `show`) with noun-verbs (`sessions`, `projects`). This is a deliberate, documented inconsistency: actions are verbs, unit-enumerations are the plural noun. This ADR exists so that mix doesn't read as an accident.
-- `sessions` introduces **no new domain term** — it enumerates the existing **Session**, so CONTEXT.md is unchanged.
+- `sessions` introduces **no new domain term** — it enumerates the existing **Session**, so GLOSSARY.md is unchanged.
 - `projects` is deferred. It inherits this verb model, but carries an unresolved sub-design: per ADR 0001 a single logical Project can map to several directories (drive-letter case wobble, lossy encoding collisions), so a naive listing double-counts. Its de-duplication rule is its own triage question.

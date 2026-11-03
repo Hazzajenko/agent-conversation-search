@@ -38,7 +38,7 @@ Answer one question: does the diff conform to this repo's documented coding stan
 Read these before you read the diff:
 
 - `CLAUDE.md`.
-- `CONTEXT.md`. Code, tests, and copy must use its terms. Flag a synonym that replaces a glossary term.
+- `GLOSSARY.md`. Code, tests, and copy must use its terms. Flag a synonym that replaces a glossary term.
 - `docs/adr/`. Flag code that contradicts an accepted ADR.
 
 Skip anything that tooling enforces: formatting (`cargo fmt`), lint rules (`cargo clippy -D warnings`), and compile errors.
